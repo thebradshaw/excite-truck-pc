@@ -1,0 +1,151 @@
+diff --git a/runtime/include/guest_abi/guest_region.h b/runtime/include/guest_abi/guest_region.h
+index 1836717..52b28e1 100644
+--- a/runtime/include/guest_abi/guest_region.h
++++ b/runtime/include/guest_abi/guest_region.h
+@@ -19,8 +19,11 @@ enum class Id : uint8_t {
+     Pal = 0,
+     NtscU = 1,
+     NtscJ = 2,
++    // Excite Truck (REXE01): another game on the same Wii SDK. Addresses with no counterpart
++    // there are 0, and registrations at 0 are skipped.
++    ExciteTruck = 3,
+ };
+-inline constexpr size_t kCount = 3;
++inline constexpr size_t kCount = 4;
+ 
+ struct Row {
+     uint32_t address[kCount];
+@@ -92,7 +95,8 @@ constexpr Mapping Map(uint32_t pal, Id region) {
+ constexpr Row RowOf(uint32_t pal) {
+     const Mapping ntscU = Map(pal, Id::NtscU);
+     const Mapping ntscJ = Map(pal, Id::NtscJ);
+-    return ntscU.found && ntscJ.found ? Row{{pal, ntscU.address, ntscJ.address}}
++    const Mapping excite = Map(pal, Id::ExciteTruck);
++    return ntscU.found && ntscJ.found ? Row{{pal, ntscU.address, ntscJ.address, excite.found ? excite.address : 0u}}
+                                       : throw "PAL address outside guest_abi/guest_versions.inc";
+ }
+ 
+@@ -108,7 +112,7 @@ inline Id Current() noexcept { return static_cast<Id>(kMkwGuestRegion); }
+ template <uint32_t Pal>
+ inline uint32_t Address() noexcept {
+     constexpr Row row = RowOf(Pal);
+-    if constexpr (row.address[1] == Pal && row.address[2] == Pal) {
++    if constexpr (row.address[1] == Pal && row.address[2] == Pal && row.address[3] == Pal) {
+         return Pal;
+     } else {
+         return row.In(Current());
+@@ -119,7 +123,8 @@ inline uint32_t Address() noexcept {
+ template <uint32_t Pal>
+ inline bool Is(uint32_t target) noexcept {
+     constexpr Row row = RowOf(Pal);
+-    return (target == row.address[0] || target == row.address[1] || target == row.address[2]) &&
++    return (target == row.address[0] || target == row.address[1] || target == row.address[2] ||
++            (row.address[3] != 0 && target == row.address[3])) &&
+            target == row.In(Current());
+ }
+ 
+@@ -129,6 +134,9 @@ inline bool Is(uint32_t target) noexcept {
+ inline uint32_t Translate(uint32_t pal) noexcept {
+     const Mapping mapping = Map(pal, Current());
+     if (!mapping.found) {
++        if (Current() == Id::ExciteTruck) {
++            return 0; // not in this game; the registration is skipped
++        }
+         FatalUnknownAddress(pal);
+     }
+     return mapping.address;
+@@ -152,6 +160,7 @@ inline constexpr Facts kFacts[kCount] = {
+     {"RMCP01", 'P', 0x524D4350u, 1u, 0x80399180u, "EUR", "RVL-001(EUR)", "LEH", "PAL", "EU"},
+     {"RMCE01", 'E', 0x524D4345u, 0u, 0x80394E00u, "USA", "RVL-001(USA)", "LU", "NTSC", "US"},
+     {"RMCJ01", 'J', 0x524D434Au, 0u, 0x80398B00u, "JPN", "RVL-001(JPN)", "LJ", "NTSC", "JP"},
++    {"REXE01", 'E', 0x52455845u, 0u, 0x80575240u, "USA", "RVL-001(USA)", "LU", "NTSC", "US"},
+ };
+ 
+ inline const Facts& CurrentFacts() noexcept { return kFacts[static_cast<size_t>(Current())]; }
+@@ -161,6 +170,10 @@ inline const Facts& CurrentFacts() noexcept { return kFacts[static_cast<size_t>(
+ #define MKW_GADDR(pal) (::GuestRegion::Address<0x##pal##u>())
+ 
+ #if defined(MKW_TRANSLATED_GUEST_REGION)
++// An address with no counterpart in the region (0) becomes the PAL address with the low bit
++// set: never a real function, and still unique, so per-address specializations don't collide.
+ #define MKW_GADDR_CT(pal) \
+-    (::GuestRegion::RowOf(0x##pal##u).In(static_cast<::GuestRegion::Id>(MKW_TRANSLATED_GUEST_REGION)))
++    (::GuestRegion::RowOf(0x##pal##u).In(static_cast<::GuestRegion::Id>(MKW_TRANSLATED_GUEST_REGION)) \
++         ? ::GuestRegion::RowOf(0x##pal##u).In(static_cast<::GuestRegion::Id>(MKW_TRANSLATED_GUEST_REGION)) \
++         : (0x##pal##u | 1u))
+ #endif
+diff --git a/runtime/src/abi_bridge.cpp b/runtime/src/abi_bridge.cpp
+index e339244..f4bd5bc 100644
+--- a/runtime/src/abi_bridge.cpp
++++ b/runtime/src/abi_bridge.cpp
+@@ -332,6 +332,10 @@ void RegisterBulkTranslatedFunctions(const BulkTranslatedFunctionRecord* records
+ }
+ 
+ void TranslatedFunctionRegistry::Register(TranslatedFunctionInfo info) {
++    // Address 0 means the hooked function has no counterpart in this game (see guest_region.h).
++    if (info.address == 0) {
++        return;
++    }
+     std::lock_guard<std::mutex> lock(RegistryMutex());
+     if (RegistryFrozen().load(std::memory_order_acquire)) {
+         RT_LOG(RT_TAG_RUNTIME) << "ERROR: Attempted to register function after registry was finalized: 0x"
+diff --git a/translator/src/Translator.Core/GuestAddressTable.cs b/translator/src/Translator.Core/GuestAddressTable.cs
+index 871ee97..4e10bfa 100644
+--- a/translator/src/Translator.Core/GuestAddressTable.cs
++++ b/translator/src/Translator.Core/GuestAddressTable.cs
+@@ -8,6 +8,9 @@ public enum GuestRegion
+     Pal = 0,
+     NtscU = 1,
+     NtscJ = 2,
++    // Excite Truck (REXE01): a different game built on the same Wii SDK. Only the SDK functions
++    // and data that have a counterpart get an address; everything else maps to 0 (absent).
++    ExciteTruck = 3,
+ }
+ 
+ public static class GuestRegions
+@@ -21,6 +24,7 @@ public static class GuestRegions
+         "RMCE01" => GuestRegion.NtscU,
+         "RMCJ01" => GuestRegion.NtscJ,
+         "RMCP01" => GuestRegion.Pal,
++        "REXE01" => GuestRegion.ExciteTruck,
+         { } id when id.StartsWith("RMC", StringComparison.Ordinal) =>
+             throw new InvalidDataException($"Mario Kart Wii release '{gameId}' is not supported."),
+         _ => GuestRegion.Pal,
+@@ -103,6 +107,8 @@ public sealed partial class GuestAddressTable
+             if (lo > 0 && pal <= ranges[lo - 1].Last)
+                 return (uint)(pal + (long)ranges[lo - 1].Delta);
+         }
++        if (region == GuestRegion.ExciteTruck)
++            return 0; // no counterpart in this game
+         throw new InvalidDataException($"PAL address 0x{pal:X8} has no {region} address in {SourcePath}.");
+     }
+ 
+diff --git a/translator/src/Translator.Core/RuntimeNativeIndex.cs b/translator/src/Translator.Core/RuntimeNativeIndex.cs
+index 74c6fee..2985de4 100644
+--- a/translator/src/Translator.Core/RuntimeNativeIndex.cs
++++ b/translator/src/Translator.Core/RuntimeNativeIndex.cs
+@@ -49,16 +49,20 @@ public sealed record RuntimeNativeIndex(
+     /// keyed by <paramref name="region"/>'s addresses. Every address must have a counterpart in that region.
+     /// </summary>
+     public RuntimeNativeIndex ForRegion(GuestAddressTable table, GuestRegion region) => new(
+-        Registrations.Select(entry => entry with { Address = table.Map(entry.Address, region) }).ToArray(),
+-        VoidStubAbis.Select(entry => entry with { Address = table.Map(entry.Address, region) }).ToArray(),
++        // Entries with no counterpart in the region (address 0) are dropped.
++        Registrations.Select(entry => entry with { Address = table.Map(entry.Address, region) })
++            .Where(static entry => entry.Address != 0).ToArray(),
++        VoidStubAbis.Select(entry => entry with { Address = table.Map(entry.Address, region) })
++            .Where(static entry => entry.Address != 0).ToArray(),
+         Effects.Select(entry => entry with
+         {
+             Address = table.Map(entry.Address, region),
+             Contract = entry.Contract with
+             {
+-                DirectCallTargets = entry.Contract.DirectCallTargets.Select(target => table.Map(target, region)).ToArray()
++                DirectCallTargets = entry.Contract.DirectCallTargets.Select(target => table.Map(target, region))
++                    .Where(static target => target != 0).ToArray()
+             }
+-        }).ToArray());
++        }).Where(static entry => entry.Address != 0).ToArray());
+ }
+ 
+ public static class RuntimeNativeIndexBuilder

@@ -1,0 +1,31 @@
+# Hand-checked Excite Truck addresses for SDK functions the aligner misses or gets unsure about.
+# Format: <MKWii addr> <ET addr|none> <name>    ("none" = not in Excite Truck / rejected)
+# PPCArch.o (exact instruction patterns)
+8012e594 80033f24 PPCMtdec
+8012e5a4 80033f34 PPCHalt
+8012e574 80033f04 PPCMfhid0
+8012e57c 80033f0c PPCMthid0
+8012e59c 80033f2c PPCSync
+8012e5b8 80033f48 PPCMtmmcr0
+8012e5c0 80033f50 PPCMtmmcr1
+8012e5c8 80033f58 PPCMtpmc1
+8012e5d0 80033f60 PPCMtpmc2
+8012e5d8 80033f68 PPCMtpmc3
+8012e5e0 80033f70 PPCMtpmc4
+8012e638 80033fc8 PPCMthid2
+8012e640 80033fd0 PPCMfwpar
+8012e64c 80033fdc PPCMtwpar
+# dsp.o: same order and sizes as MKWii
+8015d3fc 8003414c DSPCheckMailToDSP
+8015d40c 8003415c DSPCheckMailFromDSP
+8015d41c 8003416c DSPReadMailFromDSP
+8015d430 80034180 DSPSendMailToDSP
+8015d444 80034194 DSPInit
+8015d504 80034254 DSPCheckInit
+8015d50c 8003425c DSPAddTask
+8015d57c 8003430c DSPAssertTask
+# Rejected near-size matches (checked by disassembly)
+80124084 none AIGetDMALength
+8016e2b8 none GXGetVtxAttrFmtv
+8016f414 none __GXSetGenMode
+801a197c none LCQueueLength
