@@ -1,0 +1,3 @@
+[submodule "third_party/wiicompiled"]
+	path = third_party/wiicompiled
+	url = https://github.com/patchzyy/Wiicompiled.git

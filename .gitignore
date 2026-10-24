@@ -1,0 +1,12 @@
+# Game data never goes in this repo. Players supply their own disc.
+Assets/
+*.iso
+*.wbfs
+*.rvz
+*.wia
+*.gcz
+*.ciso
+*.zip
+*.zip.*
+# Generated from the game's code: rebuilt locally, never committed
+build/

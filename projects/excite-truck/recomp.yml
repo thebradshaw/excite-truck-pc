@@ -1,0 +1,34 @@
+schema_version: 1
+workspace_root: ../..
+
+project:
+  id: excite-truck-rexe01
+  display_name: Excite Truck USA
+
+memory:
+  base: 0x80000000
+  size: 0x01800000
+  sda_base: 0x80560900
+  sda2_base: 0x80568100
+
+inputs:
+  dol:
+    path: Assets/main.dol
+    sha256: 573b5dcf48ebe0e2fba11c5bbcd88cb149696924fea7ed0f98c78986671e76b6
+
+translation:
+  entry_points:
+    - 0x80004170
+  function_map:
+    path: projects/excite-truck/MAP.txt
+  allow_unsupported_instructions: true
+
+runtime:
+  native_abi_directories: []
+
+output:
+  root: build/excite-truck
+  functions: functions
+  runtime_config: RuntimeConfig.h
+  data_initializer: data_sections_init.cpp
+  base_manifest: base/base_manifest.json
