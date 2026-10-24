@@ -2,7 +2,7 @@
 # Anchors: SDK functions named in both (MKWii MAP.txt and Dolphin signature matches on ET).
 # Between anchors, align the two function-size sequences with dynamic programming.
 import sys,re,os,bisect,json
-W=os.environ.get('ET_WORK','work')  # scratch dir, see docs/porting-notes.md
+W='/home/claude/work'
 def norm(n):
     n=n.split('\t')[0].split('(')[0].strip()
     m=re.match(r'^(__)?(GX|OS|VI|DVD|NAND|WPAD|KPAD|PAD|SC|SI|EXI|IOS|AI|AX|DSP|IPC|MTX|PSMTX|ISFS|VEC|PSVEC|TPL|CARD|DB)::(.+)$',n)
@@ -13,7 +13,9 @@ for l in open(W+'/wiicompiled/projects/mkwii/MAP.txt'):
     p=l.split(None,1)
     if len(p)==2: mk[int(p[0],16)]=norm(p[1])
 mka=sorted(a for a,n in mk.items() if not re.search(r'_(switch|caseD_[0-9A-Fa-f]+|default)$',n))
-et=sorted(int(f[5:13],16) for f in os.listdir(W+'/wiicompiled/build/excite-truck/functions'))
+# ET function starts: the translator's metadata (entry points it emitted)
+_meta=json.load(open(os.environ.get('ET_META',W+'/wc-et/generated/base_translation_output.json')))
+et=sorted({f['entryPoint'] for f in _meta['functions'] if not f.get('interiorToOtherTranslation')})
 etn={}
 for l in open(W+'/sdk_names.txt'):
     a,n=l.split(' ',1); etn[int(a,16)]=norm(n)
@@ -141,6 +143,19 @@ cnt=_C((v[0] if isinstance(v,tuple) else v) for v in mapping.values())
 for k in list(mapping):
     v=mapping[k]; e=v[0] if isinstance(v,tuple) else v
     if cnt[e]>1: del mapping[k]
+# Order check: a pair must sit between its mapped neighbours (same library, same order).
+def _e(v): return v[0] if isinstance(v,tuple) else v
+for _ in range(3):
+    ks=sorted(mapping); bad=[]
+    for i,k in enumerate(ks):
+        e=_e(mapping[k])
+        lo=ks[i-1] if i>0 else None; hi=ks[i+1] if i+1<len(ks) else None
+        ok=0;chk=0
+        if lo is not None and k-lo<0x400: chk+=1; ok+= _e(mapping[lo])<e and e-_e(mapping[lo])<0x2000
+        if hi is not None and hi-k<0x400: chk+=1; ok+= e<_e(mapping[hi]) and _e(mapping[hi])-e<0x2000
+        if chk==2 and ok==0: bad.append(k)
+    for k in bad: del mapping[k]
+    print('order check dropped',len(bad),file=sys.stderr)
 for l in open(os.path.dirname(os.path.abspath(__file__))+'/manual_map.txt'):
     if l.startswith('#') or not l.strip(): continue
     a,b,_=l.split(None,2); a=int(a,16)

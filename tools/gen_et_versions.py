@@ -17,6 +17,18 @@ for k,v in mapping.items():
     a=int(k,16); e,exact=v if isinstance(v,list) else (v,True)
     last=ends.get(a,a+3) if exact else a+3
     rows.append((a,last,e-a))
+# Data globals: one-byte ranges from tools/datamap.py output and tools/manual_data.txt.
+import os
+here=os.path.dirname(os.path.abspath(__file__))
+data={}
+if len(sys.argv)>3 and os.path.exists(sys.argv[3]):
+    for l in open(sys.argv[3]):
+        p=l.split()
+        if len(p)>=2: data[int(p[0],16)]=int(p[1],16)
+for l in open(os.path.join(here,'manual_data.txt')):
+    if l.startswith('#') or not l.strip(): continue
+    p=l.split(); data[int(p[0],16)]=int(p[1],16)
+for a,e in data.items(): rows.append((a,a,e-a))
 rows.sort()
 out=[]; prev=-1
 for a,last,d in rows:

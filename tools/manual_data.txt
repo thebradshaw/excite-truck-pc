@@ -1,0 +1,3 @@
+# Hand-checked Excite Truck addresses for data globals.  <MKWii PAL> <ET> <name / evidence>
+803867EC 8055DCAC ipcBufferLo: IPCGetBufferLo 0x8009d2e8 lwz r3,-0x2c54(r13)
+803867F0 8055DCB0 ipcBufferHi: IPCGetBufferHi 0x8009d2e0 lwz r3,-0x2c50(r13)

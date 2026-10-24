@@ -29,3 +29,12 @@
 8016e2b8 none GXGetVtxAttrFmtv
 8016f414 none __GXSetGenMode
 801a197c none LCQueueLength
+# ipcclt.o helpers (found next to IPCCltInit; same sizes as MKWii)
+80192f7c 8009d274 IPCInit
+80193010 8009d2c0 IPCReadReg
+80193020 8009d2d0 IPCWriteReg
+80193030 8009d2e0 IPCGetBufferHi
+80193038 8009d2e8 IPCGetBufferLo
+80193040 8009d2f0 IPCSetBufferLo
+# DVD low-level: ClearCoverInterrupt follows MaskCoverInterrupt, as in MKWii
+80166964 8003bcdc DVDLowClearCoverInterrupt

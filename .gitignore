@@ -10,3 +10,5 @@ Assets/
 *.zip.*
 # Generated from the game's code: rebuilt locally, never committed
 build/
+__pycache__/
+*.pyc

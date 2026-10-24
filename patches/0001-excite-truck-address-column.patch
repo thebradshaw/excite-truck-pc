@@ -1,5 +1,5 @@
 diff --git a/runtime/include/guest_abi/guest_region.h b/runtime/include/guest_abi/guest_region.h
-index 1836717..52b28e1 100644
+index 1836717..f4daa52 100644
 --- a/runtime/include/guest_abi/guest_region.h
 +++ b/runtime/include/guest_abi/guest_region.h
 @@ -19,8 +19,11 @@ enum class Id : uint8_t {
@@ -54,15 +54,21 @@ index 1836717..52b28e1 100644
          FatalUnknownAddress(pal);
      }
      return mapping.address;
-@@ -152,6 +160,7 @@ inline constexpr Facts kFacts[kCount] = {
+@@ -152,8 +160,13 @@ inline constexpr Facts kFacts[kCount] = {
      {"RMCP01", 'P', 0x524D4350u, 1u, 0x80399180u, "EUR", "RVL-001(EUR)", "LEH", "PAL", "EU"},
      {"RMCE01", 'E', 0x524D4345u, 0u, 0x80394E00u, "USA", "RVL-001(USA)", "LU", "NTSC", "US"},
      {"RMCJ01", 'J', 0x524D434Au, 0u, 0x80398B00u, "JPN", "RVL-001(JPN)", "LJ", "NTSC", "JP"},
 +    {"REXE01", 'E', 0x52455845u, 0u, 0x80575240u, "USA", "RVL-001(USA)", "LU", "NTSC", "US"},
  };
  
++// True for Mario Kart Wii builds; false when the runtime hosts another game (Excite Truck).
++// Guards Mario Kart-only subsystems (EGG, races, online, Kamek).
++inline bool IsMarioKart() noexcept { return Current() != Id::ExciteTruck; }
++
  inline const Facts& CurrentFacts() noexcept { return kFacts[static_cast<size_t>(Current())]; }
-@@ -161,6 +170,10 @@ inline const Facts& CurrentFacts() noexcept { return kFacts[static_cast<size_t>(
+ 
+ } // namespace GuestRegion
+@@ -161,6 +174,10 @@ inline const Facts& CurrentFacts() noexcept { return kFacts[static_cast<size_t>(
  #define MKW_GADDR(pal) (::GuestRegion::Address<0x##pal##u>())
  
  #if defined(MKW_TRANSLATED_GUEST_REGION)
@@ -89,6 +95,75 @@ index e339244..f4bd5bc 100644
      std::lock_guard<std::mutex> lock(RegistryMutex());
      if (RegistryFrozen().load(std::memory_order_acquire)) {
          RT_LOG(RT_TAG_RUNTIME) << "ERROR: Attempted to register function after registry was finalized: 0x"
+diff --git a/runtime/src/dynamic_aspect.cpp b/runtime/src/dynamic_aspect.cpp
+index 2646e0f..53f892e 100644
+--- a/runtime/src/dynamic_aspect.cpp
++++ b/runtime/src/dynamic_aspect.cpp
+@@ -1,3 +1,4 @@
++#include "guest_abi/guest_region.h"
+ #include "hle_stubs.h"
+ #include "memory.h"
+ 
+@@ -129,6 +130,9 @@ void WriteEggScreenRecord(uint32_t recordAddr, uint32_t width) {
+ }
+ 
+ void ApplyEggScreenRecords(uint32_t surfaceWidth, uint32_t surfaceHeight) {
++    if (!::GuestRegion::IsMarioKart()) {
++        return; // EGG screen records are Mario Kart Wii data
++    }
+     using namespace MkwDynamicAspect;
+     const uint32_t width43 =
+         g_widescreenConfigured ? EggRecordWidth(kEggRecordWidth43, surfaceWidth, surfaceHeight)
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index 6d0dd6b..fdd4faa 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -863,10 +863,14 @@ void RuntimeAuroraLogCallback(AuroraLogLevel level, const char* module,
+ }
+ 
+ const TranslatedFunctionInfo* ResolveEntry() {
+-    const auto* entry = TranslatedFunctionRegistry::FindByAddressPtr(kDefaultEntryAddress);
++    // Excite Truck (REXE01) starts at __start = 0x80004170.
++    const uint32_t entryAddress = ::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck
++                                      ? 0x80004170u
++                                      : kDefaultEntryAddress;
++    const auto* entry = TranslatedFunctionRegistry::FindByAddressPtr(entryAddress);
+     if (!entry) {
+         std::ostringstream oss;
+-        oss << "No translated function registered at address 0x" << std::hex << kDefaultEntryAddress;
++        oss << "No translated function registered at address 0x" << std::hex << entryAddress;
+         throw std::runtime_error(oss.str());
+     }
+     return entry;
+diff --git a/runtime/src/system_bridge.cpp b/runtime/src/system_bridge.cpp
+index 99f2abd..ad826d4 100644
+--- a/runtime/src/system_bridge.cpp
++++ b/runtime/src/system_bridge.cpp
+@@ -334,8 +334,10 @@ void SystemBridge::Initialize() {
+     // These set up vtables and other critical infrastructure
+     RT_LOG(RT_TAG_RUNTIME) << "Running static constructors for main DOL..." << std::endl;
+ 
+-    const uint32_t dolCtorStart = MKW_GADDR(80244DE0);
+-    const uint32_t dolCtorEnd = MKW_GADDR(80244EA0);
++    const bool exciteTruck = ::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck;
++    // Excite Truck: .ctors section of REXE01 main.dol (0x802ED060, 0x5E0 bytes).
++    const uint32_t dolCtorStart = exciteTruck ? 0x802ED060u : MKW_GADDR(80244DE0);
++    const uint32_t dolCtorEnd = exciteTruck ? 0x802ED640u : MKW_GADDR(80244EA0);
+ 
+     int dolCount = 0;
+     for (uint32_t addr = dolCtorStart; addr < dolCtorEnd; addr += 4) {
+@@ -374,8 +376,9 @@ void SystemBridge::Initialize() {
+     RT_LOG(RT_TAG_RUNTIME) << "Running static constructors for StaticR.rel..." << std::endl;
+ 
+     // Define range for StaticR.rel .ctors
+-    const uint32_t ctorStart = MKW_GADDR(8088f400);
+-    const uint32_t ctorEnd = MKW_GADDR(8088f704);
++    // Excite Truck has no StaticR.rel.
++    const uint32_t ctorStart = exciteTruck ? 0u : MKW_GADDR(8088f400);
++    const uint32_t ctorEnd = exciteTruck ? 0u : MKW_GADDR(8088f704);
+ 
+     int count = 0;
+     for (uint32_t addr = ctorStart; addr < ctorEnd; addr += 4) {
 diff --git a/translator/src/Translator.Core/GuestAddressTable.cs b/translator/src/Translator.Core/GuestAddressTable.cs
 index 871ee97..4e10bfa 100644
 --- a/translator/src/Translator.Core/GuestAddressTable.cs
