@@ -41,7 +41,12 @@ one works on Windows). The scripts check the disc, fetch the pinned WiiCompiled 
 repo's patches, translate the game's code to C++, compile it and put the game in `ExciteTruck/`.
 The first build takes a while (mostly compiling); nothing from the disc ends up in this repo.
 
-**Windows 10/11** (needs [Git for Windows](https://git-scm.com/download/win), for example
+**Windows 10/11, easiest:** drag your disc image onto `ExciteTruckSetup.exe`. It needs nothing
+installed, builds the game into `%LOCALAPPDATA%\Programs\ExciteTruck` and puts "Excite Truck" and
+"Excite Truck Music" shortcuts on the desktop. Windows may warn that the exe is unrecognised (it
+isn't signed): click More info, then Run anyway. `scripts/make-setup.sh` builds the exe.
+
+**Windows 10/11, from a checkout** (needs [Git for Windows](https://git-scm.com/download/win), for example
 `winget install Git.Git`; the compiler, CMake, Ninja, .NET and libraries are downloaded with
 pinned checksums):
 

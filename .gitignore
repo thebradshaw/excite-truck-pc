@@ -14,3 +14,6 @@ __pycache__/
 *.pyc
 # Output of the one-step build scripts
 /ExciteTruck/
+/setup/bin/
+/setup/obj/
+/setup/payload.zip

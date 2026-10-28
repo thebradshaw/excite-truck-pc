@@ -13,7 +13,9 @@ extracted with nodtool (the one holding sys\ and files\). The result is a self-c
 ExciteTruck\ in the repository, with ExciteTruck.exe, its settings (ExciteTruck\UserData) and your
 Music folder.
 
-Needs Git for Windows (winget install Git.Git). Everything else (compiler, CMake, Ninja, .NET,
+From a repository checkout this needs Git for Windows (winget install Git.Git). The setup exe
+(ExciteTruckSetup.exe) runs this script with a payload folder beside it and needs nothing
+installed. Everything else (compiler, CMake, Ninja, .NET,
 nodtool, libraries) is downloaded into the work folder with pinned checksums. About 20 GB of
 free space during the build; the finished game is much smaller.
 #>
@@ -26,7 +28,9 @@ param(
     # avoids Windows' path-length limit; it can be deleted after the build).
     [string]$Work,
     # Parallel compile jobs. Default: one per core, capped by memory.
-    [int]$Jobs = 0
+    [int]$Jobs = 0,
+    # Put "Excite Truck" shortcuts on the desktop.
+    [switch]$Shortcut
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,6 +46,10 @@ $NodtoolSha256 = 'fb3203a68a59fa19ba9de0aa2f8c339396b6e4c5f9274d0858d302074cdedf
 $DolSha256 = '573b5dcf48ebe0e2fba11c5bbcd88cb149696924fea7ed0f98c78986671e76b6'
 
 $Repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+# Setup mode: ExciteTruckSetup.exe ships the patched files (payload\overlay) instead of a checkout.
+$Payload = Join-Path $PSScriptRoot 'payload'
+$SetupMode = Test-Path -LiteralPath (Join-Path $Payload 'overlay') -PathType Container
+$SeedCache = if ($SetupMode) { Join-Path $Payload 'initial_pipeline_cache.db' } else { Join-Path $Repo 'assets\shaders\initial_pipeline_cache.db' }
 if (-not $Out) { $Out = Join-Path $Repo 'ExciteTruck' }
 if (-not $Work) { $Work = Join-Path $env:SystemDrive 'ETBuild' }
 $Out = [IO.Path]::GetFullPath($Out)
@@ -71,7 +79,7 @@ $downloads = Join-Path $Work 'downloads'
 
 Step 'Checking tools'
 $git = Get-Command git -ErrorAction SilentlyContinue
-if (-not $git) { Fail 'Git is not installed. Install it with: winget install Git.Git   (then open a new PowerShell window)' }
+if (-not $SetupMode -and -not $git) { Fail 'Git is not installed. Install it with: winget install Git.Git   (then open a new PowerShell window)' }
 if (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\vcruntime140.dll'))) {
     Fail 'The Microsoft Visual C++ runtime is missing. Install it with: winget install Microsoft.VCRedist.2015+.x64'
 }
@@ -154,12 +162,48 @@ if ((Sha256 $dol) -ne $DolSha256) {
 
 # --- WiiCompiled, patched for Excite Truck -----------------------------------------------
 $ws = Join-Path $Work 'wiicompiled'
+$stampFile = Join-Path $ws '.et-patched'
+$current = if (Test-Path -LiteralPath $stampFile) { [IO.File]::ReadAllText($stampFile) } else { '' }
+if ($SetupMode) {
+    $stamp = [IO.File]::ReadAllText((Join-Path $Payload 'stamp.txt')).Trim()
+    if ($current -ne $stamp) {
+        Step 'Downloading WiiCompiled (the recompiler and runtime this port is built on)'
+        [IO.Directory]::CreateDirectory($ws) | Out-Null
+        # Fresh sources; keep the build, translation output and downloaded build tools.
+        Get-ChildItem -LiteralPath $ws -Force |
+            Where-Object { $_.Name -notin 'build', 'generated', 'Assets', 'Launcher' } |
+            Remove-Item -Recurse -Force
+        $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+        $sources = @(
+            @{ Uri = "https://github.com/patchzyy/Wiicompiled/archive/$WiiCompiledCommit.zip"; Target = $ws },
+            @{ Uri = "https://github.com/patchzyy/aurora-wiicompiled/archive/$AuroraCommit.zip"; Target = (Join-Path $ws 'aurora-main') }
+        )
+        foreach ($source in $sources) {
+            $archive = Join-Path $downloads ([IO.Path]::GetFileName($source.Uri))
+            if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+                Invoke-WebRequest -UseBasicParsing -Uri $source.Uri -OutFile "$archive.partial"
+                Move-Item -LiteralPath "$archive.partial" -Destination $archive -Force
+            }
+            $extract = Join-Path $Work 'src-extract'
+            if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+            [IO.Directory]::CreateDirectory($extract) | Out-Null
+            & $tar -xf $archive -C $extract
+            if ($LASTEXITCODE -ne 0) { Fail "could not unpack $archive" }
+            $root = Get-ChildItem -LiteralPath $extract -Directory | Select-Object -First 1
+            & robocopy $root.FullName $source.Target /E /NFL /NDL /NJH /NJS /NP | Out-Null
+            if ($LASTEXITCODE -ge 8) { Fail "could not copy $($root.Name)" }
+            Remove-Item -LiteralPath $extract -Recurse -Force
+        }
+        Step 'Applying the Excite Truck changes'
+        & robocopy (Join-Path $Payload 'overlay') $ws /E /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -ge 8) { Fail 'could not copy the Excite Truck changes' }
+        [IO.File]::WriteAllText($stampFile, $stamp)
+    }
+} else {
 $stampInputs = @(Get-ChildItem -LiteralPath (Join-Path $Repo 'patches') -Filter '*.patch' -File) +
     @(Get-Item -LiteralPath (Join-Path $Repo 'tools\sdk_map\et_versions.inc')) +
     @(Get-ChildItem -LiteralPath (Join-Path $Repo 'projects\excite-truck') -File)
 $stamp = ($stampInputs | Sort-Object FullName | ForEach-Object { Sha256 $_.FullName }) -join ','
-$stampFile = Join-Path $ws '.et-patched'
-$current = if (Test-Path -LiteralPath $stampFile) { [IO.File]::ReadAllText($stampFile) } else { '' }
 if ($current -ne $stamp) {
     Step 'Fetching WiiCompiled (the recompiler and runtime this port is built on)'
     if (-not (Test-Path -LiteralPath (Join-Path $ws '.git'))) {
@@ -186,6 +230,7 @@ if ($current -ne $stamp) {
     [IO.Directory]::CreateDirectory($project) | Out-Null
     Copy-Item -Path (Join-Path $Repo 'projects\excite-truck\*') -Destination $project -Force
     [IO.File]::WriteAllText($stampFile, $stamp)
+}
 }
 
 # --- Build tools and libraries (WiiCompiled's own pinned set) ----------------------------
@@ -236,7 +281,7 @@ try {
         -ResourceCompiler (Join-Path $bin 'x86_64-w64-mingw32-windres.exe') `
         -DependenciesDirectory $deps `
         -AdditionalArguments @(
-            "-DMKW_INITIAL_PIPELINE_CACHE=$(ConvertTo-MkwCMakePath (Join-Path $Repo 'assets\shaders\initial_pipeline_cache.db'))",
+            "-DMKW_INITIAL_PIPELINE_CACHE=$(ConvertTo-MkwCMakePath $SeedCache)",
             "-DMKW_TRANSLATED_COMPILE_JOBS=$Jobs", "-DMKW_X86_CPU_PROFILE=$cpuProfile")
     Run $cmake $configure
     Step "Compiling with $Jobs jobs (this is the long part: 20 to 60 minutes)"
@@ -267,6 +312,19 @@ $config = Join-Path $Out 'UserData\Config.toml'
 if (-not (Test-Path -LiteralPath $config)) {
     $dvdRoot = if ($data -eq (Join-Path $Out 'Disc')) { '../Disc' } else { $data.Replace('\', '/') }
     [IO.File]::WriteAllText($config, "[paths]`ndvd_root = `"$dvdRoot`"`n")
+}
+
+if ($Shortcut) {
+    $shell = New-Object -ComObject WScript.Shell
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $link = $shell.CreateShortcut((Join-Path $desktop 'Excite Truck.lnk'))
+    $link.TargetPath = Join-Path $Out 'ExciteTruck.exe'
+    $link.WorkingDirectory = $Out
+    $link.Save()
+    $link = $shell.CreateShortcut((Join-Path $desktop 'Excite Truck Music.lnk'))
+    $link.TargetPath = Join-Path $Out 'UserData\Music'
+    $link.Save()
+    Write-Host 'Added "Excite Truck" and "Excite Truck Music" shortcuts to the desktop.'
 }
 
 Write-Host ''
