@@ -489,10 +489,15 @@ index edbafdc..49be121 100644
  extern "C" void GX__FinishInterruptHandler_8016ed94() {
      try {
 diff --git a/runtime/src/hle/os/os_sleep.cpp b/runtime/src/hle/os/os_sleep.cpp
-index 5a66c02..4e4c35c 100644
+index 5a66c02..cc6e520 100644
 --- a/runtime/src/hle/os/os_sleep.cpp
 +++ b/runtime/src/hle/os/os_sleep.cpp
-@@ -396,7 +396,12 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ // OSSleepTicks / OSSleepThread parking plus the host-side sleep-timer table.
+ 
+ #include <algorithm>
+@@ -396,10 +397,18 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
      const uint32_t queuePtr = cpu->gpr[3];
      
      if (queuePtr == 0) {
@@ -506,11 +511,22 @@ index 5a66c02..4e4c35c 100644
          return;
      }
  
++    if (std::getenv("WC_TRACE_SLEEP")) {
++        RT_LOGF(RT_TAG_OS, "OSSleepThread queue=0x%08X lr=0x%08X\n", queuePtr, cpu->lr);
++    }
+     const int32_t irqState = OS__DisableInterrupts_801a65ac();
+     
+     try {
 diff --git a/runtime/src/hle/vi.cpp b/runtime/src/hle/vi.cpp
-index cd236a9..66a8364 100644
+index cd236a9..1161ec5 100644
 --- a/runtime/src/hle/vi.cpp
 +++ b/runtime/src/hle/vi.cpp
-@@ -220,21 +220,37 @@ void ViSetR3(CpuContext* ctx, uint32_t value)
+@@ -1,3 +1,4 @@
++#include <cstdlib>
+ #include "hle_stubs.h"
+ #include "memory.h"
+ #include "abi_bridge.h"
+@@ -220,21 +221,37 @@ void ViSetR3(CpuContext* ctx, uint32_t value)
      }
  }
  
@@ -560,7 +576,36 @@ index cd236a9..66a8364 100644
      } catch (const ::Memory::AccessViolation& e) {
          LogMemoryError(RT_TAG_VI, "WriteGuestStateLocked", e);
      }
-@@ -343,7 +359,8 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
+@@ -268,9 +285,28 @@ static std::atomic<bool> s_presentSequenceActive{false};
+ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool serviceAurora) {
+     // Prevent re-entry - this can happen if OSWakeupThread triggers SelectThread
+     // which goes idle and calls ProcessTimerEvents again
++    static const bool s_traceVi = std::getenv("WC_TRACE_VI") != nullptr;
+     if (s_inAdvanceRetrace.exchange(true)) {
++        if (s_traceVi) RT_LOGF(RT_TAG_VI, "AdvanceRetrace re-entry skipped\n");
+         return;
+     }
++    if (s_traceVi) {
++        static uint32_t s_n = 0;
++        if ((s_n++ % 30) == 0) RT_LOGF(RT_TAG_VI, "AdvanceRetrace #%u service=%d\n", s_n, serviceAurora ? 1 : 0);
++    }
++    // A retrace is an interrupt: it can wake threads, but the switch to them happens after the
++    // interrupt returns. Waking the retrace queue used to switch fibers from inside this function,
++    // leaving the guard set until the interrupted thread ran again; when that thread was itself
++    // asleep (Excite Truck's MP3 thread), retraces stopped for good. Hold thread switches until
++    // the retrace is fully processed.
++    struct RetraceInterruptScope {
++        RetraceInterruptScope() { OS_HLE_BeginDeferredGuestCallbacks(); }
++        ~RetraceInterruptScope()
++        {
++            s_inAdvanceRetrace.store(false);
++            OS_HLE_EndDeferredGuestCallbacks();
++        }
++    } retraceInterruptScope;
+     
+     uint32_t preCb = 0;
+     uint32_t postCb = 0;
+@@ -343,7 +379,8 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
          if (postCb) {
              // Guard: only invoke callback if sSystem is initialized
              // The callback dereferences sSystem which must be non-null
@@ -570,6 +615,16 @@ index cd236a9..66a8364 100644
              if (sSystemPtr != 0) {
                  InvokeIndirectCpu(postCb, ctx);
              }
+@@ -375,8 +412,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
+         }
+     }
+ 
+-    // Clear re-entry guard
+-    s_inAdvanceRetrace.store(false);
++    // The re-entry guard is cleared by retraceInterruptScope.
+ }
+ 
+ bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
 index 6d0dd6b..fdd4faa 100644
 --- a/runtime/src/main.cpp
