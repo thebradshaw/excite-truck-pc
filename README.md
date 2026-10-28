@@ -15,7 +15,8 @@ online two-player.
 
 Step 1 of 4 (taking the game apart) is done. See [docs/step1-findings.md](docs/step1-findings.md).
 Step 2 (running on PC) is under way: menus, the attract demo, the tutorial and full Excite races
-play, with the trucks in their proper colours. See
+play, with the trucks in their proper colours. Every shader is compiled on the startup screen, so
+races don't stutter. See
 [docs/porting-notes.md](docs/porting-notes.md).
 
 ## Your own music

@@ -149,3 +149,23 @@ other frame (`0x12934280`, RGBA8); the reflection strength is the env map's alph
 **GX frame trace.** `WC_TRACE_GX_FRAME=<n>` logs every GX state call, texture and TLUT load,
 display-list call and EFB copy for frame n (lines start with `[gxt]`). Good for finding which
 draw is wrong without a GPU debugger.
+
+## No shader stutter (step 2)
+
+WiiCompiled's renderer (aurora) keeps every shader recipe it has built in
+`Cache/pipeline_cache.db` and compiles all of them on the startup screen ("Compiling shaders,
+please hold on") before the game runs. It also imports `initial_pipeline_cache.db` from next to
+the executable on every launch. This repo ships that file for Excite Truck:
+[`assets/shaders/initial_pipeline_cache.db`](../assets/shaders/initial_pipeline_cache.db),
+795 recipes recorded by driving the menus, the tutorial and a race on each of the seven tracks
+(the last track added only 10 new ones, so the set is close to complete). Pass it to the build with
+`-DMKW_INITIAL_PIPELINE_CACHE=...` (the example configure script does).
+
+So a first launch compiles everything up front and races never wait on a shader. If the game ever
+meets a recipe that is not in the set, the main view skips that one draw for a frame or two instead
+of freezing (`skip_unready_pipelines`, on by default), and the recipe is saved so it is built at
+startup from then on.
+
+To refresh the set after playing more of the game: `scripts/export-shaders.sh` merges your
+`pipeline_cache.db` into the shipped file. The file holds only GPU state descriptions (TEV stages,
+blend modes, vertex layouts), no game graphics.
