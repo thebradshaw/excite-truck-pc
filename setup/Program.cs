@@ -10,9 +10,28 @@ static class Setup
 {
     static readonly string[] DiscExtensions = { ".wbfs", ".iso", ".rvz", ".ciso", ".wia", ".gcz", ".zip" };
 
+    static readonly string LocalAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+    static readonly string SetupLog = Path.Combine(LocalAppData, "ExciteTruckSetup", "setup-log.txt");
+    static readonly string BuildLog = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? "C:\\", "ETBuild", "build-log.txt");
+
     static int Main(string[] args)
     {
-        Console.Title = "Excite Truck Setup";
+        // Everything this window prints also goes to setup-log.txt, and a crash is logged and
+        // waits for Enter instead of closing the window.
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(SetupLog)!);
+            var log = new StreamWriter(SetupLog, append: true) { AutoFlush = true };
+            log.WriteLine($"--- {DateTime.Now:yyyy-MM-dd HH:mm:ss} setup started: {string.Join(" ", args)}");
+            Console.SetOut(new Tee(Console.Out, log));
+        }
+        catch { }
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            Console.WriteLine($"Setup crashed: {e.ExceptionObject}");
+            Finish(1);
+        };
+        try { Console.Title = "Excite Truck Setup"; } catch { }
         Console.WriteLine("Excite Truck PC setup");
         Console.WriteLine("=====================");
         Console.WriteLine();
@@ -25,6 +44,8 @@ static class Setup
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine($"Setup failed: {e.Message}");
             Console.ResetColor();
+            Console.WriteLine(e.ToString());
+            Console.WriteLine($"Log: {SetupLog}");
             return Finish(1);
         }
     }
@@ -41,11 +62,11 @@ static class Setup
             if (disc.Length == 0) return Finish(1);
         }
         disc = Path.GetFullPath(disc);
-
-        string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string localAppData = LocalAppData;
         string gameDir = Path.Combine(localAppData, "Programs", "ExciteTruck");
         Console.WriteLine($"Disc:  {disc}");
         Console.WriteLine($"Game:  {gameDir}");
+        Console.WriteLine($"Log:   {BuildLog}");
         Console.WriteLine();
         Console.WriteLine("The first build takes roughly 30 to 90 minutes and needs about 20 GB free on");
         Console.WriteLine($"{Path.GetPathRoot(Environment.SystemDirectory)} while it runs. You can use the PC meanwhile.");
@@ -60,13 +81,16 @@ static class Setup
         foreach (string a in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
                                      "-Disc", disc, "-Out", gameDir, "-Shortcut" })
             start.ArgumentList.Add(a);
+        Console.WriteLine("Starting the build...");
         using var process = Process.Start(start) ?? throw new InvalidOperationException("could not start PowerShell");
         process.WaitForExit();
+        Console.WriteLine($"Build finished with exit code {process.ExitCode}.");
         if (process.ExitCode != 0)
         {
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine();
-            Console.WriteLine("The build stopped. Copy the last lines above and send them over so it can be fixed.");
+            Console.WriteLine("The build stopped. Send over the log so it can be fixed:");
+            Console.WriteLine($"  {BuildLog}");
             Console.WriteLine($"Running setup again resumes where it stopped.");
             Console.ResetColor();
             return Finish(process.ExitCode);
@@ -114,7 +138,19 @@ static class Setup
     {
         Console.WriteLine();
         Console.WriteLine("Press Enter to close.");
-        Console.ReadLine();
+        try { Console.ReadLine(); } catch { }
         return code;
+    }
+
+    // Writes to the console and the log file at once.
+    sealed class Tee : TextWriter
+    {
+        readonly TextWriter a, b;
+        public Tee(TextWriter a, TextWriter b) { this.a = a; this.b = b; }
+        public override System.Text.Encoding Encoding => a.Encoding;
+        public override void Write(char value) { a.Write(value); try { b.Write(value); } catch { } }
+        public override void Write(string? value) { a.Write(value); try { b.Write(value); } catch { } }
+        public override void WriteLine(string? value) { a.WriteLine(value); try { b.WriteLine(value); } catch { } }
+        public override void Flush() { a.Flush(); try { b.Flush(); } catch { } }
     }
 }

@@ -55,11 +55,31 @@ if (-not $Work) { $Work = Join-Path $env:SystemDrive 'ETBuild' }
 $Out = [IO.Path]::GetFullPath($Out)
 $Work = [IO.Path]::GetFullPath($Work)
 
+# Keep a log of every run next to the build files, so a failure can be read after the window closes.
+New-Item -ItemType Directory -Force -Path $Work | Out-Null
+$Log = Join-Path $Work 'build-log.txt'
+try { Start-Transcript -LiteralPath $Log -Append | Out-Null } catch { }
+Write-Host "Log: $Log"
+trap {
+    Write-Host ''
+    Write-Host "Error: $_" -ForegroundColor Red
+    Write-Host ($_.ScriptStackTrace)
+    try { Stop-Transcript | Out-Null } catch { }
+    exit 1
+}
+
 function Step([string]$Text) { Write-Host ''; Write-Host "==> $Text" -ForegroundColor Cyan }
-function Fail([string]$Text) { Write-Host ''; Write-Host "Error: $Text" -ForegroundColor Red; exit 1 }
+function Fail([string]$Text) {
+    Write-Host ''; Write-Host "Error: $Text" -ForegroundColor Red
+    try { Stop-Transcript | Out-Null } catch { }
+    exit 1
+}
 function Sha256([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Run([string]$Exe, [string[]]$Arguments) {
-    & $Exe @Arguments
+    # Pipe through Out-Host so the tool's output also lands in the log. Errors on stderr are
+    # just text here; the exit code decides.
+    $ErrorActionPreference = 'Continue'
+    & $Exe @Arguments 2>&1 | ForEach-Object { "$_" } | Out-Host
     if ($LASTEXITCODE -ne 0) { Fail "$([IO.Path]::GetFileName($Exe)) $($Arguments[0]) failed (exit code $LASTEXITCODE)" }
 }
 function Download([string]$Uri, [string]$Path, [string]$Sha) {
@@ -333,3 +353,4 @@ Write-Host "  $(Join-Path $Out 'ExciteTruck.exe')"
 Write-Host ''
 Write-Host "Your own songs go in $(Join-Path $Out 'UserData\Music') (MP3, up to 100)."
 Write-Host 'In the game set Options > Race Music to All Random. F10 opens the settings bar.'
+try { Stop-Transcript | Out-Null } catch { }
