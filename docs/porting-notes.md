@@ -38,6 +38,9 @@ SDK functions Excite Truck never links (the linker stripped them).
 
 `et_versions.inc` is appended to `runtime/include/guest_abi/guest_versions.inc`.
 
+[`patches/0002-aurora-channel-colors.patch`](../patches/0002-aurora-channel-colors.patch) applies
+inside the `aurora-main` submodule (`git -C aurora-main apply ...`). See "Truck paint" below.
+
 ## Building in a locked-down container
 
 GitHub `archive/*.tar.gz` downloads, `sqlite.org` and `files.twilitrealm.dev` may be blocked.
@@ -126,5 +129,23 @@ starts a race, for example `WC_ET_ARGS=-direct_to_track:canada` (an Excite race 
 opponents). Others: `-no_music`, `-no_sound`, `-profile`, `-players:<n>`, `-locale:<x>`.
 
 A full race runs this way: countdown, HUD, AI opponents, stars, Tree Runs, jumps and boosts.
-Open: the player's truck draws nearly black (tutorial and races alike), and the container's
-software renderer only manages 7 to 10 fps in races, so scripted laps are slow.
+Open: the container's software renderer only manages 7 to 10 fps in races, so scripted laps are
+slow. (`-force_chassis:<Name>` picks the truck, for example `Trekker`.)
+
+## Truck paint (step 2)
+
+Every truck drew black, with a grey chrome pass on top. Cause: aurora's `GXSetChanMatColor` and
+`GXSetChanAmbColor` overwrote the whole register for `GX_ALPHA0`. The game sets the colour with
+`GX_COLOR0` (white) and then the alpha with `GX_ALPHA0` (`000000FF`), so the lit trucks ended up
+with a black material. On real hardware `GX_COLORn` only replaces RGB and `GX_ALPHAn` only alpha.
+Fixed in [`patches/0002-aurora-channel-colors.patch`](../patches/0002-aurora-channel-colors.patch),
+which applies inside WiiCompiled's `aurora-main` submodule.
+
+How the body is drawn, for reference: stage 0 multiplies the paint texture (CMPR) by the lit
+colour, stage 1 blends toward a 256x256 environment map that the game renders and copies each
+other frame (`0x12934280`, RGBA8); the reflection strength is the env map's alpha, written with
+`GXSetDstAlpha(1, 0x90)` into an RGBA6 framebuffer.
+
+**GX frame trace.** `WC_TRACE_GX_FRAME=<n>` logs every GX state call, texture and TLUT load,
+display-list call and EFB copy for frame n (lines start with `[gxt]`). Good for finding which
+draw is wrong without a GPU debugger.

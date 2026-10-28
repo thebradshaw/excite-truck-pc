@@ -1305,11 +1305,63 @@ index 0000000..e61f894
 +int32_t SdCard_HLE_Ioctl(uint32_t fd, uint32_t cmd, uint32_t in, uint32_t inLen, uint32_t out, uint32_t outLen,
 +                         bool* pending);
 +int32_t SdCard_HLE_Ioctlv(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut, uint32_t vectorPtr);
+diff --git a/runtime/src/hle/gx/gx_copy.cpp b/runtime/src/hle/gx/gx_copy.cpp
+index 3dbdc8d..690962f 100644
+--- a/runtime/src/hle/gx/gx_copy.cpp
++++ b/runtime/src/hle/gx/gx_copy.cpp
+@@ -6,6 +6,8 @@
+ #include <dolphin/gx/GXAurora.h>
+ 
+ #include <algorithm>
++#include <cstdio>
++#include <cstdlib>
+ #include <map>
+ #include <mutex>
+ #include <vector>
+@@ -122,6 +124,8 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g),
+ // Copy Execution
+ // ============================================================================
+ 
++bool g_gxTraceFrame = false;
++
+ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+     EnsureAuroraFrameActive();
+     if (GxWorker::ShouldDefer()) {
+@@ -141,6 +145,11 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+         aurora_wait_for_frame_worker();
+     }
+     ++g_gxFrameCount;
++    {
++        static const long traceFrame = std::getenv("WC_TRACE_GX_FRAME") ? std::atol(std::getenv("WC_TRACE_GX_FRAME")) : -1;
++        g_gxTraceFrame = traceFrame >= 0 && long(g_gxFrameCount) == traceFrame;
++        if (g_gxTraceFrame) std::fprintf(stderr, "[gxt] ==== frame %ld ====\n", traceFrame);
++    }
+     VI_HLE_SetXfbReady(da);
+     settings_overlay::Draw();
+     // Seal, pace to the VI retrace boundary (Aurora renders the sealed frame
+@@ -170,6 +179,12 @@ extern "C" void GX__CopyTex_8016fd74(uint32_t da, uint32_t c) {
+     // later. RISK: copies above the probe threshold, or on the offscreen list, are not
+     // auto-downloaded, so guest reads see stale RAM; call aurora_flush_efb_copies_to_ram if a
+     // copy needs reading back.
++    GXT("[gxt] copytex dst=%08X %ux%u fmt=%u clear=%u\n", da, g_texCopyState.dstWidth, g_texCopyState.dstHeight, unsigned(g_texCopyState.dstFormat), c);
++    if (std::getenv("WC_TRACE_COPY")) {
++        std::fprintf(stderr, "[copy] tex dst=0x%08X src=%u,%u %ux%u -> %ux%u fmt=%u clear=%u\n", da, rawSrcLeft, rawSrcTop,
++                     rawSrcWidth, rawSrcHeight, g_texCopyState.dstWidth, g_texCopyState.dstHeight,
++                     unsigned(g_texCopyState.dstFormat), c);
++    }
+     GXCopyTex(GuestToHostPtr(da), (GXBool)c);
+     RememberEfbCopyDestination(
+         da, GXGetTexBufferSize(g_texCopyState.dstWidth, g_texCopyState.dstHeight,
 diff --git a/runtime/src/hle/gx/gx_dl.cpp b/runtime/src/hle/gx/gx_dl.cpp
-index daceeb7..8496831 100644
+index daceeb7..c6a5f86 100644
 --- a/runtime/src/hle/gx/gx_dl.cpp
 +++ b/runtime/src/hle/gx/gx_dl.cpp
-@@ -1289,6 +1289,60 @@ static bool ApplyAuroraIndexedXFArraysForDisplayList(const std::array<uint32_t,
+@@ -1,3 +1,4 @@
++#include <string>
+ #include "gx_internal.h"
+ #include "gx_stream_common.h"
+ #include "gx_cp_decode.h"
+@@ -1289,11 +1290,81 @@ static bool ApplyAuroraIndexedXFArraysForDisplayList(const std::array<uint32_t,
  
  } // namespace
  
@@ -1370,6 +1422,27 @@ index daceeb7..8496831 100644
  extern "C" void GxNotifyDisplayListMemoryWrite(uint32_t addr, uint32_t size) {
      GxGuestWrite::NotifyWrite(addr, size);
  }
+ 
+ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes) {
++    if (g_gxTraceFrame) {
++        std::string out;
++        uint32_t off = 0;
++        char tmp[64];
++        while (off < nbytes && out.size() < 600) {
++            const uint8_t c = Memory::Read8(listAddr + off);
++            if (c == 0) { off++; continue; }
++            if (c == 0x61) { std::snprintf(tmp, sizeof tmp, " BP%02X=%06X", Memory::Read8(listAddr+off+1), Memory::Read32(listAddr+off+1)&0xFFFFFF); out += tmp; off += 5; continue; }
++            if ((c & 0xF8) == 0x08) { std::snprintf(tmp, sizeof tmp, " CP%02X=%08X", Memory::Read8(listAddr+off+1), Memory::Read32(listAddr+off+2)); out += tmp; off += 6; continue; }
++            if ((c & 0xF8) == 0x10) { uint32_t w = Memory::Read32(listAddr+off+1); uint32_t n = (w >> 16) + 1; std::snprintf(tmp, sizeof tmp, " XF%04X[%u]=%08X", w & 0xFFFF, n, Memory::Read32(listAddr+off+5)); out += tmp; off += 5 + 4*n; continue; }
++            if (c >= 0x20 && c < 0x40) { off += 5; out += " IDX"; continue; }
++            if (c >= 0x80) { std::snprintf(tmp, sizeof tmp, " DRAW%02X n%u", c, Memory::Read16(listAddr+off+1)); out += tmp; break; }
++            std::snprintf(tmp, sizeof tmp, " ?%02X", c); out += tmp; break;
++        }
++        GXT("[gxt] calldl %08X %u:%s\n", listAddr, nbytes, out.c_str());
++    }
+     if (nbytes == 0 || listAddr == 0) return;
+     // List bytes and the arrays it indexes are GPU-side reads, so they are read when the worker runs.
+     if (GxWorker::ShouldDefer()) {
 diff --git a/runtime/src/hle/gx/gx_fatal_stubs.cpp b/runtime/src/hle/gx/gx_fatal_stubs.cpp
 index 0baaa0f..50a4fa3 100644
 --- a/runtime/src/hle/gx/gx_fatal_stubs.cpp
@@ -1436,6 +1509,26 @@ index 0baaa0f..50a4fa3 100644
  GX_FATAL_STUB(80173dec, "GX__SetGPMetric_caseD_16_80173dec") PPC_NATIVE_OVERRIDE_VOID(80173dec, gx_stub_80173dec, (CpuContext* ctx), (ctx));
 -GX_FATAL_STUB(80173df8, "GX__ClearGPMetric_80173df8") PPC_NATIVE_OVERRIDE_VOID(80173df8, gx_stub_80173df8, (CpuContext* ctx), (ctx));
 +GX_NOOP_STUB(80173df8, "GX__ClearGPMetric_80173df8") PPC_NATIVE_OVERRIDE_VOID(80173df8, gx_stub_80173df8, (CpuContext* ctx), (ctx));
+diff --git a/runtime/src/hle/gx/gx_fifo.cpp b/runtime/src/hle/gx/gx_fifo.cpp
+index 108e4fd..a587ab2 100644
+--- a/runtime/src/hle/gx/gx_fifo.cpp
++++ b/runtime/src/hle/gx/gx_fifo.cpp
+@@ -439,6 +439,7 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
+         if (cmd == GX_LOAD_BP_REG_CMD) {
+             if (g_hleGxState.fifoByteCount < 5) break;
+             const uint32_t bpWord = ReadBE32(data + 1);
++            GXT("[gxt] rawBP %02X=%06X\n", bpWord >> 24, bpWord & 0xFFFFFF);
+             GXApplyBPReg(static_cast<uint8_t>(bpWord >> 24), bpWord & 0x00FFFFFFu);
+             if (!consumeBytes(5, sink)) break;
+             continue;
+@@ -706,6 +707,7 @@ static uint32_t ApplyFifoPacketsDirect(const uint8_t* data, uint32_t sizeBytes)
+         if (cmd == GX_LOAD_BP_REG_CMD) {
+             if (avail < 5u) break;
+             const uint32_t bpWord = ReadBE32(packet + 1);
++            GXT("[gxt] rawBP %02X=%06X\n", bpWord >> 24, bpWord & 0xFFFFFF);
+             GXApplyBPReg(static_cast<uint8_t>(bpWord >> 24), bpWord & 0x00FFFFFFu);
+             offset += 5u;
+             continue;
 diff --git a/runtime/src/hle/gx/gx_init.cpp b/runtime/src/hle/gx/gx_init.cpp
 index edf6f9c..e890b8b 100644
 --- a/runtime/src/hle/gx/gx_init.cpp
@@ -1534,6 +1627,112 @@ index edf6f9c..e890b8b 100644
              }
              Memory::Write8(gd + 0x5F8u, 0);
          }
+diff --git a/runtime/src/hle/gx/gx_internal.h b/runtime/src/hle/gx/gx_internal.h
+index b8270a9..732729d 100644
+--- a/runtime/src/hle/gx/gx_internal.h
++++ b/runtime/src/hle/gx/gx_internal.h
+@@ -411,3 +411,7 @@ extern std::mutex g_tlutObjMutex;
+ // rehash, an open-addressed table would not.
+ extern std::unordered_map<uint32_t, TexObjSlot> g_TexObjMeta;
+ extern std::map<uint32_t, TlutObjMeta> g_TlutObjMeta;
++
++// Debug: WC_TRACE_GX_FRAME=N logs GX state calls during frame N.
++extern bool g_gxTraceFrame;
++#define GXT(...) do { if (g_gxTraceFrame) std::fprintf(stderr, __VA_ARGS__); } while (0)
+diff --git a/runtime/src/hle/gx/gx_lighting.cpp b/runtime/src/hle/gx/gx_lighting.cpp
+index 3b186cf..3f16805 100644
+--- a/runtime/src/hle/gx/gx_lighting.cpp
++++ b/runtime/src/hle/gx/gx_lighting.cpp
+@@ -62,7 +62,7 @@ void InitializeHostLightFromGuest(GXLightObj& host, uint32_t guestAddr) {
+ // Light Object Load
+ // ============================================================================
+ 
+-extern "C" void GX__LoadLightObjImm_80170320(uint32_t la, uint32_t lid) {
++extern "C" void GX__LoadLightObjImm_80170320(uint32_t la, uint32_t lid) { GXT("[gxt] light %u col%08X pos %.2f %.2f %.2f dir %.2f %.2f %.2f attn %.2f %.2f %.2f k %.2f %.2f %.2f\n", lid, Memory::Read32(la+kColorOffset), Memory::ReadFloat32(la+kPositionOffset), Memory::ReadFloat32(la+kPositionOffset+4), Memory::ReadFloat32(la+kPositionOffset+8), Memory::ReadFloat32(la+kDirectionOffset), Memory::ReadFloat32(la+kDirectionOffset+4), Memory::ReadFloat32(la+kDirectionOffset+8), Memory::ReadFloat32(la+kAttnAOffset), Memory::ReadFloat32(la+kAttnAOffset+4), Memory::ReadFloat32(la+kAttnAOffset+8), Memory::ReadFloat32(la+kAttnKOffset), Memory::ReadFloat32(la+kAttnKOffset+4), Memory::ReadFloat32(la+kAttnKOffset+8));
+     if (!ValidateGuestLightObj(la, "GXLoadLightObjImm")) return;
+     GXLightObj host{};
+     InitializeHostLightFromGuest(host, la);
+@@ -74,25 +74,25 @@ PPC_NATIVE_OVERRIDE_VOID(80170320, GX__LoadLightObjImm_80170320, (uint32_t la, u
+ // Channel Control
+ // ============================================================================
+ 
+-extern "C" void GX__SetChanAmbColor_8017039c(uint32_t c, uint32_t cp) {
++extern "C" void GX__SetChanAmbColor_8017039c(uint32_t c, uint32_t cp) { GXT("[gxt] amb %u %08X\n", c,Memory::Read32(cp));
+     EnsureAuroraFrameActive();
+     GXColor color = DecodeGxColor(Memory::Read32(cp));
+     GxWorker::Run([c, color] { GXSetChanAmbColor((GXChannelID)c, color); });
+ }
+ PPC_NATIVE_OVERRIDE_VOID(8017039c, GX__SetChanAmbColor_8017039c, (uint32_t c, uint32_t cp), (c, cp));
+ 
+-extern "C" void GX__SetChanMatColor_80170474(uint32_t c, uint32_t cp) {
++extern "C" void GX__SetChanMatColor_80170474(uint32_t c, uint32_t cp) { GXT("[gxt] mat %u %08X ptr%08X\n", c,Memory::Read32(cp),cp);
+     EnsureAuroraFrameActive();
+     GXColor color = DecodeGxColor(Memory::Read32(cp));
+     GxWorker::Run([c, color] { GXSetChanMatColor((GXChannelID)c, color); });
+ }
+ PPC_NATIVE_OVERRIDE_VOID(80170474, GX__SetChanMatColor_80170474, (uint32_t c, uint32_t cp), (c, cp));
+ 
+-extern "C" void GX__SetNumChans_8017054c(uint32_t n) {
++extern "C" void GX__SetNumChans_8017054c(uint32_t n) { GXT("[gxt] numchans %u\n", n);
+     GX_DEFER_CALL(GX__SetNumChans_8017054c, n); GXSetNumChans((u8)n); }
+ PPC_NATIVE_OVERRIDE_VOID(8017054c, GX__SetNumChans_8017054c, (uint32_t n), (n));
+ 
+-extern "C" void GX__SetChanCtrl_80170570(uint32_t ch, uint32_t en, uint32_t as, uint32_t ms, uint32_t lm, uint32_t df, uint32_t af) {
++extern "C" void GX__SetChanCtrl_80170570(uint32_t ch, uint32_t en, uint32_t as, uint32_t ms, uint32_t lm, uint32_t df, uint32_t af) { GXT("[gxt] chanctrl %u en%u amb%u mat%u lm%X df%u af%u\n", ch,en,as,ms,lm,df,af);
+     GX_DEFER_CALL(GX__SetChanCtrl_80170570, ch, en, as, ms, lm, df, af);
+     GXSetChanCtrl((GXChannelID)ch, en!=0, (GXColorSrc)as, (GXColorSrc)ms, lm, (GXDiffuseFn)df, (GXAttnFn)af);
+ }
+diff --git a/runtime/src/hle/gx/gx_pixel.cpp b/runtime/src/hle/gx/gx_pixel.cpp
+index 68182a5..f7d298d 100644
+--- a/runtime/src/hle/gx/gx_pixel.cpp
++++ b/runtime/src/hle/gx/gx_pixel.cpp
+@@ -6,6 +6,7 @@
+ // ============================================================================
+ 
+ extern "C" void GX__SetBlendMode_8017277c(uint32_t t, uint32_t s, uint32_t d, uint32_t op) {
++    GXT("[gxt] blend %u %u %u %u\n", t,s,d,op);
+     GX_DEFER_CALL(GX__SetBlendMode_8017277c, t, s, d, op);
+     GXSetBlendMode(static_cast<GXBlendMode>(t), static_cast<GXBlendFactor>(s),
+                    static_cast<GXBlendFactor>(d), static_cast<GXLogicOp>(op));
+@@ -13,12 +14,14 @@ extern "C" void GX__SetBlendMode_8017277c(uint32_t t, uint32_t s, uint32_t d, ui
+ PPC_NATIVE_OVERRIDE_VOID(8017277c, GX__SetBlendMode_8017277c, (uint32_t t, uint32_t s, uint32_t d, uint32_t op), (t, s, d, op));
+ 
+ extern "C" void GX__SetColorUpdate_801727cc(uint32_t en) {
++    GXT("[gxt] colorupd %u\n", en);
+     GX_DEFER_CALL(GX__SetColorUpdate_801727cc, en);
+     GXSetColorUpdate(static_cast<GXBool>(en));
+ }
+ PPC_NATIVE_OVERRIDE_VOID(801727cc, GX__SetColorUpdate_801727cc, (uint32_t en), (en));
+ 
+ extern "C" void GX__SetAlphaUpdate_801727f8(uint32_t en) {
++    GXT("[gxt] alphaupd %u\n", en);
+     GX_DEFER_CALL(GX__SetAlphaUpdate_801727f8, en);
+     GXSetAlphaUpdate(static_cast<GXBool>(en));
+ }
+@@ -45,6 +48,7 @@ PPC_NATIVE_OVERRIDE_VOID(80172858, GX__SetZCompLoc_80172858, (uint32_t bt), (bt)
+ // ============================================================================
+ 
+ extern "C" void GX__SetPixelFmt_80172888(uint32_t pf, uint32_t zf) {
++    GXT("[gxt] pixelfmt %u %u\n", pf, zf);
+     GX_DEFER_CALL(GX__SetPixelFmt_80172888, pf, zf);
+     GXSetPixelFmt(static_cast<GXPixelFmt>(pf), static_cast<GXZFmt16>(zf));
+ }
+@@ -57,6 +61,7 @@ extern "C" void GX__SetDither_80172930(uint32_t d) {
+ PPC_NATIVE_OVERRIDE_VOID(80172930, GX__SetDither_80172930, (uint32_t d), (d));
+ 
+ extern "C" void GX__SetDstAlpha_8017295c(uint32_t en, uint32_t a) {
++    GXT("[gxt] dstalpha %u %u\n", en,a);
+     GX_DEFER_CALL(GX__SetDstAlpha_8017295c, en, a);
+     GXSetDstAlpha(static_cast<GXBool>(en), static_cast<u8>(a));
+ }
+@@ -73,6 +78,7 @@ extern "C" void GX__SetFog_801722cc(uint32_t t, float sz, float ez, float nz, fl
+ PPC_NATIVE_OVERRIDE_VOID(801722cc, GX__SetFog_801722cc, (uint32_t t, float sz, float ez, float nz, float fz, uint32_t cp), (t, sz, ez, nz, fz, cp));
+ 
+ extern "C" void GX__SetAlphaCompare_80172088(uint32_t c0, uint32_t r0, uint32_t op, uint32_t c1, uint32_t r1) {
++    GXT("[gxt] acmp %u %u %u %u %u\n", c0,r0,op,c1,r1);
+     GX_DEFER_CALL(GX__SetAlphaCompare_80172088, c0, r0, op, c1, r1);
+     g_alphaCompareValid = true;
+     GXSetAlphaCompare((GXCompare)c0, (u8)r0, (GXAlphaOp)op, (GXCompare)c1, (u8)r1);
 diff --git a/runtime/src/hle/gx/gx_stubs.cpp b/runtime/src/hle/gx/gx_stubs.cpp
 index edbafdc..49be121 100644
 --- a/runtime/src/hle/gx/gx_stubs.cpp
@@ -1629,8 +1828,148 @@ index edbafdc..49be121 100644
  
  extern "C" void GX__FinishInterruptHandler_8016ed94() {
      try {
+diff --git a/runtime/src/hle/gx/gx_tev.cpp b/runtime/src/hle/gx/gx_tev.cpp
+index 57ab64b..379b98e 100644
+--- a/runtime/src/hle/gx/gx_tev.cpp
++++ b/runtime/src/hle/gx/gx_tev.cpp
+@@ -1,5 +1,6 @@
+ // gx_tev.cpp - TEV Stage Configuration
+ #include "gx_internal.h"
++#include <cstdlib>
+ #include "runtime_log.h"
+ 
+ // Aurora's CHECK() on these tev array indices compiles to nothing under NDEBUG, so this
+@@ -24,7 +25,7 @@ inline bool TevSwapOk(uint32_t id) { return GxTevIdOk(id, GX_MAX_TEVSWAP, "TEV s
+ // TEV Stage Count and Order
+ // ============================================================================
+ 
+-extern "C" void GX__SetNumTevStages_801722a8(uint32_t n) {
++extern "C" void GX__SetNumTevStages_801722a8(uint32_t n) { GXT("[gxt] stages %u\n", n);
+     GX_DEFER_CALL(GX__SetNumTevStages_801722a8, n);
+     // GXSetNumTevStages takes a count, not an index, so the inclusive bound is
+     // GX_MAX_TEVSTAGE itself.
+@@ -36,14 +37,14 @@ extern "C" void GX__SetNumTevStages_801722a8(uint32_t n) {
+ }
+ PPC_NATIVE_OVERRIDE_VOID(801722a8, GX__SetNumTevStages_801722a8, (uint32_t n), (n));
+ 
+-extern "C" void GX__SetTevOp_80171c4c(uint32_t s, uint32_t m) {
++extern "C" void GX__SetTevOp_80171c4c(uint32_t s, uint32_t m) { GXT("[gxt] tevop s%u m%u\n", s,m);
+     GX_DEFER_CALL(GX__SetTevOp_80171c4c, s, m);
+     if (!TevStageOk(s)) return;
+     GXSetTevOp((GXTevStageID)s, (GXTevMode)m);
+ }
+ PPC_NATIVE_OVERRIDE_VOID(80171c4c, GX__SetTevOp_80171c4c, (uint32_t s, uint32_t m), (s, m));
+ 
+-extern "C" void GX__SetTevOrder_8017214c(uint32_t s, uint32_t c, uint32_t m, uint32_t col) {
++extern "C" void GX__SetTevOrder_8017214c(uint32_t s, uint32_t c, uint32_t m, uint32_t col) { GXT("[gxt] order s%u tc%u map%u col%u\n", s,c,m,col);
+     GX_DEFER_CALL(GX__SetTevOrder_8017214c, s, c, m, col);
+     if (!TevStageOk(s)) return;
+     GXSetTevOrder((GXTevStageID)s, (GXTexCoordID)c, (GXTexMapID)m, (GXChannelID)col);
+@@ -54,7 +55,7 @@ PPC_NATIVE_OVERRIDE_VOID(8017214c, GX__SetTevOrder_8017214c, (uint32_t s, uint32
+ // TEV Color/Alpha Inputs
+ // ============================================================================
+ 
+-extern "C" void GX__SetTevColorIn_80171ce0(uint32_t s, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
++extern "C" void GX__SetTevColorIn_80171ce0(uint32_t s, uint32_t a, uint32_t b, uint32_t c, uint32_t d) { GXT("[gxt] cin s%u %u %u %u %u\n", s,a,b,c,d);
+     GX_DEFER_CALL(GX__SetTevColorIn_80171ce0, s, a, b, c, d);
+     if (!TevStageOk(s)) return;
+     GXSetTevColorIn((GXTevStageID)s, (GXTevColorArg)a, (GXTevColorArg)b, (GXTevColorArg)c, (GXTevColorArg)d);
+@@ -72,7 +73,7 @@ PPC_NATIVE_OVERRIDE_VOID(80171d20, GX__SetTevAlphaIn_80171d20, (uint32_t s, uint
+ // TEV Color/Alpha Operations
+ // ============================================================================
+ 
+-extern "C" void GX__SetTevColorOp_80171d60(uint32_t s, uint32_t op, uint32_t b, uint32_t sc, uint32_t cl, uint32_t or_) {
++extern "C" void GX__SetTevColorOp_80171d60(uint32_t s, uint32_t op, uint32_t b, uint32_t sc, uint32_t cl, uint32_t or_) { GXT("[gxt] cop s%u op%u b%u sc%u cl%u out%u\n", s,op,b,sc,cl,or_);
+     GX_DEFER_CALL(GX__SetTevColorOp_80171d60, s, op, b, sc, cl, or_);
+     if (!TevStageOk(s) || !TevRegOk(or_)) return;
+     GXSetTevColorOp((GXTevStageID)s, (GXTevOp)op, (GXTevBias)b, (GXTevScale)sc, (GXBool)cl, (GXTevRegID)or_);
+@@ -90,14 +91,14 @@ PPC_NATIVE_OVERRIDE_VOID(80171db8, GX__SetTevAlphaOp_80171db8, (uint32_t s, uint
+ // TEV Color Registers
+ // ============================================================================
+ 
+-extern "C" void GX__SetTevColor_80171e10(uint32_t id, uint32_t cp) {
++extern "C" void GX__SetTevColor_80171e10(uint32_t id, uint32_t cp) { GXT("[gxt] tevcolor %u %08X ptr%08X\n", id,Memory::Read32(cp),cp);
+     if (!TevRegOk(id)) return;
+     const uint8_t* p=Memory::GetPointer(cp, 4); GXColor c; c.r=p[0]; c.g=p[1]; c.b=p[2]; c.a=p[3];
+     GxWorker::Run([id, c] { GXSetTevColor((GXTevRegID)id, c); });
+ }
+ PPC_NATIVE_OVERRIDE_VOID(80171e10, GX__SetTevColor_80171e10, (uint32_t id, uint32_t cp), (id, cp));
+ 
+-extern "C" void GX__SetTevColorS10_80171e70(uint32_t id, uint32_t cp) {
++extern "C" void GX__SetTevColorS10_80171e70(uint32_t id, uint32_t cp) { GXT("[gxt] tevcolorS10 %u %08X%08X\n", id,Memory::Read32(cp),Memory::Read32(cp+4));
+     if (!TevRegOk(id)) return;
+     const uint8_t* p=Memory::GetPointer(cp, 8); GXColorS10 c;
+     c.r=(p[0]<<8)|p[1]; c.g=(p[2]<<8)|p[3]; c.b=(p[4]<<8)|p[5]; c.a=(p[6]<<8)|p[7];
+@@ -105,14 +106,14 @@ extern "C" void GX__SetTevColorS10_80171e70(uint32_t id, uint32_t cp) {
+ }
+ PPC_NATIVE_OVERRIDE_VOID(80171e70, GX__SetTevColorS10_80171e70, (uint32_t id, uint32_t cp), (id, cp));
+ 
+-extern "C" void GX__SetTevKColor_80171ed4(uint32_t id, uint32_t cp) {
++extern "C" void GX__SetTevKColor_80171ed4(uint32_t id, uint32_t cp) { GXT("[gxt] kcolor %u %08X\n", id,Memory::Read32(cp));
+     if (!TevKColorOk(id)) return;
+     const uint8_t* p=Memory::GetPointer(cp, 4); GXColor c; c.r=p[0]; c.g=p[1]; c.b=p[2]; c.a=p[3];
+     GxWorker::Run([id, c] { GXSetTevKColor((GXTevKColorID)id, c); });
+ }
+ PPC_NATIVE_OVERRIDE_VOID(80171ed4, GX__SetTevKColor_80171ed4, (uint32_t id, uint32_t cp), (id, cp));
+ 
+-extern "C" void GX__SetTevKColorSel_80171f30(uint32_t s, uint32_t sel) {
++extern "C" void GX__SetTevKColorSel_80171f30(uint32_t s, uint32_t sel) { GXT("[gxt] ksel s%u %u\n", s,sel);
+     GX_DEFER_CALL(GX__SetTevKColorSel_80171f30, s, sel); if (!TevStageOk(s)) return; GXSetTevKColorSel((GXTevStageID)s, (GXTevKColorSel)sel); }
+ PPC_NATIVE_OVERRIDE_VOID(80171f30, GX__SetTevKColorSel_80171f30, (uint32_t s, uint32_t sel), (s, sel));
+ 
+@@ -124,14 +125,14 @@ PPC_NATIVE_OVERRIDE_VOID(80171f80, GX__SetTevKAlphaSel_80171f80, (uint32_t s, ui
+ // TEV Swap Tables
+ // ============================================================================
+ 
+-extern "C" void GX__SetTevSwapModeTable_8017200c(uint32_t id, uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
++extern "C" void GX__SetTevSwapModeTable_8017200c(uint32_t id, uint32_t r, uint32_t g, uint32_t b, uint32_t a) { GXT("[gxt] swaptable %u %u%u%u%u\n", id,r,g,b,a);
+     GX_DEFER_CALL(GX__SetTevSwapModeTable_8017200c, id, r, g, b, a);
+     if (!TevSwapOk(id)) return;
+     GXSetTevSwapModeTable((GXTevSwapSel)id, (GXTevColorChan)r, (GXTevColorChan)g, (GXTevColorChan)b, (GXTevColorChan)a);
+ }
+ PPC_NATIVE_OVERRIDE_VOID(8017200c, GX__SetTevSwapModeTable_8017200c, (uint32_t id, uint32_t r, uint32_t g, uint32_t b, uint32_t a), (id, r, g, b, a));
+ 
+-extern "C" void GX__SetTevSwapMode_80171fd0(uint32_t s, uint32_t rs, uint32_t ts) {
++extern "C" void GX__SetTevSwapMode_80171fd0(uint32_t s, uint32_t rs, uint32_t ts) { GXT("[gxt] swap s%u r%u t%u\n", s,rs,ts);
+     GX_DEFER_CALL(GX__SetTevSwapMode_80171fd0, s, rs, ts);
+     if (!TevStageOk(s) || !TevSwapOk(rs) || !TevSwapOk(ts)) return;
+     GXSetTevSwapMode((GXTevStageID)s, (GXTevSwapSel)rs, (GXTevSwapSel)ts);
+diff --git a/runtime/src/hle/gx/gx_texture.cpp b/runtime/src/hle/gx/gx_texture.cpp
+index 0f79533..8a1bb3d 100644
+--- a/runtime/src/hle/gx/gx_texture.cpp
++++ b/runtime/src/hle/gx/gx_texture.cpp
+@@ -681,6 +681,11 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+ }
+ 
+ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
++    if (g_gxTraceFrame) {
++        TexObjMeta m; bool ok = false;
++        { std::lock_guard<std::mutex> guard(g_texObjMutex); try { ok = TryGetOrExtractTexObjMeta(oa, m); } catch (...) {} }
++        GXT("[gxt] loadtex map%u data%08X %ux%u fmt%u tlut%u obj%08X : %08X %08X %08X %08X\n", tid, ok ? m.dataAddr : 0, ok ? m.width : 0, ok ? m.height : 0, ok ? m.format : 99, ok ? m.tlut : 0, oa, ok ? Memory::Read32(m.dataAddr) : 0, ok ? Memory::Read32(m.dataAddr+4) : 0, ok ? Memory::Read32(m.dataAddr+8) : 0, ok ? Memory::Read32(m.dataAddr+12) : 0);
++    }
+     if (GxWorker::ShouldDefer()) {
+         // The CPU-side SDK reads the GXTexObj at call time; the texture data itself is read later.
+         std::optional<TexObjBytes> bytes;
+@@ -748,7 +753,7 @@ PPC_NATIVE_OVERRIDE_VOID(80170cbc, GX__GetTexObjLODAll_80170cbc, (uint32_t oa, u
+ // TLUT (Texture Lookup Table)
+ // ============================================================================
+ 
+-extern "C" void GX__InitTlutObj_80170f80(uint32_t oa, uint32_t da, uint32_t f, uint32_t e) {
++extern "C" void GX__InitTlutObj_80170f80(uint32_t oa, uint32_t da, uint32_t f, uint32_t e) { GXT("[gxt] inittlut obj%08X data%08X fmt%u n%u first%08X\n", oa, da, f, e, Memory::Read32(da));
+     GX_DEFER_CALL(GX__InitTlutObj_80170f80, oa, da, f, e);
+     std::lock_guard<std::mutex> guard(g_tlutObjMutex); GXTlutObj* obj = CreateHostTlutObj(oa); TlutObjMeta& meta = GetTlutObjMeta(oa);
+     meta.dataAddr=CanonicalizeGxMainRamAddress(da); meta.format=f; meta.entries=(u16)e; meta.dirty=false;
+@@ -762,7 +767,7 @@ PPC_NATIVE_OVERRIDE_VOID(80170f80, GX__InitTlutObj_80170f80, (uint32_t oa, uint3
+ 
+ static void LoadTlutImpl(uint32_t oa, uint32_t tl) { std::lock_guard<std::mutex> guard(g_tlutObjMutex); if (tl >= kMaxTluts) { RT_LOGF(RT_TAG_GX, "GXLoadTlut: invalid TLUT index %u (oa=0x%08X)\n", tl, oa); return; } auto metaIt = g_TlutObjMeta.find(oa); if (metaIt != g_TlutObjMeta.end() && metaIt->second.dirty) { if (ValidateTlutData(oa, metaIt->second)) { GXTlutObj* rebuild = CreateHostTlutObj(oa); GXInitTlutObj(rebuild, GuestToHostPtr(metaIt->second.dataAddr), (GXTlutFmt)metaIt->second.format, metaIt->second.entries); MarkHostTlutObjConstructed(oa); } metaIt->second.dirty = false; } GXTlutObj* obj = GetHostTlutObj(oa); GXLoadTlut(obj, (GXTlut)tl); }
+ 
+-extern "C" void GX__LoadTlut_80170fa8(uint32_t oa, uint32_t tl) {
++extern "C" void GX__LoadTlut_80170fa8(uint32_t oa, uint32_t tl) { if (g_gxTraceFrame) { uint32_t da = 0, f = 0, n = 0; { std::lock_guard<std::mutex> g(g_tlutObjMutex); auto it = g_TlutObjMeta.find(oa); if (it != g_TlutObjMeta.end()) { da = it->second.dataAddr; f = it->second.format; n = it->second.entries; } } GXT("[gxt] loadtlut obj%08X slot%u data%08X fmt%u n%u : %08X %08X %08X %08X %08X %08X %08X %08X | guest %08X %08X %08X\n", oa, tl, da, f, n, da ? Memory::Read32(da) : 0, da ? Memory::Read32(da + 4) : 0, da ? Memory::Read32(da + 8) : 0, da ? Memory::Read32(da + 12) : 0, da ? Memory::Read32(da + 16) : 0, da ? Memory::Read32(da + 20) : 0, da ? Memory::Read32(da + 24) : 0, da ? Memory::Read32(da + 28) : 0, Memory::Read32(oa), Memory::Read32(oa + 4), Memory::Read32(oa + 8)); }
+     GxWorker::Run([oa, tl] { LoadTlutImpl(oa, tl); });
+     try { uint32_t gd = Memory::Read32(kGXDataPtrAddr); if (gd) Memory::Write16(gd + 2, 0); } catch (...) {}
+ }
 diff --git a/runtime/src/hle/gx/gx_vertex.cpp b/runtime/src/hle/gx/gx_vertex.cpp
-index 3a8c43b..fcd1697 100644
+index 3a8c43b..c14fe0c 100644
 --- a/runtime/src/hle/gx/gx_vertex.cpp
 +++ b/runtime/src/hle/gx/gx_vertex.cpp
 @@ -5,8 +5,6 @@
@@ -1669,6 +2008,15 @@ index 3a8c43b..fcd1697 100644
      if(!la) return; uint32_t p=la;
      std::vector<std::array<uint32_t, 2>> list;
      while(true){
+@@ -312,7 +315,7 @@ void ServiceDeferredTimingDuringGxWork() {
+ 
+ static void GxBeginImpl(uint32_t t, uint32_t vf, uint32_t nv);
+ 
+-extern "C" void GX__Begin_8016f0f0(uint32_t t, uint32_t vf, uint32_t nv) {
++extern "C" void GX__Begin_8016f0f0(uint32_t t, uint32_t vf, uint32_t nv) { GXT("[gxt] BEGIN prim%X fmt%u n%u\n", t,vf,nv);
+     if(IsDisplayListActive()){
+         WriteDisplayListData((u8)(t|vf), 1);
+         WriteDisplayListData((u16)nv, 2);
 diff --git a/runtime/src/hle/ios.cpp b/runtime/src/hle/ios.cpp
 index 9de2c3c..2cfff88 100644
 --- a/runtime/src/hle/ios.cpp

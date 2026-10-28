@@ -1,0 +1,46 @@
+diff --git a/lib/dolphin/gx/GXLighting.cpp b/lib/dolphin/gx/GXLighting.cpp
+index 4a88255..6b465d3 100644
+--- a/lib/dolphin/gx/GXLighting.cpp
++++ b/lib/dolphin/gx/GXLighting.cpp
+@@ -184,13 +184,15 @@ void GXSetChanAmbColor(GXChannelID id, GXColor color) {
+   // XF ambient color registers: 0x100A (chan 0), 0x100B (chan 1)
+   u32 packed = (static_cast<u32>(color.r) << 24) | (static_cast<u32>(color.g) << 16) |
+                (static_cast<u32>(color.b) << 8) | static_cast<u32>(color.a);
+-  if (id == GX_COLOR0 || id == GX_ALPHA0) {
+-    __gx->ambColor[0] = packed;
+-    GX_WRITE_XF_REG(0xA, packed);
++  // GX_COLORn replaces only RGB and GX_ALPHAn only alpha, as in the real SDK.
++  const int chan = (id == GX_COLOR0 || id == GX_ALPHA0) ? 0 : 1;
++  if (id == GX_COLOR0 || id == GX_COLOR1) {
++    packed = (packed & 0xFFFFFF00u) | (__gx->ambColor[chan] & 0xFFu);
+   } else {
+-    __gx->ambColor[1] = packed;
+-    GX_WRITE_XF_REG(0xB, packed);
++    packed = (__gx->ambColor[chan] & 0xFFFFFF00u) | (packed & 0xFFu);
+   }
++  __gx->ambColor[chan] = packed;
++  GX_WRITE_XF_REG(chan == 0 ? 0xA : 0xB, packed);
+   __gx->bpSent = 0;
+ }
+ 
+@@ -209,13 +211,15 @@ void GXSetChanMatColor(GXChannelID id, GXColor color) {
+   // XF material color registers: 0x100C (chan 0), 0x100D (chan 1)
+   u32 packed = (static_cast<u32>(color.r) << 24) | (static_cast<u32>(color.g) << 16) |
+                (static_cast<u32>(color.b) << 8) | static_cast<u32>(color.a);
+-  if (id == GX_COLOR0 || id == GX_ALPHA0) {
+-    __gx->matColor[0] = packed;
+-    GX_WRITE_XF_REG(0xC, packed);
++  // GX_COLORn replaces only RGB and GX_ALPHAn only alpha, as in the real SDK.
++  const int chan = (id == GX_COLOR0 || id == GX_ALPHA0) ? 0 : 1;
++  if (id == GX_COLOR0 || id == GX_COLOR1) {
++    packed = (packed & 0xFFFFFF00u) | (__gx->matColor[chan] & 0xFFu);
+   } else {
+-    __gx->matColor[1] = packed;
+-    GX_WRITE_XF_REG(0xD, packed);
++    packed = (__gx->matColor[chan] & 0xFFFFFF00u) | (packed & 0xFFu);
+   }
++  __gx->matColor[chan] = packed;
++  GX_WRITE_XF_REG(chan == 0 ? 0xC : 0xD, packed);
+   __gx->bpSent = 0;
+ }
+ 
