@@ -6,3 +6,31 @@
 # HorVer render/XFB heights: same struct as 80350864->8038F39C and 80350872->8038F3AA (+0x3EB38).
 80350866 8038F39E
 8035087C 8038F3B4
+# GX: __GXData pointer (every GX function does lwz r4,-0x75e8(r2)) and the PE draw-done queue
+# (GXDrawDone: addi r3,r13,-0x2f98). Unmapped, the GX HLE read and wrote the pointer at address 0.
+803886C8 80560B18
+803867D0 8055D968
+# GX data block (lwz r4,-0x75e8(r2) holds 0x8037BAC0 in the DOL) and the display-list FIFO
+# (GXBeginDisplayList: lis/addi 0x8037C108; +0x80 saved GXData copy, +0x680 saved CPU FIFO).
+# Unmapped, GXInit cleared 0x600 bytes at address 0, wiping the OS globals (bus clock, disc ID).
+803437C0 8037BAC0
+80344090 8037C108
+80344094 8037C10C
+80344098 8037C110
+803440A4 8037C11C
+803440A8 8037C120
+803440AC 8037C124
+80344110 8037C188
+80344710 8037C788
+# AX: __AXOutInitDSP (ET 0x80032004) DSP task 0x8035FB80, IRAM image 0x802FFD60, DRAM image
+# 0x8035FBD0, ucode length/vectors -0x7b20..-0x7b1c(r13), init flags -0x3194/-0x3190(r13).
+802F81A0 8035FB80
+8027F820 802FFD60
+802F8200 8035FBD0
+80385800 80558DE0
+80385802 80558DE2
+80385804 80558DE4
+80386524 8055D76C
+80386528 8055D770
+# OSSetPowerCallback (ET 0x80055198): handler-active flag -0x2e50(r13).
+80386940 8055DAB0

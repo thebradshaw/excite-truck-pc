@@ -61,3 +61,24 @@ The game now boots to its first menu ("create a save file?") at 60 fps. What it 
 - The Mario Kart startup pipeline list is no longer bundled (`-DMKW_INITIAL_PIPELINE_CACHE=NONE`); Excite Truck's own recorded list replaces it later. The startup screen ends on the first frame.
 
 `scripts/cycle.sh` regenerates the address table, retranslates, builds and runs; `scripts/shot.sh` boots on a virtual display and takes screenshots; `scripts/hangdump.sh` dumps thread stacks of a hung run.
+
+## Save prompt to menus (step 2)
+
+- **Unmapped globals wrote to address 0.** `MKW_GADDR()` returns 0 for a Mario Kart address with no
+  Excite Truck counterpart, and guest address 0 aliases MEM1 0x80000000. GXInit's HLE cleared
+  0x600 bytes there, and the AX DSP-task setup wrote its 0x38-byte task struct there. That wiped the
+  OS globals (bus clock at 0x800000F8, disc ID), so the game's millisecond timer divided by zero,
+  its frame delta stayed 0 and menu input was discarded forever. `tools/manual_data.txt` now maps
+  the GX data block, the display-list FIFO, the AX task/ucode globals and the power-callback flag.
+  `scripts/lowtrap.sh` makes the low page read-only under gdb and reports the first writer.
+- **GX register pointers.** A few GX helpers (GXGetGPStatus and friends) still run as guest code and
+  read the CP/PE/PI/MEM registers through `__cpReg` etc., which the replaced GXInit never set. They
+  now point at a quiet register block in the reserved MEM2 window (CP status = read and command
+  idle), which keeps the game's "HANG AT HIGH WATERMARK" watchdog happy.
+- **KPAD layout.** This 2006 KPAD stores `dev_type` as a u32 at 0x5C, with extension data from 0x60.
+  Writing the later SDK's byte fields there made the game ask to unplug an extension.
+- **Game debug log.** `WC_GAME_LOG=1` routes the game's stripped debug printf (0x802E30C8) to
+  OSReport, which shows scene changes, memcard steps and resource misses.
+- Translator note: calls into an ET alias hook only store the argument registers the translator
+  thinks the callee reads, so a hook that needs r4..r7 may see stale values. Prefer fixing the
+  state the guest code reads over hooking small leaf functions.
