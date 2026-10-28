@@ -14,6 +14,14 @@ online two-player.
 ## Status
 
 Step 1 of 4 (taking the game apart) is done. See [docs/step1-findings.md](docs/step1-findings.md).
+Step 2 (running on PC) is under way: menus, the attract demo and the tutorial races play. See
+[docs/porting-notes.md](docs/porting-notes.md).
+
+## Your own music
+
+Drop MP3s into the `Music` folder (on Linux `~/.local/share/WiiCompiled/Music`; it is created on
+first launch). Subfolders are fine, up to 100 songs. In the game, set Options > Race Music to
+All Random and your songs play during races, as with an SD card on the Wii.
 
 ## Layout
 

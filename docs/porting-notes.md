@@ -52,7 +52,6 @@ The game now boots to its first menu ("create a save file?") at 60 fps. What it 
 - Entry point, `.ctors` range, IPC globals and a few hand-checked SDK mappings (`tools/manual_map.txt`, `tools/manual_data.txt`).
 - `runtime/src/hle/excite_truck/et_hooks.cpp` (game-only hooks, addressed through the `0x8F000000` alias):
   - `WPADGetStatus`: services alarms while boot spins waiting for the Wii Remote library.
-  - `FAAttach`: the SD-card drive attaches with no card (the Music-folder feature replaces this later).
   - `OSGetFontEncode` / `OSSetFontEncode`: default to ANSI instead of reading a VI register.
   - `__OSReadROM`: serves the IPL ROM fonts from `assets/fonts` (Dolphin's Droid Sans replacements, Apache 2.0).
   - `GXSetDrawDone`: finishes queued draws and calls the game's draw-done callback.
@@ -96,3 +95,24 @@ The game now boots to its first menu ("create a save file?") at 60 fps. What it 
   the HUD's direct layout, which produced garbage FIFO commands. The HLE now writes the VCD and the
   padding when a descriptor changes during recording, for non-MKW games. It also saves and
   restores the HLE vertex state around recording when GX's save-context flag is set.
+
+## Custom music from a folder (step 2)
+
+The game plays MP3s from an SD card in races (Options > Race Music > All Random). The port gives it
+a read-only virtual SD card built from a folder on the PC:
+
+- Folder: `Music` in the app data folder (`~/.local/share/WiiCompiled/Music` on Linux), or
+  `WC_MUSIC_DIR`. Subfolders count. The game takes at most 100 songs.
+- `runtime/src/hle/excite_truck/et_sdcard.cpp` answers `/dev/sdio/slot0` (the commands follow
+  Dolphin's SDIO slot) and builds a FAT16 volume in memory: MBR, boot sector, FAT, a root with a
+  `MUSIC` folder, and one entry per song with a long file name, so the track list shows the real
+  names. Song bytes are read from the host files on demand. Writes fail as on a locked card.
+- The card is reported uninitialised until the driver's own reset, and its size is rounded to one
+  the CSD can state exactly: the FAT library rejects a partition that ends past the card size.
+- The game's real FAT stack (`FAAttach`) now runs; the old "no card" hook is gone.
+- **Background threads.** The game's MP3 thread scans the card from its own loop, sleeping 50 ms
+  between passes. ET's main loop never blocks in the guest scheduler (frames are paced on the
+  host inside `GXCopyDisp`), so that thread never woke up. `VIFlush`, which ET calls once a frame
+  after the copy, now wakes due sleepers and, when a thread is ready, parks the main thread for a
+  moment so it runs (`OS_HLE_YieldToReadyThreads`). Other ET background threads benefit too.
+- `WC_TRACE_SD=1` logs every SDIO request.

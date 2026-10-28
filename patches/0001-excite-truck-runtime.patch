@@ -160,10 +160,10 @@ index 2646e0f..53f892e 100644
          g_widescreenConfigured ? EggRecordWidth(kEggRecordWidth43, surfaceWidth, surfaceHeight)
 diff --git a/runtime/src/hle/excite_truck/et_hooks.cpp b/runtime/src/hle/excite_truck/et_hooks.cpp
 new file mode 100644
-index 0000000..39d33e9
+index 0000000..59920f2
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_hooks.cpp
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,165 @@
 +// Excite Truck (REXE01) specific hooks.
 +//
 +// Addresses here use the 0x8F000000 alias: guest_versions.inc maps 0x8F000000 + (ET address
@@ -203,18 +203,6 @@ index 0000000..39d33e9
 +    InvokeIndirectCpu(kWpadGetStatusBody, ctx);
 +}
 +PPC_NATIVE_OVERRIDE_VOID(8F05EE7C, ET_WPADGetStatus_8005ee7c, (CpuContext* ctx), (ctx));
-+
-+// FAAttach(drive, ..., info): attaches a drive to the game's FAT file layer. Drive 0 is the SD
-+// card used by the custom music player. There is no /dev/sdio here, so the real call fails and
-+// boot aborts with "FAAttach fails". Report success with no card inserted; the Music folder
-+// support replaces the SD path later.
-+extern "C" void ET_FAAttach_800b7968(CpuContext* ctx)
-+{
-+    const uint32_t drive = ctx->gpr[3];
-+    RT_LOGF(RT_TAG_HLE, "ET FAAttach(drive=%u) -> 0 (no SD card)\n", drive);
-+    ctx->gpr[3] = 0;
-+}
-+PPC_NATIVE_OVERRIDE_VOID(8F0B7968, ET_FAAttach_800b7968, (CpuContext* ctx), (ctx));
 +
 +// OSGetFontEncode / OSSetFontEncode (2006 SDK). The first call picks a default from the VI DTV
 +// status register (0xCC00206E) on NTSC consoles, which is hardware we do not emulate. A USA console
@@ -666,6 +654,624 @@ index 0000000..2c0d4e3
 +    ctx->gpr[3] = 1;
 +}
 +PPC_NATIVE_OVERRIDE_VOID(8F047C0C, ET_KPADRead_80047c0c, (CpuContext* ctx), (ctx));
+diff --git a/runtime/src/hle/excite_truck/et_sdcard.cpp b/runtime/src/hle/excite_truck/et_sdcard.cpp
+new file mode 100644
+index 0000000..58c28ff
+--- /dev/null
++++ b/runtime/src/hle/excite_truck/et_sdcard.cpp
+@@ -0,0 +1,593 @@
++// Excite Truck (REXE01): custom soundtrack from a folder on the PC.
++//
++// On a Wii the game plays MP3s from an SD card: its FAT library talks to IOS /dev/sdio/slot0 with
++// SD commands and reads 512-byte blocks. This file answers that device with a virtual, read-only
++// SD card whose FAT16 file system is generated from the host Music folder:
++//
++//   <user data>/Music          (created on first run; RuntimeConfigFile::ApplicationDataDirectory)
++//   WC_MUSIC_DIR=<path>        (overrides the folder)
++//
++// Every *.mp3 under the folder (subfolders included) appears on the card as /MUSIC/Tnnnn.MP3, in
++// path order. The game shows titles from the ID3 tags, so the 8.3 names are never seen. Only file
++// metadata is generated up front; music bytes are read from the host files when a block is read.
++//
++// SD protocol details follow Dolphin's SDIOSlot0 device (an SDSC v1 card, byte addressing).
++
++#include "hle/excite_truck/et_sdcard.h"
++
++#include "memory.h"
++#include "runtime_config.h"
++#include "runtime_log.h"
++
++#include <algorithm>
++#include <array>
++#include <cctype>
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <mutex>
++#include <string>
++#include <vector>
++
++namespace {
++
++namespace fs = std::filesystem;
++
++constexpr int32_t kSdFd = 0x5D10;
++
++constexpr uint32_t kSector = 512;
++constexpr uint32_t kSectorsPerCluster = 64; // 32 KiB clusters
++constexpr uint32_t kClusterBytes = kSector * kSectorsPerCluster;
++constexpr uint32_t kPartitionStart = 2048;    // LBA of the FAT16 partition
++constexpr uint32_t kReservedSectors = 1;
++constexpr uint32_t kNumFats = 2;
++constexpr uint32_t kRootEntries = 512;
++constexpr uint32_t kRootDirSectors = kRootEntries * 32 / kSector;
++constexpr uint32_t kMaxClusters = 65524;    // FAT16 limit
++constexpr uint32_t kMaxTracks = 999;
++
++// IOS ioctls and SD commands.
++enum : uint32_t {
++    IOCTL_WRITEHCR = 0x01,
++    IOCTL_READHCR = 0x02,
++    IOCTL_RESETCARD = 0x04,
++    IOCTL_SETCLK = 0x06,
++    IOCTL_SENDCMD = 0x07,
++    IOCTL_GETSTATUS = 0x0B,
++    IOCTL_GETOCR = 0x0C,
++};
++enum : uint32_t {
++    GO_IDLE_STATE = 0x00,
++    ALL_SEND_CID = 0x02,
++    SEND_RELATIVE_ADDR = 0x03,
++    SELECT_CARD = 0x07,
++    SEND_IF_COND = 0x08,
++    SEND_CSD = 0x09,
++    SEND_CID = 0x0A,
++    SEND_STATUS = 0x0D,
++    SET_BLOCKLEN = 0x10,
++    READ_SINGLE_BLOCK = 0x11,
++    READ_MULTIPLE_BLOCK = 0x12,
++    WRITE_SINGLE_BLOCK = 0x18,
++    WRITE_MULTIPLE_BLOCK = 0x19,
++    APP_CMD_NEXT = 0x37,
++    ACMD_SETBUSWIDTH = 0x06,
++    ACMD_SENDOPCOND = 0x29,
++    ACMD_SENDSCR = 0x33,
++    EVENT_REGISTER = 0x40,
++    EVENT_UNREGISTER = 0x41,
++};
++constexpr uint32_t CARD_INSERTED = 0x1;
++constexpr uint32_t CARD_LOCKED = 0x4;
++constexpr uint32_t CARD_INITIALIZED = 0x10000;
++constexpr uint32_t EVENT_INSERT = 1;
++constexpr int32_t RET_LOCKED = -10;
++
++struct Track {
++    fs::path hostPath;
++    uint32_t size = 0;
++    uint32_t firstCluster = 0;
++    uint32_t clusters = 0;
++    std::string longName;  // shown in the game's track list
++};
++
++// The generated card. Built once, on first open of the device.
++struct VirtualCard {
++    bool present = false;
++    uint64_t totalSectors = 0;   // whole card, MBR included
++    uint32_t partSectors = 0;    // FAT16 volume size
++    uint32_t fatSectors = 0;
++    uint32_t dataStart = 0;      // first data sector, relative to the partition
++    uint32_t clusterCount = 0;
++    std::vector<uint8_t> mbr;    // one sector
++    std::vector<uint8_t> vbr;    // one sector
++    std::vector<uint8_t> fat;    // fatSectors * 512
++    std::vector<uint8_t> root;   // kRootDirSectors * 512
++    uint32_t musicDirCluster = 0;
++    std::vector<uint8_t> musicDir; // whole clusters
++    std::vector<Track> tracks;
++};
++
++std::mutex g_mutex;
++
++bool Trace()
++{
++    static const bool on = std::getenv("WC_TRACE_SD") != nullptr;
++    return on;
++}
++VirtualCard g_card;
++bool g_built = false;
++bool g_open = false;
++std::array<uint32_t, 0x200 / 4> g_hcr{};
++
++void Put16(uint8_t* p, uint32_t v) { p[0] = uint8_t(v); p[1] = uint8_t(v >> 8); }
++void Put32(uint8_t* p, uint32_t v) { Put16(p, v); Put16(p + 2, v >> 16); }
++
++fs::path MusicFolder()
++{
++    if (const char* env = std::getenv("WC_MUSIC_DIR"); env && *env) {
++        return fs::path(env);
++    }
++    return RuntimeConfigFile::ApplicationDataDirectory() / "Music";
++}
++
++bool IsMp3(const fs::path& p)
++{
++    std::string ext = p.extension().string();
++    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
++    return ext == ".mp3";
++}
++
++void WriteDirEntry(uint8_t* e, const char name83[11], uint8_t attr, uint32_t cluster, uint32_t size)
++{
++    std::memcpy(e, name83, 11);
++    e[11] = attr;
++    // 2006-10-10 00:00, the build date of the game.
++    Put16(e + 14, 0);
++    Put16(e + 16, uint16_t(((2006 - 1980) << 9) | (10 << 5) | 10));
++    Put16(e + 18, uint16_t(((2006 - 1980) << 9) | (10 << 5) | 10));
++    Put16(e + 22, 0);
++    Put16(e + 24, uint16_t(((2006 - 1980) << 9) | (10 << 5) | 10));
++    Put16(e + 20, uint16_t(cluster >> 16));
++    Put16(e + 26, uint16_t(cluster));
++    Put32(e + 28, size);
++}
++
++// The name the game lists for a song: the host file name, kept to printable ASCII (the game's
++// font has nothing else) and to a length its track list can show.
++std::string DisplayName(const fs::path& path)
++{
++    std::string out;
++    for (unsigned char c : RuntimeConfigFile::PathToUtf8(path.filename())) {
++        if (c >= 0x80) {
++            if ((c & 0xC0) != 0x80) out += '_';  // one '_' per UTF-8 character
++            continue;
++        }
++        if (c < 0x20 || std::strchr("\\/:*?\"<>|", c)) c = '_';
++        out += char(c);
++    }
++    // The game matches ".mp3" in lower case.
++    constexpr size_t kMaxStem = 76;
++    std::string stem = out.size() >= 4 ? out.substr(0, out.size() - 4) : out;
++    if (stem.size() > kMaxStem) stem.resize(kMaxStem);
++    return stem + ".mp3";
++}
++
++uint32_t LfnEntries(const std::string& name) { return uint32_t((name.size() + 12) / 13); }
++
++// VFAT long-name entries for one file, written just before its 8.3 entry.
++uint8_t* WriteLongName(uint8_t* e, const std::string& name, const char name83[11])
++{
++    uint8_t sum = 0;
++    for (int i = 0; i < 11; ++i) sum = uint8_t(((sum & 1) << 7) + (sum >> 1) + uint8_t(name83[i]));
++    const uint32_t count = LfnEntries(name);
++    static const int kOffsets[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
++    for (uint32_t n = count; n >= 1; --n, e += 32) {
++        std::memset(e, 0, 32);
++        e[0] = uint8_t(n | (n == count ? 0x40 : 0));
++        e[11] = 0x0F;
++        e[13] = sum;
++        for (int k = 0; k < 13; ++k) {
++            const size_t idx = size_t(n - 1) * 13 + size_t(k);
++            uint16_t ch = idx < name.size() ? uint16_t(uint8_t(name[idx])) : (idx == name.size() ? 0 : 0xFFFF);
++            Put16(e + kOffsets[k], ch);
++        }
++    }
++    return e;
++}
++
++void BuildCard()
++{
++    VirtualCard card;
++    const fs::path folder = MusicFolder();
++    std::error_code ec;
++    fs::create_directories(folder, ec);
++
++    std::vector<fs::path> files;
++    if (fs::is_directory(folder, ec)) {
++        for (auto it = fs::recursive_directory_iterator(folder, fs::directory_options::skip_permission_denied, ec);
++             it != fs::recursive_directory_iterator(); it.increment(ec)) {
++            if (ec) break;
++            if (it->is_regular_file(ec) && IsMp3(it->path())) files.push_back(it->path());
++        }
++    }
++    std::sort(files.begin(), files.end());
++
++    // Lay out clusters: 2 = /MUSIC directory, then each file contiguously.
++    uint32_t nextCluster = 2;
++    uint32_t dirEntries = 2;
++    for (size_t i = 0; i < files.size() && i < kMaxTracks; ++i) dirEntries += 1 + LfnEntries(DisplayName(files[i]));
++    const uint32_t dirClusters = 1 + dirEntries * 32 / kClusterBytes;
++    card.musicDirCluster = nextCluster;
++    nextCluster += dirClusters;
++    for (const fs::path& path : files) {
++        if (card.tracks.size() >= kMaxTracks) {
++            RT_LOGF(RT_TAG_HLE, "[music] more than %u MP3s, ignoring the rest\n", kMaxTracks);
++            break;
++        }
++        const uintmax_t size = fs::file_size(path, ec);
++        if (ec || size == 0 || size > 0x7FFFFFFFu) continue;
++        const uint32_t clusters = uint32_t((size + kClusterBytes - 1) / kClusterBytes);
++        if (nextCluster + clusters > kMaxClusters + 2) {
++            RT_LOGF(RT_TAG_HLE, "[music] the virtual SD card is full (2 GB), skipping %s and later files\n",
++                    RuntimeConfigFile::PathToUtf8(path).c_str());
++            break;
++        }
++        card.tracks.push_back({path, uint32_t(size), nextCluster, clusters, DisplayName(path)});
++        nextCluster += clusters;
++    }
++
++    // FAT16 needs at least 4085 clusters; pad small cards up to that.
++    card.clusterCount = std::max<uint32_t>(nextCluster - 2, 4096);
++    card.fatSectors = ((card.clusterCount + 2) * 2 + kSector - 1) / kSector;
++    card.dataStart = kReservedSectors + kNumFats * card.fatSectors + kRootDirSectors;
++    card.partSectors = card.dataStart + card.clusterCount * kSectorsPerCluster;
++    card.totalSectors = uint64_t(kPartitionStart) + card.partSectors;
++    // The CSD stores the size as (c_size + 1) << shift, so round the card up to a size it can
++    // state exactly. The game's FAT library rejects a partition that ends past the card.
++    for (;;) {
++        uint64_t bytes = card.totalSectors * kSector;
++        uint32_t shift = 0;
++        while ((bytes >> shift) > 4096) ++shift;
++        const uint64_t unit = uint64_t(1) << shift;
++        const uint64_t rounded = (bytes + unit - 1) / unit * unit;
++        if (rounded == bytes) break;
++        card.totalSectors = rounded / kSector;
++    }
++
++    // MBR with one FAT16 (LBA) partition.
++    card.mbr.assign(kSector, 0);
++    uint8_t* pe = card.mbr.data() + 446;
++    pe[0] = 0x00;
++    pe[1] = 0xFE; pe[2] = 0xFF; pe[3] = 0xFF; // CHS: unused
++    pe[4] = 0x0E;
++    pe[5] = 0xFE; pe[6] = 0xFF; pe[7] = 0xFF;
++    Put32(pe + 8, kPartitionStart);
++    Put32(pe + 12, card.partSectors);
++    card.mbr[510] = 0x55; card.mbr[511] = 0xAA;
++
++    // Volume boot record (BPB).
++    card.vbr.assign(kSector, 0);
++    uint8_t* b = card.vbr.data();
++    b[0] = 0xEB; b[1] = 0x3C; b[2] = 0x90;
++    std::memcpy(b + 3, "MSDOS5.0", 8);
++    Put16(b + 11, kSector);
++    b[13] = uint8_t(kSectorsPerCluster);
++    Put16(b + 14, kReservedSectors);
++    b[16] = uint8_t(kNumFats);
++    Put16(b + 17, kRootEntries);
++    Put16(b + 19, card.partSectors < 0x10000 ? card.partSectors : 0);
++    b[21] = 0xF8;
++    Put16(b + 22, card.fatSectors);
++    Put16(b + 24, 63);
++    Put16(b + 26, 255);
++    Put32(b + 28, kPartitionStart);
++    Put32(b + 32, card.partSectors >= 0x10000 ? card.partSectors : 0);
++    b[36] = 0x80;
++    b[38] = 0x29;
++    Put32(b + 39, 0x20061010);
++    std::memcpy(b + 43, "EXCITEMUSIC", 11);
++    std::memcpy(b + 54, "FAT16   ", 8);
++    b[510] = 0x55; b[511] = 0xAA;
++
++    // FAT: media byte, end-of-chain marker, then the chains.
++    card.fat.assign(size_t(card.fatSectors) * kSector, 0);
++    auto setFat = [&](uint32_t cluster, uint16_t value) { Put16(card.fat.data() + cluster * 2, value); };
++    setFat(0, 0xFFF8);
++    setFat(1, 0xFFFF);
++    auto chain = [&](uint32_t first, uint32_t count) {
++        for (uint32_t i = 0; i < count; ++i) setFat(first + i, i + 1 == count ? 0xFFFF : uint16_t(first + i + 1));
++    };
++    chain(card.musicDirCluster, dirClusters);
++    for (const Track& t : card.tracks) chain(t.firstCluster, t.clusters);
++
++    // Root: volume label and the MUSIC folder.
++    card.root.assign(size_t(kRootDirSectors) * kSector, 0);
++    WriteDirEntry(card.root.data(), "EXCITEMUSIC", 0x08, 0, 0);
++    WriteDirEntry(card.root.data() + 32, "MUSIC      ", 0x10, card.musicDirCluster, 0);
++
++    // /MUSIC: ".", "..", then one entry per track.
++    card.musicDir.assign(size_t(dirClusters) * kClusterBytes, 0);
++    WriteDirEntry(card.musicDir.data(), ".          ", 0x10, card.musicDirCluster, 0);
++    WriteDirEntry(card.musicDir.data() + 32, "..         ", 0x10, 0, 0);
++    uint8_t* entry = card.musicDir.data() + 64;
++    for (size_t i = 0; i < card.tracks.size(); ++i) {
++        char name[12];
++        std::snprintf(name, sizeof(name), "T%04uMP3", unsigned(i + 1));
++        char name83[11];
++        std::memcpy(name83, name, 5);
++        std::memset(name83 + 5, ' ', 3);
++        std::memcpy(name83 + 8, "MP3", 3);
++        entry = WriteLongName(entry, card.tracks[i].longName, name83);
++        WriteDirEntry(entry, name83, 0x01 /* read-only */, card.tracks[i].firstCluster, card.tracks[i].size);
++        entry += 32;
++    }
++
++    card.present = true;
++    RT_LOGF(RT_TAG_HLE, "[music] SD card from %s: %zu MP3 track(s)\n",
++            RuntimeConfigFile::PathToUtf8(folder).c_str(), card.tracks.size());
++    g_card = std::move(card);
++}
++
++void EnsureBuilt()
++{
++    if (!g_built) {
++        BuildCard();
++        g_built = true;
++    }
++}
++
++// Reads one 512-byte sector of the card.
++void ReadSector(uint64_t lba, uint8_t* out)
++{
++    std::memset(out, 0, kSector);
++    if (lba == 0) {
++        std::memcpy(out, g_card.mbr.data(), kSector);
++        return;
++    }
++    if (lba < kPartitionStart) return;
++    uint64_t s = lba - kPartitionStart;
++    if (s < kReservedSectors) {
++        std::memcpy(out, g_card.vbr.data(), kSector);
++        return;
++    }
++    s -= kReservedSectors;
++    if (s < uint64_t(kNumFats) * g_card.fatSectors) {
++        const uint64_t off = (s % g_card.fatSectors) * kSector;
++        std::memcpy(out, g_card.fat.data() + off, kSector);
++        return;
++    }
++    s -= uint64_t(kNumFats) * g_card.fatSectors;
++    if (s < kRootDirSectors) {
++        std::memcpy(out, g_card.root.data() + s * kSector, kSector);
++        return;
++    }
++    s -= kRootDirSectors;
++    const uint32_t cluster = uint32_t(s / kSectorsPerCluster) + 2;
++    const uint64_t inCluster = (s % kSectorsPerCluster) * kSector;
++    const uint32_t dirClusters = uint32_t(g_card.musicDir.size() / kClusterBytes);
++    if (cluster >= g_card.musicDirCluster && cluster < g_card.musicDirCluster + dirClusters) {
++        std::memcpy(out, g_card.musicDir.data() + uint64_t(cluster - g_card.musicDirCluster) * kClusterBytes + inCluster,
++                    kSector);
++        return;
++    }
++    // Tracks are contiguous and sorted by first cluster.
++    auto it = std::upper_bound(g_card.tracks.begin(), g_card.tracks.end(), cluster,
++                               [](uint32_t c, const Track& t) { return c < t.firstCluster; });
++    if (it == g_card.tracks.begin()) return;
++    --it;
++    if (cluster >= it->firstCluster + it->clusters) return;
++    const uint64_t fileOff = uint64_t(cluster - it->firstCluster) * kClusterBytes + inCluster;
++    if (fileOff >= it->size) return;
++
++    // Keep the most recent file open: the player streams one track at a time.
++    static fs::path s_openPath;
++    static std::ifstream s_file;
++    if (s_openPath != it->hostPath) {
++        s_file.close();
++        s_file.clear();
++        s_file.open(it->hostPath, std::ios::binary);
++        s_openPath = it->hostPath;
++    }
++    if (!s_file) return;
++    const uint32_t n = uint32_t(std::min<uint64_t>(kSector, it->size - fileOff));
++    s_file.clear();
++    s_file.seekg(std::streamoff(fileOff));
++    s_file.read(reinterpret_cast<char*>(out), n);
++}
++
++std::array<uint32_t, 4> CsdV1()
++{
++    // Same encoding as Dolphin's GetCSDv1: size = (c_size + 1) << (c_size_mult + 2 + read_bl_len).
++    uint64_t size = g_card.totalSectors * kSector;
++    uint32_t readBlLen = 9;
++    uint32_t cSizeMult = 0;
++    while (size > 4096) {
++        size >>= 1;
++        if (++cSizeMult > 7 + 2 + readBlLen && ++readBlLen > 15) {
++            size = 4096;
++            cSizeMult = 7 + 2 + readBlLen;
++        }
++    }
++    cSizeMult -= 2 + readBlLen;
++    const uint32_t cSize = uint32_t(size - 1);
++    return {{0x000007f0, 0x035b5080 | (readBlLen << 8) | (cSize >> 10), 0x003ffc7f | (cSize << 22) | (cSizeMult << 7),
++             0x80040040 | (readBlLen << 18)}};
++}
++
++// The card starts uninitialised, as after a real boot, so the driver runs its own reset and
++// set-up (RESETCARD and the SD commands) before it reads. Skipping that leaves its state empty.
++bool g_initialized = false;
++
++uint32_t Status()
++{
++    if (!g_card.present) return 0u;
++    return CARD_INSERTED | (g_initialized ? CARD_INITIALIZED : 0u);
++}
++
++constexpr int32_t kPending = 0x7FFF0001;
++constexpr int32_t kReplyInsert = int32_t(EVENT_INSERT);
++
++// One SD command. Returns the IOS result, kPending to leave the request unanswered, or
++// kReplyInsert (the event type) for an insert notification.
++int32_t ExecuteCommand(uint32_t in, uint32_t out, uint32_t outLen, uint32_t rwBuf, uint32_t rwLen)
++{
++    const uint32_t command = Memory::Read32(in + 0);
++    const uint32_t arg = Memory::Read32(in + 12);
++    const uint32_t blocks = Memory::Read32(in + 16);
++    const uint32_t bsize = Memory::Read32(in + 20);
++    uint32_t addr = Memory::Read32(in + 24);
++    if (rwBuf != 0 && rwLen != 0) addr = rwBuf;
++    auto reply = [&](uint32_t offset, uint32_t value) {
++        if (out != 0 && offset + 4 <= outLen) Memory::Write32(out + offset, value);
++    };
++
++    switch (command) {
++    case GO_IDLE_STATE: reply(0, 0); break;
++    case SEND_RELATIVE_ADDR: reply(0, 0x9f62); break;
++    case SELECT_CARD: reply(0, (arg >> 16) ? 0x700 : 0x900); break;
++    case SEND_IF_COND: reply(0, arg); break;
++    case SEND_CSD: {
++        const auto csd = CsdV1();
++        reply(12, csd[0]); reply(8, csd[1]); reply(4, csd[2]); reply(0, csd[3]);
++        break;
++    }
++    case ALL_SEND_CID:
++    case SEND_CID:
++        reply(12, 0x00D0444F); reply(8, 0x4C504849); reply(4, 0x4E430403); reply(0, 0xAC68006B);
++        break;
++    case SEND_STATUS: reply(0, 0x900); break;
++    case SET_BLOCKLEN: reply(0, 0x900); break;
++    case APP_CMD_NEXT: reply(0, 0x920); break;
++    case ACMD_SETBUSWIDTH: reply(0, 0x920); break;
++    case ACMD_SENDOPCOND: reply(0, 0x80ff8000); break;
++    case ACMD_SENDSCR: reply(0, 0x920); break;
++    case READ_SINGLE_BLOCK:
++    case READ_MULTIPLE_BLOCK: {
++        const uint32_t count = command == READ_SINGLE_BLOCK ? 1 : blocks;
++        const uint32_t bs = bsize ? bsize : kSector;
++        if (bs != kSector || (arg % kSector) != 0) {
++            RT_LOGF(RT_TAG_HLE, "[music] unaligned SD read arg=0x%X bsize=%u\n", arg, bs);
++        }
++        uint8_t sector[kSector];
++        for (uint32_t i = 0; i < count; ++i) {
++            ReadSector(uint64_t(arg) / kSector + i, sector);
++            if (uint8_t* dst = static_cast<uint8_t*>(Memory::GetPointer(addr + i * kSector, kSector))) {
++                std::memcpy(dst, sector, kSector);
++            }
++        }
++        reply(0, 0x900);
++        break;
++    }
++    case WRITE_SINGLE_BLOCK:
++    case WRITE_MULTIPLE_BLOCK:
++        reply(0, 0x900);
++        return RET_LOCKED;
++    case EVENT_REGISTER:
++        // Insertion/removal notification. With the card present an insert request completes at
++        // once with EVENT_INSERT, as Dolphin does. A removal request stays pending forever.
++        if (arg == EVENT_INSERT && g_card.present) return kReplyInsert;
++        return kPending;
++    case EVENT_UNREGISTER:
++        return 0;
++    default:
++        RT_LOGF(RT_TAG_HLE, "[music] unhandled SD command 0x%X\n", command);
++        break;
++    }
++    return 0;
++}
++
++} // namespace
++
++int32_t SdCard_HLE_OpenDevice(const char* path)
++{
++    if (path == nullptr || std::strcmp(path, "/dev/sdio/slot0") != 0) return 0;
++    std::lock_guard<std::mutex> lock(g_mutex);
++    EnsureBuilt();
++    g_open = true;
++    g_initialized = false;
++    g_hcr.fill(0);
++    return kSdFd;
++}
++
++bool SdCard_HLE_IsFd(uint32_t fd)
++{
++    return static_cast<int32_t>(fd) == kSdFd;
++}
++
++int32_t SdCard_HLE_Close(uint32_t)
++{
++    std::lock_guard<std::mutex> lock(g_mutex);
++    g_open = false;
++    return 0;
++}
++
++int32_t SdCard_HLE_Ioctl(uint32_t, uint32_t cmd, uint32_t in, uint32_t inLen, uint32_t out, uint32_t outLen, bool* pending)
++{
++    std::lock_guard<std::mutex> lock(g_mutex);
++    if (Trace()) std::fprintf(stderr, "[sd] ioctl 0x%X in=%u out=%u cmd=0x%X arg=0x%X\n", cmd, inLen, outLen,
++                              (cmd == IOCTL_SENDCMD && inLen >= 4) ? Memory::Read32(in) : 0u,
++                              (cmd == IOCTL_SENDCMD && inLen >= 16) ? Memory::Read32(in + 12) : 0u);
++    if (pending) *pending = false;
++    if (out != 0 && outLen != 0) {
++        if (uint8_t* p = static_cast<uint8_t*>(Memory::GetPointer(out, outLen))) std::memset(p, 0, outLen);
++    }
++    auto write = [&](uint32_t value) { if (out != 0 && outLen >= 4) Memory::Write32(out, value); };
++    switch (cmd) {
++    case IOCTL_WRITEHCR: {
++        if (inLen < 20) return 0;
++        const uint32_t reg = Memory::Read32(in);
++        const uint32_t val = Memory::Read32(in + 16);
++        if (reg < g_hcr.size()) {
++            if (reg == 0x2C && (val & 1)) g_hcr[reg] = val | 2;  // clock stable
++            else if (reg == 0x2F && val) g_hcr[reg] = 0;         // software reset
++            else g_hcr[reg] = val;
++        }
++        return 0;
++    }
++    case IOCTL_READHCR: {
++        const uint32_t reg = inLen >= 4 ? Memory::Read32(in) : 0;
++        write(reg < g_hcr.size() ? g_hcr[reg] : 0);
++        return 0;
++    }
++    case IOCTL_RESETCARD: g_initialized = g_card.present; write(Status()); return 0;
++    case IOCTL_SETCLK: return 0;
++    case IOCTL_GETSTATUS: write(Status()); return 0;
++    case IOCTL_GETOCR: write(0x80ff8000); return 0;
++    case IOCTL_SENDCMD: {
++        const int32_t r = ExecuteCommand(in, out, outLen, 0, 0);
++        if (r == kPending) {
++            if (pending) *pending = true;
++            return 0;
++        }
++        return r;
++    }
++    default:
++        RT_LOGF(RT_TAG_HLE, "[music] unhandled SD ioctl 0x%X\n", cmd);
++        return 0;
++    }
++}
++
++int32_t SdCard_HLE_Ioctlv(uint32_t, uint32_t cmd, uint32_t numIn, uint32_t numOut, uint32_t vectorPtr)
++{
++    std::lock_guard<std::mutex> lock(g_mutex);
++    if (Trace()) std::fprintf(stderr, "[sd] ioctlv 0x%X %u/%u cmd=0x%X arg=0x%X blocks=%u\n", cmd, numIn, numOut,
++                              Memory::Read32(Memory::Read32(vectorPtr)), Memory::Read32(Memory::Read32(vectorPtr) + 12),
++                              Memory::Read32(Memory::Read32(vectorPtr) + 16));
++    if (cmd != IOCTL_SENDCMD || numIn < 2 || numOut < 1) {
++        RT_LOGF(RT_TAG_HLE, "[music] unhandled SD ioctlv 0x%X (%u in, %u out)\n", cmd, numIn, numOut);
++        return 0;
++    }
++    const uint32_t in0 = Memory::Read32(vectorPtr + 0);
++    const uint32_t rw = Memory::Read32(vectorPtr + 8);
++    const uint32_t rwLen = Memory::Read32(vectorPtr + 12);
++    const uint32_t out0 = Memory::Read32(vectorPtr + numIn * 8);
++    const uint32_t out0Len = Memory::Read32(vectorPtr + numIn * 8 + 4);
++    if (out0 != 0 && out0Len != 0) {
++        if (uint8_t* p = static_cast<uint8_t*>(Memory::GetPointer(out0, out0Len))) std::memset(p, 0, out0Len);
++    }
++    const int32_t r = ExecuteCommand(in0, out0, out0Len, rw, rwLen);
++    return r == kPending ? 0 : r;
++}
+diff --git a/runtime/src/hle/excite_truck/et_sdcard.h b/runtime/src/hle/excite_truck/et_sdcard.h
+new file mode 100644
+index 0000000..e61f894
+--- /dev/null
++++ b/runtime/src/hle/excite_truck/et_sdcard.h
+@@ -0,0 +1,13 @@
++#pragma once
++
++#include <cstdint>
++
++// Virtual /dev/sdio/slot0 backed by the host Music folder (see et_sdcard.cpp).
++// Open returns the device fd, or 0 when the path is not the SD slot.
++int32_t SdCard_HLE_OpenDevice(const char* path);
++bool SdCard_HLE_IsFd(uint32_t fd);
++int32_t SdCard_HLE_Close(uint32_t fd);
++// `pending` is set when the request must stay unanswered (SD event registration).
++int32_t SdCard_HLE_Ioctl(uint32_t fd, uint32_t cmd, uint32_t in, uint32_t inLen, uint32_t out, uint32_t outLen,
++                         bool* pending);
++int32_t SdCard_HLE_Ioctlv(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut, uint32_t vectorPtr);
 diff --git a/runtime/src/hle/gx/gx_dl.cpp b/runtime/src/hle/gx/gx_dl.cpp
 index daceeb7..8496831 100644
 --- a/runtime/src/hle/gx/gx_dl.cpp
@@ -1030,8 +1636,48 @@ index 3a8c43b..fcd1697 100644
      if(!la) return; uint32_t p=la;
      std::vector<std::array<uint32_t, 2>> list;
      while(true){
+diff --git a/runtime/src/hle/ios.cpp b/runtime/src/hle/ios.cpp
+index 9de2c3c..2cfff88 100644
+--- a/runtime/src/hle/ios.cpp
++++ b/runtime/src/hle/ios.cpp
+@@ -6,6 +6,7 @@
+ #include "memory.h"
+ #include "hle/bluetooth_hle.h"
+ #include "hle/net/network.h"
++#include "hle/excite_truck/et_sdcard.h"
+ 
+ #include <cstdint>
+ #include <cstdio>
+@@ -98,6 +99,16 @@ extern "C" void IOS_IoctlAsync_80194158(CpuContext* ctx)
+     const uint32_t outLen = ctx->gpr[8];
+     const uint32_t callback = ctx->gpr[9];
+     const uint32_t callbackArg = ctx->gpr[10];
++    if (SdCard_HLE_IsFd(fd)) {
++        bool pending = false;
++        const int32_t result = SdCard_HLE_Ioctl(fd, cmd, inBuf, inLen, outBuf, outLen, &pending);
++        if (pending) {
++            SetIosReturn(ctx, 0);
++        } else {
++            CompleteAsync(ctx, callback, result, callbackArg);
++        }
++        return;
++    }
+     if (TryDeferredNetworkAsync(
+             ctx, fd, callback, callbackArg,
+             [&] {
+@@ -129,6 +140,10 @@ extern "C" void IOS_OpenAsync_HLE(CpuContext* ctx) {
+             CompleteAsync(ctx, callback, netFd, callbackArg);
+             return;
+         }
++        if (const int32_t sdFd = SdCard_HLE_OpenDevice(path)) {
++            CompleteAsync(ctx, callback, sdFd, callbackArg);
++            return;
++        }
+     }
+     const int32_t result = NAND_IOS_Open_HLE(pathPtr, mode);
+     CompleteAsync(ctx, callback, result, callbackArg); // Queued successfully
 diff --git a/runtime/src/hle/os/os_sleep.cpp b/runtime/src/hle/os/os_sleep.cpp
-index 5a66c02..cc6e520 100644
+index 5a66c02..f1b2525 100644
 --- a/runtime/src/hle/os/os_sleep.cpp
 +++ b/runtime/src/hle/os/os_sleep.cpp
 @@ -1,3 +1,4 @@
@@ -1039,7 +1685,41 @@ index 5a66c02..cc6e520 100644
  // OSSleepTicks / OSSleepThread parking plus the host-side sleep-timer table.
  
  #include <algorithm>
-@@ -396,10 +397,18 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
+@@ -330,6 +331,33 @@ extern "C" void OS__SleepTicks_HLE_801aaca8(CpuContext* ctx)
+ }
+ REGISTER_NATIVE_FUNCTION(0x801AACA8, OS__SleepTicks_HLE_801aaca8);
+ 
++// Excite Truck paces its frames on the host inside GXCopyDisp, so its main thread never blocks in
++// the guest scheduler and lower-priority threads (the MP3 player that scans the SD card, for one)
++// would never run. Called once a frame: wake due sleepers, and if any thread is ready, park the
++// caller for a moment so it gets the CPU, as the wait for the next frame does on a Wii.
++extern "C" void OS_HLE_YieldToReadyThreads(CpuContext* ctx)
++{
++    using namespace OsHleInternal;
++    if (ctx == nullptr || !Fiber::GuestFiberManager::IsInitialized()) {
++        return;
++    }
++    if (Fiber::GuestFiberManager::GetCurrentGuestThread() == 0) {
++        return;
++    }
++    try {
++        ProcessSleepTimers(ctx);
++        if (::Memory::Read32(kSchedulerPendingFlagAddr) == 0) {
++            return;
++        }
++    } catch (const ::Memory::AccessViolation&) {
++        return;
++    }
++    constexpr uint64_t kYieldTicks = TimeBaseContract::NanosecondsToTicks(250'000);
++    ctx->gpr[3] = 0;
++    ctx->gpr[4] = static_cast<uint32_t>(kYieldTicks);
++    OS__SleepTicks_HLE_801aaca8(ctx);
++}
++
+ namespace {
+ // OSSleepThread must reach SelectThread with the scheduler-disable count at zero, or the thread
+ // relinks into the wait queue a second time and OSWakeupThread livelocks. The SDK guarantees this;
+@@ -396,10 +424,18 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
      const uint32_t queuePtr = cpu->gpr[3];
      
      if (queuePtr == 0) {
@@ -1198,7 +1878,7 @@ index b76e5e1..1ea9732 100644
  PPC_NATIVE_OVERRIDE(80166964, DVDLowClearCoverInterrupt_80166964, int32_t, (uint32_t cb), (cb));
  
 diff --git a/runtime/src/hle/storage/nand_api.cpp b/runtime/src/hle/storage/nand_api.cpp
-index 39963ce..1672fd4 100644
+index 39963ce..15a1099 100644
 --- a/runtime/src/hle/storage/nand_api.cpp
 +++ b/runtime/src/hle/storage/nand_api.cpp
 @@ -1,3 +1,5 @@
@@ -1237,6 +1917,15 @@ index 39963ce..1672fd4 100644
      const char* path = pathPtr ? (const char*)Memory::GetPointer(pathPtr) : nullptr;
      if (!path || !fileInfoPtr) {
          LogNandError("NANDOpen", "invalid params: path=%p fileInfo=0x%08X", path, fileInfoPtr);
+@@ -194,7 +200,7 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
+             file = NandFopen(hostPath, fopenMode);
+         }
+         if (!file) {
+-            LogNandError("NANDOpen", "FAILED to open");
++            LogNandError("NANDOpen", "FAILED to open %s (mode %d)", HostPathText(hostPath).c_str(), static_cast<int>(mode));
+             return NAND_RESULT_NOEXISTS;
+         }
+     }
 @@ -207,6 +213,7 @@ extern "C" int32_t NANDOpen_HLE(uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t
  PPC_NATIVE_OVERRIDE(8019C800, NANDOpen_HLE, int32_t, (uint32_t pathPtr, uint32_t fileInfoPtr, uint32_t mode), (pathPtr, fileInfoPtr, mode));
  
@@ -1352,17 +2041,18 @@ index aeb1962..2e11911 100644
          return NAND_RESULT_INVALID;
      }
 diff --git a/runtime/src/hle/storage/nand_isfs.cpp b/runtime/src/hle/storage/nand_isfs.cpp
-index d91dd89..7f85cd5 100644
+index d91dd89..3e51721 100644
 --- a/runtime/src/hle/storage/nand_isfs.cpp
 +++ b/runtime/src/hle/storage/nand_isfs.cpp
-@@ -1,3 +1,6 @@
+@@ -1,3 +1,7 @@
++#include "hle/excite_truck/et_sdcard.h"
 +#include <cstdlib>
 +#include <cstring>
 +#include <cstdio>
  // NAND/ISFS HLE: the IOS_* device layer.
  //
  // Shared state and helpers live in nand_internal.h.
-@@ -61,6 +64,7 @@ static constexpr int32_t ISFS_DEV_FD = 1;
+@@ -61,6 +65,7 @@ static constexpr int32_t ISFS_DEV_FD = 1;
  static constexpr int32_t ES_DEV_FD = 3;
  static constexpr int32_t DOLPHIN_DEV_FD = 4;
  static constexpr uint32_t ES_IOCTL_GETDEVICEID = 0x07;
@@ -1370,7 +2060,7 @@ index d91dd89..7f85cd5 100644
  static constexpr uint32_t ES_IOCTL_GETDEVICECERT = 0x1E;
  static constexpr uint32_t ES_IOCTL_GETTITLEID = 0x20;
  static constexpr uint32_t ES_IOCTL_SIGN = 0x30;
-@@ -359,8 +363,12 @@ static int32_t HandleShaIoctlv(int32_t fd, uint32_t cmd, uint32_t numIn, uint32_
+@@ -359,8 +364,12 @@ static int32_t HandleShaIoctlv(int32_t fd, uint32_t cmd, uint32_t numIn, uint32_
  }
  
  extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
@@ -1383,7 +2073,17 @@ index d91dd89..7f85cd5 100644
      
      if (!path) {
          LogNandError("IOS_Open", "null path");
-@@ -439,6 +447,7 @@ extern "C" void NAND_IOS_OpenBody_HLE_801938FC(CpuContext* ctx) {
+@@ -388,6 +397,9 @@ extern "C" int32_t NAND_IOS_Open_HLE(uint32_t pathPtr, uint32_t mode) {
+         if (std::strcmp(path, "/dev/dolphin") == 0) {
+             return DOLPHIN_DEV_FD;
+         }
++        if (const int32_t sdFd = SdCard_HLE_OpenDevice(path)) {
++            return sdFd;
++        }
+         LogNandWarning("IOS_Open", "unknown device '%s' mode=%u", path, mode);
+         return ISFS_ENOENT;
+     }
+@@ -439,6 +451,7 @@ extern "C" void NAND_IOS_OpenBody_HLE_801938FC(CpuContext* ctx) {
  REGISTER_NATIVE_FUNCTION_AS(0x801938FC, NAND_IOS_OpenBody_HLE_801938FC, "NAND_IOS_OpenBody_HLE_801938FC");
  
  extern "C" int32_t NAND_IOS_Close_HLE(uint32_t fd) {
@@ -1391,7 +2091,17 @@ index d91dd89..7f85cd5 100644
      if (fd == ISFS_DEV_FD) {
          return ISFS_OK;
      }
-@@ -471,6 +480,7 @@ extern "C" int32_t NAND_IOS_Close_HLE(uint32_t fd) {
+@@ -455,6 +468,9 @@ extern "C" int32_t NAND_IOS_Close_HLE(uint32_t fd) {
+     if (Network_HLE_IsFd(fd)) {
+         return Network_HLE_Close(fd);
+     }
++    if (SdCard_HLE_IsFd(fd)) {
++        return SdCard_HLE_Close(fd);
++    }
+     if (Bluetooth_HLE_IsFd(fd)) {
+         return Bluetooth_HLE_Close(fd);
+     }
+@@ -471,6 +487,7 @@ extern "C" int32_t NAND_IOS_Close_HLE(uint32_t fd) {
  PPC_NATIVE_OVERRIDE(80193AD8, NAND_IOS_Close_HLE, int32_t, (uint32_t fd), (fd));
  
  extern "C" int32_t NAND_IOS_Read_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t length) {
@@ -1399,7 +2109,7 @@ index d91dd89..7f85cd5 100644
      auto* handle = GetHandle(fd);
      if (!handle || !handle->file) {
          LogNandError("IOS_Read", "invalid fd=%d", fd);
-@@ -495,6 +505,7 @@ extern "C" int32_t NAND_IOS_Read_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t l
+@@ -495,6 +512,7 @@ extern "C" int32_t NAND_IOS_Read_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t l
  PPC_NATIVE_OVERRIDE(80193C80, NAND_IOS_Read_HLE, int32_t, (uint32_t fd, uint32_t bufferPtr, uint32_t length), (fd, bufferPtr, length));
  
  extern "C" int32_t NAND_IOS_Write_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t length) {
@@ -1407,7 +2117,7 @@ index d91dd89..7f85cd5 100644
      auto* handle = GetHandle(fd);
      if (!handle || !handle->file) {
          LogNandError("IOS_Write", "invalid fd=%d", fd);
-@@ -520,6 +531,7 @@ extern "C" int32_t NAND_IOS_Write_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t
+@@ -520,6 +538,7 @@ extern "C" int32_t NAND_IOS_Write_HLE(uint32_t fd, uint32_t bufferPtr, uint32_t
  PPC_NATIVE_OVERRIDE(80193E88, NAND_IOS_Write_HLE, int32_t, (uint32_t fd, uint32_t bufferPtr, uint32_t length), (fd, bufferPtr, length));
  
  extern "C" int32_t NAND_IOS_Seek_HLE(uint32_t fd, int32_t offset, int32_t whence) {
@@ -1415,7 +2125,7 @@ index d91dd89..7f85cd5 100644
      auto* handle = GetHandle(fd);
      if (!handle || !handle->file) {
          LogNandError("IOS_Seek", "invalid fd=%d", fd);
-@@ -563,6 +575,10 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
+@@ -563,10 +582,17 @@ extern "C" int32_t NAND_IOS_Ioctl_HLE(
      uint32_t inBufPtr, uint32_t inLen,
      uint32_t outBufPtr, uint32_t outLen)
  {
@@ -1426,7 +2136,14 @@ index d91dd89..7f85cd5 100644
  
      if (Network_HLE_IsFd(fd)) {
          return Network_HLE_Ioctl(fd, cmd, inBufPtr, inLen, outBufPtr, outLen);
-@@ -1024,6 +1040,10 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
+     }
++    if (SdCard_HLE_IsFd(fd)) {
++        return SdCard_HLE_Ioctl(fd, cmd, inBufPtr, inLen, outBufPtr, outLen, nullptr);
++    }
+ 
+     if (GetShaHandle(static_cast<int32_t>(fd))) {
+         LogNandWarning("IOS_Ioctl", "/dev/sha does not support scalar ioctl cmd=%u", cmd);
+@@ -1024,10 +1050,17 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
      uint32_t numOut,
      uint32_t vectorPtr)
  {
@@ -1437,7 +2154,14 @@ index d91dd89..7f85cd5 100644
  
      if (Network_HLE_IsFd(fd)) {
          return Network_HLE_Ioctlv(fd, cmd, numIn, numOut, vectorPtr);
-@@ -1081,6 +1101,27 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
+     }
++    if (SdCard_HLE_IsFd(fd)) {
++        return SdCard_HLE_Ioctlv(fd, cmd, numIn, numOut, vectorPtr);
++    }
+     if (Bluetooth_HLE_IsFd(fd)) {
+         return Bluetooth_HLE_Ioctlv(fd, cmd, numIn, numOut, vectorPtr);
+     }
+@@ -1081,6 +1114,27 @@ extern "C" int32_t NAND_IOS_Ioctlv_HLE(
                  return ISFS_OK;
              }
  
@@ -1466,7 +2190,7 @@ index d91dd89..7f85cd5 100644
                  if (numIn != 0 || numOut != 1) {
                      return ISFS_EINVAL;
 diff --git a/runtime/src/hle/vi.cpp b/runtime/src/hle/vi.cpp
-index cd236a9..1161ec5 100644
+index cd236a9..ebebac4 100644
 --- a/runtime/src/hle/vi.cpp
 +++ b/runtime/src/hle/vi.cpp
 @@ -1,3 +1,4 @@
@@ -1474,7 +2198,23 @@ index cd236a9..1161ec5 100644
  #include "hle_stubs.h"
  #include "memory.h"
  #include "abi_bridge.h"
-@@ -220,21 +221,37 @@ void ViSetR3(CpuContext* ctx, uint32_t value)
+@@ -9,6 +10,7 @@
+ #include "platform/host_platform.h"
+ #include "runtime_log.h"
+ #include "perf_stats.h"
++#include "guest_abi/guest_region.h"
+ 
+ #include <dolphin/vi.h>
+ 
+@@ -34,6 +36,7 @@
+ // Forward declaration for OSWakeupThread - used to wake threads on VI retrace queue
+ extern "C" void OSWakeupThread_HLE_801aaaa4(CpuContext* ctx);
+ 
++extern "C" void OS_HLE_YieldToReadyThreads(CpuContext* ctx);
+ // Forward declaration for OSSleepThread - used by VIWaitForRetrace HLE
+ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* cpu);
+ extern "C" int g_gxFrameCount;
+@@ -220,21 +223,37 @@ void ViSetR3(CpuContext* ctx, uint32_t value)
      }
  }
  
@@ -1524,7 +2264,7 @@ index cd236a9..1161ec5 100644
      } catch (const ::Memory::AccessViolation& e) {
          LogMemoryError(RT_TAG_VI, "WriteGuestStateLocked", e);
      }
-@@ -268,9 +285,28 @@ static std::atomic<bool> s_presentSequenceActive{false};
+@@ -268,9 +287,28 @@ static std::atomic<bool> s_presentSequenceActive{false};
  void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool serviceAurora) {
      // Prevent re-entry - this can happen if OSWakeupThread triggers SelectThread
      // which goes idle and calls ProcessTimerEvents again
@@ -1553,7 +2293,7 @@ index cd236a9..1161ec5 100644
      
      uint32_t preCb = 0;
      uint32_t postCb = 0;
-@@ -343,7 +379,8 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
+@@ -343,7 +381,8 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
          if (postCb) {
              // Guard: only invoke callback if sSystem is initialized
              // The callback dereferences sSystem which must be non-null
@@ -1563,7 +2303,7 @@ index cd236a9..1161ec5 100644
              if (sSystemPtr != 0) {
                  InvokeIndirectCpu(postCb, ctx);
              }
-@@ -375,8 +412,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
+@@ -375,8 +414,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
          }
      }
  
@@ -1573,6 +2313,17 @@ index cd236a9..1161ec5 100644
  }
  
  bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
+@@ -796,6 +834,10 @@ extern "C" void VIFlush_HLE_801ba9a4(CpuContext* ctx)
+     // GXCopyDisp (which sets hasValidXfb = true), as that's when the EFB->XFB
+     // copy is complete and we have a valid frame to present.
+ 
++    // Excite Truck flushes once a frame right after GXCopyDisp; let its background threads run.
++    if (!GuestRegion::IsMarioKart()) {
++        OS_HLE_YieldToReadyThreads(ctx);
++    }
+     ViSetR3(ctx, 0);
+ }
+ PPC_NATIVE_OVERRIDE_VOID(801BA9A4, VIFlush_HLE_801ba9a4, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
 index 6d0dd6b..fdd4faa 100644
 --- a/runtime/src/main.cpp
