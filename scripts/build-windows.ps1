@@ -258,10 +258,36 @@ $tools = Join-Path $Work 'toolchain'
 $deps = Join-Path $Work 'deps'
 Step 'Preparing the compiler, CMake and Ninja (downloaded once)'
 & (Join-Path $ws 'Launcher\Prepare-PortableTools.ps1') -Destination $tools
+$cmake = Join-Path $tools 'CMake\bin\cmake.exe'
 Step 'Preparing the libraries (downloaded once)'
+# Windows 10's tar.exe can't open .tar.bz2 files, and libusb only ships as one. Unpack it with
+# CMake instead and stamp it the way Prepare-Dependencies.ps1 does, so that script skips it.
+$libusb = Join-Path $deps 'libusb'
+$libusbFile = 'libusb-1.0.30.tar.bz2'
+$libusbSha = 'fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf'
+$libusbStamp = "$libusbFile $libusbSha"
+if (-not ((Test-Path -LiteralPath $libusb -PathType Container) -and (Test-Path -LiteralPath "$libusb.source" -PathType Leaf) -and
+          ([IO.File]::ReadAllText("$libusb.source") -eq $libusbStamp))) {
+    $downloadDir = Join-Path $ws 'Launcher\artifacts\downloads'
+    [IO.Directory]::CreateDirectory($downloadDir) | Out-Null
+    $archive = Join-Path $downloadDir $libusbFile
+    Download "https://github.com/libusb/libusb/releases/download/v1.0.30/$libusbFile" $archive $libusbSha
+    [IO.Directory]::CreateDirectory($deps) | Out-Null
+    $extract = Join-Path $deps '.extract-libusb'
+    if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+    [IO.Directory]::CreateDirectory($extract) | Out-Null
+    Push-Location $extract
+    try { Run $cmake @('-E', 'tar', 'xf', $archive) } finally { Pop-Location }
+    $entries = @(Get-ChildItem -LiteralPath $extract -Force)
+    $source = if ($entries.Count -eq 1 -and $entries[0].PSIsContainer) { $entries[0].FullName } else { $extract }
+    if (Test-Path -LiteralPath $libusb) { Remove-Item -LiteralPath $libusb -Recurse -Force }
+    Move-Item -LiteralPath $source -Destination $libusb
+    if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+    [IO.File]::WriteAllText("$libusb.source", $libusbStamp)
+    Write-Host 'Prepared libusb'
+}
 & (Join-Path $ws 'Launcher\Prepare-Dependencies.ps1') -Destination $deps
 . (Join-Path $ws 'Launcher\NativeBuildFlags.ps1')
-$cmake = Join-Path $tools 'CMake\bin\cmake.exe'
 $ninja = Join-Path $tools 'Ninja\ninja.exe'
 $bin = Join-Path $tools 'llvm-mingw\bin'
 
