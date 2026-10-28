@@ -343,10 +343,10 @@ index 0000000..39d33e9
 +PPC_NATIVE_OVERRIDE_VOID(8F2E30C8, ET_DebugPrintf_802e30c8, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
-index 0000000..bdac2f8
+index 0000000..126d6a5
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_input.cpp
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,315 @@
 +// Excite Truck (REXE01): a virtual Wii Remote driven by an Xbox-style gamepad or the keyboard.
 +//
 +// Excite Truck only takes a sideways Wii Remote. Rather than emulate the remote's Bluetooth
@@ -365,7 +365,7 @@ index 0000000..bdac2f8
 +// Default layout (Chris's request): R / RT = gas (2), X = brake (1), A = turbo (D-pad),
 +// left stick X = steer, left stick Y = air control. Menus: D-pad moves, RT/R/Y confirm (2),
 +// X/B go back (1), Start = pause (+), Back = minus.
-+// Keyboard: arrows = steer / air, X or Enter = gas / confirm (2), Z or Backspace = brake / back (1),
++// Keyboard: arrows = steer + D-pad, W/S = air control, X or Enter = gas / confirm (2), Z or Backspace = brake / back (1),
 +// C = turbo, P = pause (+).
 +//
 +// Addresses use the 0x8F000000 alias (see et_hooks.cpp).
@@ -492,8 +492,12 @@ index 0000000..bdac2f8
 +        if (key(SDL_SCANCODE_B)) in.hold |= kWpadB;
 +        if (key(SDL_SCANCODE_LEFT)) { in.hold |= kSidewaysLeft; in.steer = -1.0f; }
 +        if (key(SDL_SCANCODE_RIGHT)) { in.hold |= kSidewaysRight; in.steer = 1.0f; }
-+        if (key(SDL_SCANCODE_UP)) { in.hold |= kSidewaysUp; in.pitch = 1.0f; }
-+        if (key(SDL_SCANCODE_DOWN)) { in.hold |= kSidewaysDown; in.pitch = -1.0f; }
++        // Up/Down stay pure D-pad: the menus ignore the D-pad while the remote is tilted, so air
++        // control (pitch) lives on W/S instead.
++        if (key(SDL_SCANCODE_UP)) in.hold |= kSidewaysUp;
++        if (key(SDL_SCANCODE_DOWN)) in.hold |= kSidewaysDown;
++        if (key(SDL_SCANCODE_W)) in.pitch = 1.0f;
++        if (key(SDL_SCANCODE_S)) in.pitch = -1.0f;
 +    }
 +    return in;
 +}
@@ -658,6 +662,71 @@ index 0000000..bdac2f8
 +    ctx->gpr[3] = 1;
 +}
 +PPC_NATIVE_OVERRIDE_VOID(8F047C0C, ET_KPADRead_80047c0c, (CpuContext* ctx), (ctx));
+diff --git a/runtime/src/hle/gx/gx_dl.cpp b/runtime/src/hle/gx/gx_dl.cpp
+index daceeb7..8496831 100644
+--- a/runtime/src/hle/gx/gx_dl.cpp
++++ b/runtime/src/hle/gx/gx_dl.cpp
+@@ -1289,6 +1289,60 @@ static bool ApplyAuroraIndexedXFArraysForDisplayList(const std::array<uint32_t,
+ 
+ } // namespace
+ 
++// GXBeginDisplayList saves GXData when the display-list save context is on (the SDK
++// default) and GXEndDisplayList restores it, so vertex descriptor and format calls made
++// while recording do not leak into later draws. The HLE shadow follows the same rule.
++namespace {
++HleGxVertexStateSnapshot g_dlSavedVtxState;
++bool g_dlSavedVtxStateValid = false;
++}
++void GxSaveVtxStateForDisplayList() {
++    g_dlSavedVtxState = CaptureGxVertexState();
++    g_dlSavedVtxStateValid = true;
++}
++// Set when a vertex descriptor call runs while a display list is recording. The SDK only
++// marks the descriptor dirty there; GXEndDisplayList's GXFlush then writes the CP VCD
++// registers into the list. Games such as Excite Truck record lists that hold nothing but
++// a descriptor change and call them later to switch vertex layouts.
++bool g_dlVtxDescDirty = false;
++void GxNoteVtxDescChangedWhileRecording() {
++    if (IsDisplayListActive()) g_dlVtxDescDirty = true;
++}
++void GxFlushDisplayListDirtyState() {
++    if (!IsDisplayListActive()) return;
++    if (g_dlVtxDescDirty) {
++        g_dlVtxDescDirty = false;
++        const auto& d = g_hleGxState.vtxDesc;
++        uint32_t lo = 0;
++        for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7MTXIDX; ++i) {
++            if (d[i] != GX_NONE) lo |= 1u << i;
++        }
++        const GXAttrType nrm = d[GX_VA_NBT] != GX_NONE ? d[GX_VA_NBT] : d[GX_VA_NRM];
++        lo |= (static_cast<uint32_t>(d[GX_VA_POS]) & 3u) << 9;
++        lo |= (static_cast<uint32_t>(nrm) & 3u) << 11;
++        lo |= (static_cast<uint32_t>(d[GX_VA_CLR0]) & 3u) << 13;
++        lo |= (static_cast<uint32_t>(d[GX_VA_CLR1]) & 3u) << 15;
++        uint32_t hi = 0;
++        for (int t = 0; t < 8; ++t) hi |= (static_cast<uint32_t>(d[GX_VA_TEX0 + t]) & 3u) << (t * 2);
++        WriteDisplayListData(GX_LOAD_CP_REG_CMD, 1);
++        WriteDisplayListData(0x50, 1);
++        WriteDisplayListData(lo, 4);
++        WriteDisplayListData(GX_LOAD_CP_REG_CMD, 1);
++        WriteDisplayListData(0x60, 1);
++        WriteDisplayListData(hi, 4);
++    }
++    // GXFlush pads the write-gather pipe with 32 zero bytes (GX NOPs), and they land in
++    // the list too, so list sizes match hardware.
++    for (int i = 0; i < 8; ++i) WriteDisplayListData(0, 4);
++}
++
++void GxRestoreVtxStateAfterDisplayList() {
++    if (!g_dlSavedVtxStateValid) return;
++    g_dlSavedVtxStateValid = false;
++    RestoreGxVertexState(g_dlSavedVtxState);
++    InvalidateAppliedAuroraState();
++}
++
+ extern "C" void GxNotifyDisplayListMemoryWrite(uint32_t addr, uint32_t size) {
+     GxGuestWrite::NotifyWrite(addr, size);
+ }
 diff --git a/runtime/src/hle/gx/gx_fatal_stubs.cpp b/runtime/src/hle/gx/gx_fatal_stubs.cpp
 index 0baaa0f..50a4fa3 100644
 --- a/runtime/src/hle/gx/gx_fatal_stubs.cpp
@@ -725,7 +794,7 @@ index 0baaa0f..50a4fa3 100644
 -GX_FATAL_STUB(80173df8, "GX__ClearGPMetric_80173df8") PPC_NATIVE_OVERRIDE_VOID(80173df8, gx_stub_80173df8, (CpuContext* ctx), (ctx));
 +GX_NOOP_STUB(80173df8, "GX__ClearGPMetric_80173df8") PPC_NATIVE_OVERRIDE_VOID(80173df8, gx_stub_80173df8, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/gx/gx_init.cpp b/runtime/src/hle/gx/gx_init.cpp
-index edf6f9c..d50b1a1 100644
+index edf6f9c..e890b8b 100644
 --- a/runtime/src/hle/gx/gx_init.cpp
 +++ b/runtime/src/hle/gx/gx_init.cpp
 @@ -22,6 +22,8 @@ extern "C" GXFifoObj* GXInit(void* base, u32 size);
@@ -782,6 +851,46 @@ index edf6f9c..d50b1a1 100644
      RT_LOGF(RT_TAG_GX, "GX initialized, FIFO at 0x%08X (base=0x%08X size=0x%08X)\n",
              kFifoObjAddr, fifoBase, fifoSize);
  
+@@ -171,6 +188,10 @@ namespace {
+ bool g_dlInline = false;
+ }
+ 
++void GxSaveVtxStateForDisplayList();
++void GxRestoreVtxStateAfterDisplayList();
++void GxFlushDisplayListDirtyState();
++
+ extern "C" void GX__BeginDisplayList_80172e00(uint32_t la, uint32_t s) {
+     if (!g_dlInline) {
+         GxWorker::BeginInline();
+@@ -180,7 +201,10 @@ extern "C" void GX__BeginDisplayList_80172e00(uint32_t la, uint32_t s) {
+         uint32_t gd = Memory::Read32(kGXDataPtrAddr);
+         if (!gd) return;
+         if (Memory::Read32(gd + 0x5FCu)) GX__SetDirtyState_8016ee78();
+-        if (Memory::Read8(gd + 0x5F9u)) std::memcpy(Memory::GetPointer(MKW_GADDR(80344110), 0x600), Memory::GetPointer(gd, 0x600), 0x600);
++        if (Memory::Read8(gd + 0x5F9u)) {
++            std::memcpy(Memory::GetPointer(MKW_GADDR(80344110), 0x600), Memory::GetPointer(gd, 0x600), 0x600);
++            GxSaveVtxStateForDisplayList();
++        }
+         Memory::Write32(MKW_GADDR(80344094), la + s - 4u);
+         Memory::Write32(MKW_GADDR(803440AC), 0);
+         Memory::Write32(MKW_GADDR(80344090), la);
+@@ -207,6 +231,8 @@ static void EndDisplayListInline() {
+ 
+ extern "C" uint32_t GX__EndDisplayList_80172eb4() {
+     try {
++        // Excite Truck's SDK flushes dirty state into the list here (GXGetCPUFifo calls GXFlush).
++        if (!::GuestRegion::IsMarioKart()) GxFlushDisplayListDirtyState();
+         GXFlush();
+         GX__GetCPUFifo_8016cf10(MKW_GADDR(80344090));
+         const uint8_t wrapped = Memory::Read8(kDlFifoAddr + kDlWrapFlagOffset);
+@@ -222,6 +248,7 @@ extern "C" uint32_t GX__EndDisplayList_80172eb4() {
+                             0x600);
+                 Memory::Write32(gd + 0x08u, savedWord8);
+                 OS__RestoreInterrupts_801a65d4(interruptLevel);
++                GxRestoreVtxStateAfterDisplayList();
+             }
+             Memory::Write8(gd + 0x5F8u, 0);
+         }
 diff --git a/runtime/src/hle/gx/gx_stubs.cpp b/runtime/src/hle/gx/gx_stubs.cpp
 index edbafdc..49be121 100644
 --- a/runtime/src/hle/gx/gx_stubs.cpp
@@ -877,6 +986,46 @@ index edbafdc..49be121 100644
  
  extern "C" void GX__FinishInterruptHandler_8016ed94() {
      try {
+diff --git a/runtime/src/hle/gx/gx_vertex.cpp b/runtime/src/hle/gx/gx_vertex.cpp
+index 3a8c43b..fcd1697 100644
+--- a/runtime/src/hle/gx/gx_vertex.cpp
++++ b/runtime/src/hle/gx/gx_vertex.cpp
+@@ -5,8 +5,6 @@
+ #include "guest_interrupt_context.h"
+ #include "runtime_log.h"
+ 
+-#include <cstdio>
+-#include <cstdlib>
+ 
+ namespace {
+ uint32_t CanonicalVtxAttr(uint32_t attr) {
+@@ -41,7 +39,10 @@ bool ApiVtxArray(uint32_t attr, uint32_t& base, uint32_t& stride) {
+ // Vertex Descriptor
+ // ============================================================================
+ 
++void GxNoteVtxDescChangedWhileRecording();
++
+ extern "C" void GX__ClearVtxDesc_8016dc34() {
++    GxNoteVtxDescChangedWhileRecording();
+     GX_DEFER_CALL0(GX__ClearVtxDesc_8016dc34);
+     bool changed = false;
+     for(int i=0; i<26; ++i){
+@@ -55,6 +56,7 @@ extern "C" void GX__ClearVtxDesc_8016dc34() {
+ PPC_NATIVE_OVERRIDE_VOID(8016dc34, GX__ClearVtxDesc_8016dc34, (), ());
+ 
+ extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
++    GxNoteVtxDescChangedWhileRecording();
+     GX_DEFER_CALL(GX__SetVtxDesc_8016d3a4, a, t);
+     const uint32_t attr = CanonicalVtxAttr(a);
+     if(attr>=26||attr==GX_VA_NULL) return;
+@@ -70,6 +72,7 @@ extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
+ PPC_NATIVE_OVERRIDE_VOID(8016d3a4, GX__SetVtxDesc_8016d3a4, (uint32_t a, uint32_t t), (a, t));
+ 
+ extern "C" void GX__SetVtxDescv_8016d608(uint32_t la) {
++    GxNoteVtxDescChangedWhileRecording();
+     if(!la) return; uint32_t p=la;
+     std::vector<std::array<uint32_t, 2>> list;
+     while(true){
 diff --git a/runtime/src/hle/os/os_sleep.cpp b/runtime/src/hle/os/os_sleep.cpp
 index 5a66c02..cc6e520 100644
 --- a/runtime/src/hle/os/os_sleep.cpp
@@ -1441,6 +1590,20 @@ index 6d0dd6b..fdd4faa 100644
          throw std::runtime_error(oss.str());
      }
      return entry;
+diff --git a/runtime/src/music_attenuation.cpp b/runtime/src/music_attenuation.cpp
+index ad031c1..338cf09 100644
+--- a/runtime/src/music_attenuation.cpp
++++ b/runtime/src/music_attenuation.cpp
+@@ -532,6 +532,9 @@ void SetVoicesVolume(float volume) noexcept {
+ }
+ 
+ void TickGuest() noexcept {
++    if (!::GuestRegion::IsMarioKart()) {
++        return; // walks Mario Kart's sound player array
++    }
+     const bool attenuated = ShouldAttenuate();
+     const uint32_t soundPlayerArray = ResolveSoundPlayerArray();
+     if (soundPlayerArray == 0) {
 diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
 index ed1a1b8..907840e 100644
 --- a/runtime/src/settings_overlay.cpp

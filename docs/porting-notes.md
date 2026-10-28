@@ -82,3 +82,17 @@ The game now boots to its first menu ("create a save file?") at 60 fps. What it 
 - Translator note: calls into an ET alias hook only store the argument registers the translator
   thinks the callee reads, so a hook that needs r4..r7 may see stale values. Prefer fixing the
   state the guest code reads over hooking small leaf functions.
+
+## First race on screen (step 2)
+
+- ET's `GXSetVtxDescv` (0x8003FC98) and `GXSetVtxAttrFmtv` (0x80040254) are now mapped. ET has no
+  `GXGetVtxDesc`/`GXGetVtxAttrFmt`, `GXLoadPosMtxIndx` or the LOD-bias texture helpers, so those
+  MKW hooks stay unmapped on purpose.
+- The engine switches vertex layouts with tiny recorded display lists: `GXBeginDisplayList`,
+  `GXClearVtxDesc` + `GXSetVtxDescv`, `GXEndDisplayList` (0x802D62FC). In this SDK,
+  `GXEndDisplayList` calls `GXGetCPUFifo`, which calls `GXFlush`, so the dirty VCD is written
+  into the list as CP 0x50/0x60, followed by 32 zero bytes. The game stores the list size as
+  `size >> 5`, so without those bytes every list was size 0 and the model lists were read with
+  the HUD's direct layout, which produced garbage FIFO commands. The HLE now writes the VCD and the
+  padding when a descriptor changes during recording, for non-MKW games. It also saves and
+  restores the HLE vertex state around recording when GX's save-context flag is set.

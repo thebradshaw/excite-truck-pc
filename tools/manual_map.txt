@@ -38,3 +38,6 @@
 80193040 8009d2f0 IPCSetBufferLo
 # DVD low-level: ClearCoverInterrupt follows MaskCoverInterrupt, as in MKWii
 80166964 8003bcdc DVDLowClearCoverInterrupt
+# GX vertex format: the v-variants are separate functions here too (switch tables follow)
+8016d608 8003fc98 GXSetVtxDescv
+8016de08 80040254 GXSetVtxAttrFmtv
