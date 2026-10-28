@@ -1,0 +1,707 @@
+diff --git a/runtime/cmake/PublicProducts.cmake b/runtime/cmake/PublicProducts.cmake
+index 809f22e..97758a7 100644
+--- a/runtime/cmake/PublicProducts.cmake
++++ b/runtime/cmake/PublicProducts.cmake
+@@ -265,17 +265,32 @@ function(mkw_configure_product target)
+     add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+         "${MKW_DSP_COEFFICIENT_ROM}" "$<TARGET_FILE_DIR:${target}>/dsp_coef.bin" VERBATIM)
+ 
++    # IPL ROM fonts for OSLoadFont (Dolphin's Droid Sans replacements, Apache 2.0).
++    add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory
++        "$<TARGET_FILE_DIR:${target}>/fonts" VERBATIM)
++    foreach(font_file font_western.bin font_japanese.bin font-licenses.txt)
++        add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
++            "${MKW_RUNTIME_SOURCE_DIR}/assets/fonts/${font_file}"
++            "$<TARGET_FILE_DIR:${target}>/fonts/${font_file}" VERBATIM)
++    endforeach()
++
+     # Aurora imports this portable recipe database into each user's writable
+     # pipeline cache. Keep the upstream filename so its default resourcesPath
+     # lookup works without application-specific configuration.
+-    set(MKW_INITIAL_PIPELINE_CACHE
+-        "${MKW_RUNTIME_SOURCE_DIR}/assets/pipeline/initial_pipeline_cache.db")
+-    if(NOT EXISTS "${MKW_INITIAL_PIPELINE_CACHE}")
+-        message(FATAL_ERROR "Missing transferable Aurora pipeline cache: ${MKW_INITIAL_PIPELINE_CACHE}")
++    # Other games pass their own recorded recipe database, or NONE to ship without one
++    # (the Mario Kart set only adds unused pipelines to another game's startup).
++    if(NOT DEFINED MKW_INITIAL_PIPELINE_CACHE OR MKW_INITIAL_PIPELINE_CACHE STREQUAL "")
++        set(MKW_INITIAL_PIPELINE_CACHE
++            "${MKW_RUNTIME_SOURCE_DIR}/assets/pipeline/initial_pipeline_cache.db")
++    endif()
++    if(NOT MKW_INITIAL_PIPELINE_CACHE STREQUAL "NONE")
++        if(NOT EXISTS "${MKW_INITIAL_PIPELINE_CACHE}")
++            message(FATAL_ERROR "Missing transferable Aurora pipeline cache: ${MKW_INITIAL_PIPELINE_CACHE}")
++        endif()
++        add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
++            "${MKW_INITIAL_PIPELINE_CACHE}"
++            "$<TARGET_FILE_DIR:${target}>/initial_pipeline_cache.db" VERBATIM)
+     endif()
+-    add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+-        "${MKW_INITIAL_PIPELINE_CACHE}"
+-        "$<TARGET_FILE_DIR:${target}>/initial_pipeline_cache.db" VERBATIM)
+ 
+     # Non-Windows TLS (runtime/src/hle/net/network_ssl.cpp's mbed TLS path) needs a trusted root
+     # CA bundle to verify server certificates against - Windows gets this for free from the OS via
+diff --git a/runtime/include/guest_abi/guest_region.h b/runtime/include/guest_abi/guest_region.h
+index 1836717..f4daa52 100644
+--- a/runtime/include/guest_abi/guest_region.h
++++ b/runtime/include/guest_abi/guest_region.h
+@@ -19,8 +19,11 @@ enum class Id : uint8_t {
+     Pal = 0,
+     NtscU = 1,
+     NtscJ = 2,
++    // Excite Truck (REXE01): another game on the same Wii SDK. Addresses with no counterpart
++    // there are 0, and registrations at 0 are skipped.
++    ExciteTruck = 3,
+ };
+-inline constexpr size_t kCount = 3;
++inline constexpr size_t kCount = 4;
+ 
+ struct Row {
+     uint32_t address[kCount];
+@@ -92,7 +95,8 @@ constexpr Mapping Map(uint32_t pal, Id region) {
+ constexpr Row RowOf(uint32_t pal) {
+     const Mapping ntscU = Map(pal, Id::NtscU);
+     const Mapping ntscJ = Map(pal, Id::NtscJ);
+-    return ntscU.found && ntscJ.found ? Row{{pal, ntscU.address, ntscJ.address}}
++    const Mapping excite = Map(pal, Id::ExciteTruck);
++    return ntscU.found && ntscJ.found ? Row{{pal, ntscU.address, ntscJ.address, excite.found ? excite.address : 0u}}
+                                       : throw "PAL address outside guest_abi/guest_versions.inc";
+ }
+ 
+@@ -108,7 +112,7 @@ inline Id Current() noexcept { return static_cast<Id>(kMkwGuestRegion); }
+ template <uint32_t Pal>
+ inline uint32_t Address() noexcept {
+     constexpr Row row = RowOf(Pal);
+-    if constexpr (row.address[1] == Pal && row.address[2] == Pal) {
++    if constexpr (row.address[1] == Pal && row.address[2] == Pal && row.address[3] == Pal) {
+         return Pal;
+     } else {
+         return row.In(Current());
+@@ -119,7 +123,8 @@ inline uint32_t Address() noexcept {
+ template <uint32_t Pal>
+ inline bool Is(uint32_t target) noexcept {
+     constexpr Row row = RowOf(Pal);
+-    return (target == row.address[0] || target == row.address[1] || target == row.address[2]) &&
++    return (target == row.address[0] || target == row.address[1] || target == row.address[2] ||
++            (row.address[3] != 0 && target == row.address[3])) &&
+            target == row.In(Current());
+ }
+ 
+@@ -129,6 +134,9 @@ inline bool Is(uint32_t target) noexcept {
+ inline uint32_t Translate(uint32_t pal) noexcept {
+     const Mapping mapping = Map(pal, Current());
+     if (!mapping.found) {
++        if (Current() == Id::ExciteTruck) {
++            return 0; // not in this game; the registration is skipped
++        }
+         FatalUnknownAddress(pal);
+     }
+     return mapping.address;
+@@ -152,8 +160,13 @@ inline constexpr Facts kFacts[kCount] = {
+     {"RMCP01", 'P', 0x524D4350u, 1u, 0x80399180u, "EUR", "RVL-001(EUR)", "LEH", "PAL", "EU"},
+     {"RMCE01", 'E', 0x524D4345u, 0u, 0x80394E00u, "USA", "RVL-001(USA)", "LU", "NTSC", "US"},
+     {"RMCJ01", 'J', 0x524D434Au, 0u, 0x80398B00u, "JPN", "RVL-001(JPN)", "LJ", "NTSC", "JP"},
++    {"REXE01", 'E', 0x52455845u, 0u, 0x80575240u, "USA", "RVL-001(USA)", "LU", "NTSC", "US"},
+ };
+ 
++// True for Mario Kart Wii builds; false when the runtime hosts another game (Excite Truck).
++// Guards Mario Kart-only subsystems (EGG, races, online, Kamek).
++inline bool IsMarioKart() noexcept { return Current() != Id::ExciteTruck; }
++
+ inline const Facts& CurrentFacts() noexcept { return kFacts[static_cast<size_t>(Current())]; }
+ 
+ } // namespace GuestRegion
+@@ -161,6 +174,10 @@ inline const Facts& CurrentFacts() noexcept { return kFacts[static_cast<size_t>(
+ #define MKW_GADDR(pal) (::GuestRegion::Address<0x##pal##u>())
+ 
+ #if defined(MKW_TRANSLATED_GUEST_REGION)
++// An address with no counterpart in the region (0) becomes the PAL address with the low bit
++// set: never a real function, and still unique, so per-address specializations don't collide.
+ #define MKW_GADDR_CT(pal) \
+-    (::GuestRegion::RowOf(0x##pal##u).In(static_cast<::GuestRegion::Id>(MKW_TRANSLATED_GUEST_REGION)))
++    (::GuestRegion::RowOf(0x##pal##u).In(static_cast<::GuestRegion::Id>(MKW_TRANSLATED_GUEST_REGION)) \
++         ? ::GuestRegion::RowOf(0x##pal##u).In(static_cast<::GuestRegion::Id>(MKW_TRANSLATED_GUEST_REGION)) \
++         : (0x##pal##u | 1u))
+ #endif
+diff --git a/runtime/src/abi_bridge.cpp b/runtime/src/abi_bridge.cpp
+index e339244..f4bd5bc 100644
+--- a/runtime/src/abi_bridge.cpp
++++ b/runtime/src/abi_bridge.cpp
+@@ -332,6 +332,10 @@ void RegisterBulkTranslatedFunctions(const BulkTranslatedFunctionRecord* records
+ }
+ 
+ void TranslatedFunctionRegistry::Register(TranslatedFunctionInfo info) {
++    // Address 0 means the hooked function has no counterpart in this game (see guest_region.h).
++    if (info.address == 0) {
++        return;
++    }
+     std::lock_guard<std::mutex> lock(RegistryMutex());
+     if (RegistryFrozen().load(std::memory_order_acquire)) {
+         RT_LOG(RT_TAG_RUNTIME) << "ERROR: Attempted to register function after registry was finalized: 0x"
+diff --git a/runtime/src/dynamic_aspect.cpp b/runtime/src/dynamic_aspect.cpp
+index 2646e0f..53f892e 100644
+--- a/runtime/src/dynamic_aspect.cpp
++++ b/runtime/src/dynamic_aspect.cpp
+@@ -1,3 +1,4 @@
++#include "guest_abi/guest_region.h"
+ #include "hle_stubs.h"
+ #include "memory.h"
+ 
+@@ -129,6 +130,9 @@ void WriteEggScreenRecord(uint32_t recordAddr, uint32_t width) {
+ }
+ 
+ void ApplyEggScreenRecords(uint32_t surfaceWidth, uint32_t surfaceHeight) {
++    if (!::GuestRegion::IsMarioKart()) {
++        return; // EGG screen records are Mario Kart Wii data
++    }
+     using namespace MkwDynamicAspect;
+     const uint32_t width43 =
+         g_widescreenConfigured ? EggRecordWidth(kEggRecordWidth43, surfaceWidth, surfaceHeight)
+diff --git a/runtime/src/hle/excite_truck/et_hooks.cpp b/runtime/src/hle/excite_truck/et_hooks.cpp
+new file mode 100644
+index 0000000..7b95e61
+--- /dev/null
++++ b/runtime/src/hle/excite_truck/et_hooks.cpp
+@@ -0,0 +1,163 @@
++// Excite Truck (REXE01) specific hooks.
++//
++// Addresses here use the 0x8F000000 alias: guest_versions.inc maps 0x8F000000 + (ET address
++// - 0x80000000) to the Excite Truck address, so 8F05EE7C below is ET 0x8005EE7C. Mario Kart
++// builds never register these (the alias has no Mario Kart counterpart).
++
++#include <algorithm>
++#include <chrono>
++#include <cstdint>
++#include <fstream>
++#include <iterator>
++#include <thread>
++#include <vector>
++
++#include "abi_bridge.h"
++#include "hle_stubs.h"
++#include "ppc_runtime.h"
++#include "runtime_config.h"
++#include "runtime_log.h"
++
++extern "C" void OS_HLE_ProcessAlarms(int maxToProcess);
++
++namespace {
++// The real WPADGetStatus body (the 0x8005EE7C entry is a one-instruction thunk to it).
++constexpr uint32_t kWpadGetStatusBody = 0x8006A940u;
++} // namespace
++
++// Boot waits for the Wii Remote library with a tight loop:
++//   do { } while (WPADGetStatus() != WPAD_STATE_SETUP);
++// On hardware, alarms and IPC replies arrive as interrupts while it spins. Here they only run when
++// something services them, so service them on each poll, then read the real status.
++extern "C" void ET_WPADGetStatus_8005ee7c(CpuContext* ctx)
++{
++    OS_HLE_ProcessAlarms(8);
++    std::this_thread::sleep_for(std::chrono::microseconds(200));
++    InvokeIndirectCpu(kWpadGetStatusBody, ctx);
++}
++PPC_NATIVE_OVERRIDE_VOID(8F05EE7C, ET_WPADGetStatus_8005ee7c, (CpuContext* ctx), (ctx));
++
++// FAAttach(drive, ..., info): attaches a drive to the game's FAT file layer. Drive 0 is the SD
++// card used by the custom music player. There is no /dev/sdio here, so the real call fails and
++// boot aborts with "FAAttach fails". Report success with no card inserted; the Music folder
++// support replaces the SD path later.
++extern "C" void ET_FAAttach_800b7968(CpuContext* ctx)
++{
++    const uint32_t drive = ctx->gpr[3];
++    RT_LOGF(RT_TAG_HLE, "ET FAAttach(drive=%u) -> 0 (no SD card)\n", drive);
++    ctx->gpr[3] = 0;
++}
++PPC_NATIVE_OVERRIDE_VOID(8F0B7968, ET_FAAttach_800b7968, (CpuContext* ctx), (ctx));
++
++// OSGetFontEncode / OSSetFontEncode (2006 SDK). The first call picks a default from the VI DTV
++// status register (0xCC00206E) on NTSC consoles, which is hardware we do not emulate. A USA console
++// with no Japanese font reports ANSI (0), so cache that default and keep the rest of the logic.
++namespace {
++constexpr uint32_t kFontEncodeAddr = 0x80558F58u;   // u16, -0x79a8(r13); 0xFFFF until first use
++constexpr uint32_t kFontParseFnAddr = 0x8055DA48u;  // -0x2eb8(r13)
++constexpr uint32_t kParseStringAnsi = 0x8005032Cu;
++constexpr uint32_t kParseStringSjis = 0x80050428u;
++
++uint16_t EnsureFontEncodeDefault()
++{
++    uint16_t encode = Memory::Read16(kFontEncodeAddr);
++    if (encode == 0xFFFFu) {
++        encode = 0;
++        Memory::Write16(kFontEncodeAddr, encode);
++        Memory::Write32(kFontParseFnAddr, kParseStringAnsi);
++    }
++    return encode;
++}
++} // namespace
++
++extern "C" void ET_OSGetFontEncode_8004fe30(CpuContext* ctx)
++{
++    ctx->gpr[3] = EnsureFontEncodeDefault();
++}
++PPC_NATIVE_OVERRIDE_VOID(8F04FE30, ET_OSGetFontEncode_8004fe30, (CpuContext* ctx), (ctx));
++
++extern "C" void ET_OSSetFontEncode_8004fe84(CpuContext* ctx)
++{
++    const uint16_t previous = EnsureFontEncodeDefault();
++    const uint32_t encode = ctx->gpr[3];
++    if (encode <= 5) {
++        Memory::Write16(kFontEncodeAddr, static_cast<uint16_t>(encode));
++        if (encode >= 3) {
++            Memory::Write32(kFontParseFnAddr, kParseStringSjis);
++        }
++    }
++    ctx->gpr[3] = previous;
++}
++PPC_NATIVE_OVERRIDE_VOID(8F04FE84, ET_OSSetFontEncode_8004fe84, (CpuContext* ctx), (ctx));
++
++// __OSReadROM(buf, length, offset): reads the IPL boot ROM over EXI. Games only read the system
++// fonts from it (OSLoadFont), and the SDK retries forever on failure. Serve those regions from
++// Dolphin's replacement fonts (Droid Sans, Apache 2.0) bundled next to the executable; anything
++// else reads as zeros.
++namespace {
++constexpr uint32_t kRomFontSjisOffset = 0x1AFF00u;
++constexpr uint32_t kRomFontAnsiOffset = 0x1FCF00u;
++constexpr uint32_t kRomSize = 0x200000u;
++
++const std::vector<uint8_t>& IplRomImage()
++{
++    static const std::vector<uint8_t> image = [] {
++        std::vector<uint8_t> rom(kRomSize, 0);
++        auto load = [&rom](const char* name, uint32_t offset) {
++            const auto dir = RuntimeConfigFile::ExecutableDirectory();
++            if (!dir) {
++                return;
++            }
++            std::ifstream in(*dir / "fonts" / name, std::ios::binary);
++            if (!in) {
++                RT_LOGF(RT_TAG_HLE, "IPL ROM: missing fonts/%s, OSLoadFont text will be blank\n", name);
++                return;
++            }
++            std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++            const size_t count = std::min<size_t>(data.size(), kRomSize - offset);
++            std::copy_n(data.begin(), count, rom.begin() + offset);
++        };
++        load("font_japanese.bin", kRomFontSjisOffset);
++        load("font_western.bin", kRomFontAnsiOffset);
++        return rom;
++    }();
++    return image;
++}
++} // namespace
++
++extern "C" void ET_OSReadROM_80052f8c(CpuContext* ctx)
++{
++    const uint32_t buf = ctx->gpr[3];
++    const int32_t length = static_cast<int32_t>(ctx->gpr[4]);
++    const uint32_t offset = ctx->gpr[5];
++    const auto& rom = IplRomImage();
++    for (int32_t i = 0; i < length; ++i) {
++        const uint32_t at = offset + static_cast<uint32_t>(i);
++        Memory::Write8(buf + static_cast<uint32_t>(i), at < rom.size() ? rom[at] : 0);
++    }
++    ctx->gpr[3] = 1; // TRUE: read completed
++}
++PPC_NATIVE_OVERRIDE_VOID(8F052F8C, ET_OSReadROM_80052f8c, (CpuContext* ctx), (ctx));
++
++// GXSetDrawDone (2006 SDK, not in the Mario Kart table). It queues a "draw done" marker; on
++// hardware the GP raises the finish interrupt when it gets there, and the SDK handler sets the
++// draw-done flag and calls the game's GXSetDrawDoneCallback callback. Excite Truck waits on that
++// callback every frame and declares the GPU hung after 10 retraces without it. Draws are applied in
++// order here, so finish the queued work and deliver the interrupt straight away.
++extern "C" void GX__DrawDone_8016eab0();
++
++namespace {
++constexpr uint32_t kGxDrawDoneFlag = 0x8055D970u;     // -0x2f90(r13)
++constexpr uint32_t kGxDrawDoneCallback = 0x8055D974u; // -0x2f8c(r13)
++} // namespace
++
++extern "C" void ET_GXSetDrawDone_80040c1c(CpuContext* ctx)
++{
++    GX__DrawDone_8016eab0();
++    Memory::Write8(kGxDrawDoneFlag, 1);
++    const uint32_t callback = Memory::Read32(kGxDrawDoneCallback);
++    if (callback != 0) {
++        InvokeIndirectCpu(callback, ctx);
++    }
++}
++PPC_NATIVE_OVERRIDE_VOID(8F040C1C, ET_GXSetDrawDone_80040c1c, (CpuContext* ctx), (ctx));
+diff --git a/runtime/src/hle/gx/gx_fatal_stubs.cpp b/runtime/src/hle/gx/gx_fatal_stubs.cpp
+index 0baaa0f..50a4fa3 100644
+--- a/runtime/src/hle/gx/gx_fatal_stubs.cpp
++++ b/runtime/src/hle/gx/gx_fatal_stubs.cpp
+@@ -30,13 +30,21 @@ namespace {
+ #define GX_FATAL_STUB(addr, sym) \
+     extern "C" void gx_stub_##addr(CpuContext* ctx) { (void)ctx; HaltGX(MKW_GADDR(addr), sym); }
+ 
++// Calls with no visible effect on a PC renderer: GP performance counters, EFB poke state (the CPU
++// never pokes the EFB here). Returning without doing anything is the correct behaviour.
++#define GX_NOOP_STUB(addr, sym) \
++    extern "C" void gx_stub_##addr(CpuContext* ctx) { (void)ctx; }
++
+ GX_FATAL_STUB(8016b49c, "__GX__DefaultTexRegionCallback_8016b49c") PPC_NATIVE_OVERRIDE_VOID(8016b49c, gx_stub_8016b49c, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(8016b590, "__GX__DefaultTlutRegionCallback_8016b590") PPC_NATIVE_OVERRIDE_VOID(8016b590, gx_stub_8016b590, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(8016b5b4, "__GX__Shutdown_8016b5b4") PPC_NATIVE_OVERRIDE_VOID(8016b5b4, gx_stub_8016b5b4, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(8016c668, "GX__CPInterruptHandler_8016c668") PPC_NATIVE_OVERRIDE_VOID(8016c668, gx_stub_8016c668, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(8016d054, "GX__SetBreakPtCallback_8016d054") PPC_NATIVE_OVERRIDE_VOID(8016d054, gx_stub_8016d054, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(8016d098, "GX__EnableBreakPt_8016d098") PPC_NATIVE_OVERRIDE_VOID(8016d098, gx_stub_8016d098, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(8016d138, "GX__DisableBreakPt_8016d138") PPC_NATIVE_OVERRIDE_VOID(8016d138, gx_stub_8016d138, (CpuContext* ctx), (ctx));
++// GXSetBreakPtCallback returns the previous callback. FIFO breakpoints never fire here (draws run
++// synchronously), so no callback is ever installed and the previous one is always null.
++extern "C" void gx_stub_8016d054(CpuContext* ctx) { ctx->gpr[3] = 0; }
++PPC_NATIVE_OVERRIDE_VOID(8016d054, gx_stub_8016d054, (CpuContext* ctx), (ctx));
++// GX__EnableBreakPt_8016d098: implemented in gx_stubs.cpp (FIFO breakpoint emulation).
++// GX__DisableBreakPt_8016d138: implemented in gx_stubs.cpp (FIFO breakpoint emulation).
+ GX_FATAL_STUB(8016d1fc, "__GX__CleanGPFifo_8016d1fc") PPC_NATIVE_OVERRIDE_VOID(8016d1fc, gx_stub_8016d1fc, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(8016d3c0, "GX__SetVtxDesc_switch_8016d3c0") PPC_NATIVE_OVERRIDE_VOID(8016d3c0, gx_stub_8016d3c0, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(8016d3c4, "GX__SetVtxDesc_caseD_0_8016d3c4") PPC_NATIVE_OVERRIDE_VOID(8016d3c4, gx_stub_8016d3c4, (CpuContext* ctx), (ctx));
+@@ -162,21 +170,21 @@ GX_FATAL_STUB(8016e578, "GX__SetTexCoordGen2_caseD_6_8016e578") PPC_NATIVE_OVERR
+ GX_FATAL_STUB(8016e588, "GX__SetTexCoordGen2_caseD_7_8016e588") PPC_NATIVE_OVERRIDE_VOID(8016e588, gx_stub_8016e588, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(8016e6e4, "__GX__Abort_8016e6e4") PPC_NATIVE_OVERRIDE_VOID(8016e6e4, gx_stub_8016e6e4, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(8016e848, "GX__AbortFrame_8016e848") PPC_NATIVE_OVERRIDE_VOID(8016e848, gx_stub_8016e848, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(8016eb94, "GX__PokeAlphaMode_8016eb94") PPC_NATIVE_OVERRIDE_VOID(8016eb94, gx_stub_8016eb94, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(8016eba4, "GX__PokeAlphaUpdate_8016eba4") PPC_NATIVE_OVERRIDE_VOID(8016eba4, gx_stub_8016eba4, (CpuContext* ctx), (ctx));
++GX_NOOP_STUB(8016eb94, "GX__PokeAlphaMode_8016eb94") PPC_NATIVE_OVERRIDE_VOID(8016eb94, gx_stub_8016eb94, (CpuContext* ctx), (ctx));
++GX_NOOP_STUB(8016eba4, "GX__PokeAlphaUpdate_8016eba4") PPC_NATIVE_OVERRIDE_VOID(8016eba4, gx_stub_8016eba4, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(8016ebbc, "GX__PokeAlphaUpdate_8016ebbc") PPC_NATIVE_OVERRIDE_VOID(8016ebbc, gx_stub_8016ebbc, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(8016ebd0, "GX__PokeBlendMode_8016ebd0") PPC_NATIVE_OVERRIDE_VOID(8016ebd0, gx_stub_8016ebd0, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(8016ec2c, "GX__PokeColorUpdate_8016ec2c") PPC_NATIVE_OVERRIDE_VOID(8016ec2c, gx_stub_8016ec2c, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(8016ec40, "GX__PokeDstAlpha_8016ec40") PPC_NATIVE_OVERRIDE_VOID(8016ec40, gx_stub_8016ec40, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(8016ec58, "GX__PokeDither_8016ec58") PPC_NATIVE_OVERRIDE_VOID(8016ec58, gx_stub_8016ec58, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(8016ec6c, "GX__PokeZMode_8016ec6c") PPC_NATIVE_OVERRIDE_VOID(8016ec6c, gx_stub_8016ec6c, (CpuContext* ctx), (ctx));
++GX_NOOP_STUB(8016ebd0, "GX__PokeBlendMode_8016ebd0") PPC_NATIVE_OVERRIDE_VOID(8016ebd0, gx_stub_8016ebd0, (CpuContext* ctx), (ctx));
++GX_NOOP_STUB(8016ec2c, "GX__PokeColorUpdate_8016ec2c") PPC_NATIVE_OVERRIDE_VOID(8016ec2c, gx_stub_8016ec2c, (CpuContext* ctx), (ctx));
++GX_NOOP_STUB(8016ec40, "GX__PokeDstAlpha_8016ec40") PPC_NATIVE_OVERRIDE_VOID(8016ec40, gx_stub_8016ec40, (CpuContext* ctx), (ctx));
++GX_NOOP_STUB(8016ec58, "GX__PokeDither_8016ec58") PPC_NATIVE_OVERRIDE_VOID(8016ec58, gx_stub_8016ec58, (CpuContext* ctx), (ctx));
++GX_NOOP_STUB(8016ec6c, "GX__PokeZMode_8016ec6c") PPC_NATIVE_OVERRIDE_VOID(8016ec6c, gx_stub_8016ec6c, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(8016f23c, "__GX__SendFlushPrim_8016f23c") PPC_NATIVE_OVERRIDE_VOID(8016f23c, gx_stub_8016f23c, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(8016f414, "__GX__SetGenMode_8016f414") PPC_NATIVE_OVERRIDE_VOID(8016f414, gx_stub_8016f414, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(801724f8, "GX__InitFogAdjTable_801724f8") PPC_NATIVE_OVERRIDE_VOID(801724f8, gx_stub_801724f8, (CpuContext* ctx), (ctx));
++// GXInitFogAdjTable: pure CPU math, the translated guest code runs.
+ GX_FATAL_STUB(80172fd8, "__GX__SetProjection_80172fd8") PPC_NATIVE_OVERRIDE_VOID(80172fd8, gx_stub_80172fd8, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(801732e8, "__GX__SetViewport_801732e8") PPC_NATIVE_OVERRIDE_VOID(801732e8, gx_stub_801732e8, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(80173544, "__GX__SetMatrixIndex_80173544") PPC_NATIVE_OVERRIDE_VOID(80173544, gx_stub_80173544, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(801735cc, "GX__SetGPMetric_801735cc") PPC_NATIVE_OVERRIDE_VOID(801735cc, gx_stub_801735cc, (CpuContext* ctx), (ctx));
++GX_NOOP_STUB(801735cc, "GX__SetGPMetric_801735cc") PPC_NATIVE_OVERRIDE_VOID(801735cc, gx_stub_801735cc, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(801736f4, "GX__SetGPMetric_switch_801736f4") PPC_NATIVE_OVERRIDE_VOID(801736f4, gx_stub_801736f4, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(801736f8, "GX__SetGPMetric_caseD_0_801736f8") PPC_NATIVE_OVERRIDE_VOID(801736f8, gx_stub_801736f8, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(80173718, "GX__SetGPMetric_caseD_1_80173718") PPC_NATIVE_OVERRIDE_VOID(80173718, gx_stub_80173718, (CpuContext* ctx), (ctx));
+@@ -238,4 +246,4 @@ GX_FATAL_STUB(80173dc0, "GX__SetGPMetric_caseD_12_80173dc0") PPC_NATIVE_OVERRIDE
+ GX_FATAL_STUB(80173dd0, "GX__SetGPMetric_caseD_13_80173dd0") PPC_NATIVE_OVERRIDE_VOID(80173dd0, gx_stub_80173dd0, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(80173de0, "GX__SetGPMetric_caseD_14_80173de0") PPC_NATIVE_OVERRIDE_VOID(80173de0, gx_stub_80173de0, (CpuContext* ctx), (ctx));
+ GX_FATAL_STUB(80173dec, "GX__SetGPMetric_caseD_16_80173dec") PPC_NATIVE_OVERRIDE_VOID(80173dec, gx_stub_80173dec, (CpuContext* ctx), (ctx));
+-GX_FATAL_STUB(80173df8, "GX__ClearGPMetric_80173df8") PPC_NATIVE_OVERRIDE_VOID(80173df8, gx_stub_80173df8, (CpuContext* ctx), (ctx));
++GX_NOOP_STUB(80173df8, "GX__ClearGPMetric_80173df8") PPC_NATIVE_OVERRIDE_VOID(80173df8, gx_stub_80173df8, (CpuContext* ctx), (ctx));
+diff --git a/runtime/src/hle/gx/gx_stubs.cpp b/runtime/src/hle/gx/gx_stubs.cpp
+index edbafdc..49be121 100644
+--- a/runtime/src/hle/gx/gx_stubs.cpp
++++ b/runtime/src/hle/gx/gx_stubs.cpp
+@@ -1,5 +1,9 @@
+ #include "gx_internal.h"
+ #include "runtime_log.h"
++#include "abi_bridge.h"
++
++#include <mutex>
++#include <vector>
+ 
+ extern "C" void __GXSetSUTexRegs();
+ 
+@@ -33,8 +37,78 @@ extern "C" void GX__SetDrawSync_8016ed08(uint32_t token) {
+     } } catch (...) {}
+ }
+ 
+-extern "C" void GX__SetDrawSync_8016e9fc(uint32_t token) { GX__SetDrawSync_8016ed08(token); }
+-PPC_NATIVE_OVERRIDE_VOID(8016e9fc, GX__SetDrawSync_8016e9fc, (uint32_t token), (token));
++// Draw-sync tokens and FIFO breakpoints.
++//
++// GXSetDrawSync(token) queues a token; when the GP reaches it, the SDK calls the
++// GXSetDrawSyncCallback callback with the token. GXEnableBreakPt(ptr) makes the GP stop at a FIFO
++// position until GXDisableBreakPt. Games combine them to keep the GP one frame behind the CPU:
++// Excite Truck sets a draw-done marker and a breakpoint at the start of each frame, records the next
++// frame behind the breakpoint (token 1 at its start, token 2 at its end), waits for the draw-done
++// callback, then disables the breakpoint. Draws are applied in order here, so the GP is never
++// behind; a token is delivered when issued, except while a breakpoint is set, when it is held and
++// delivered at GXDisableBreakPt, in order, as the GP would. Mario Kart installs no token callback.
++namespace {
++std::mutex g_drawSyncMutex;
++bool g_breakPointActive = false;
++std::vector<uint16_t> g_heldTokens;
++
++// The SDK's stored token callback (-0x2f88(r13) in Excite Truck). Only known for Excite Truck.
++uint32_t GxTokenCallbackAddr()
++{
++    return ::GuestRegion::IsMarioKart() ? 0u : 0x8055D978u;
++}
++
++void DeliverDrawSyncToken(CpuContext* ctx, uint16_t token)
++{
++    const uint32_t callbackAddr = GxTokenCallbackAddr();
++    if (callbackAddr == 0 || ctx == nullptr) {
++        return;
++    }
++    uint32_t callback = 0;
++    try { callback = Memory::Read32(callbackAddr); } catch (...) { callback = 0; }
++    if (callback != 0) {
++        ctx->gpr[3] = token;
++        InvokeIndirectCpu(callback, ctx);
++    }
++}
++} // namespace
++
++extern "C" void GX__SetDrawSync_8016e9fc(CpuContext* ctx)
++{
++    const uint16_t token = static_cast<uint16_t>(ctx->gpr[3] & 0xFFFFu);
++    GX__SetDrawSync_8016ed08(token);
++    {
++        std::lock_guard<std::mutex> lock(g_drawSyncMutex);
++        if (g_breakPointActive) {
++            g_heldTokens.push_back(token);
++            return;
++        }
++    }
++    DeliverDrawSyncToken(ctx, token);
++}
++PPC_NATIVE_OVERRIDE_VOID(8016e9fc, GX__SetDrawSync_8016e9fc, (CpuContext* ctx), (ctx));
++
++extern "C" void GX__EnableBreakPt_8016d098(CpuContext* ctx)
++{
++    (void)ctx;
++    std::lock_guard<std::mutex> lock(g_drawSyncMutex);
++    g_breakPointActive = true;
++}
++PPC_NATIVE_OVERRIDE_VOID(8016d098, GX__EnableBreakPt_8016d098, (CpuContext* ctx), (ctx));
++
++extern "C" void GX__DisableBreakPt_8016d138(CpuContext* ctx)
++{
++    std::vector<uint16_t> tokens;
++    {
++        std::lock_guard<std::mutex> lock(g_drawSyncMutex);
++        g_breakPointActive = false;
++        tokens.swap(g_heldTokens);
++    }
++    for (const uint16_t token : tokens) {
++        DeliverDrawSyncToken(ctx, token);
++    }
++}
++PPC_NATIVE_OVERRIDE_VOID(8016d138, GX__DisableBreakPt_8016d138, (CpuContext* ctx), (ctx));
+ 
+ extern "C" void GX__FinishInterruptHandler_8016ed94() {
+     try {
+diff --git a/runtime/src/hle/os/os_sleep.cpp b/runtime/src/hle/os/os_sleep.cpp
+index 5a66c02..4e4c35c 100644
+--- a/runtime/src/hle/os/os_sleep.cpp
++++ b/runtime/src/hle/os/os_sleep.cpp
+@@ -396,7 +396,12 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
+     const uint32_t queuePtr = cpu->gpr[3];
+     
+     if (queuePtr == 0) {
+-        RT_LOG(RT_TAG_OS) << "OSSleepThread: null queue pointer!" << std::endl;
++        static int s_nullQueueReports = 0;
++        if (s_nullQueueReports < 4) {
++            ++s_nullQueueReports;
++            RT_LOGF(RT_TAG_OS, "OSSleepThread: null queue pointer! lr=0x%08X r1=0x%08X\n",
++                    cpu->lr, cpu->gpr[1]);
++        }
+         return;
+     }
+ 
+diff --git a/runtime/src/hle/vi.cpp b/runtime/src/hle/vi.cpp
+index cd236a9..66a8364 100644
+--- a/runtime/src/hle/vi.cpp
++++ b/runtime/src/hle/vi.cpp
+@@ -220,21 +220,37 @@ void ViSetR3(CpuContext* ctx, uint32_t value)
+     }
+ }
+ 
++// Some games (Excite Truck) have no counterpart for a few of these globals; their address maps to
++// 0 and the write is skipped.
++template <typename T>
++void WriteGuestIfMapped(uint32_t addr, T value) {
++    if (addr == 0) {
++        return;
++    }
++    if constexpr (sizeof(T) == 1) {
++        Memory::Write8(addr, static_cast<uint8_t>(value));
++    } else if constexpr (sizeof(T) == 2) {
++        Memory::Write16(addr, static_cast<uint16_t>(value));
++    } else {
++        Memory::Write32(addr, static_cast<uint32_t>(value));
++    }
++}
++
+ void WriteGuestStateLocked() {
+     try {
+-        Memory::Write8(kViInitializedFlagAddr, 1);
+-        Memory::Write8(kViTimingGuardAddr, 1);
+-        Memory::Write32(kViTvFormatAddr, g_vi.tvFormat);
+-        Memory::Write16(kViRenderWidthAddr, static_cast<uint16_t>(g_vi.renderWidth));
+-        Memory::Write16(kViRenderHeightAddr, static_cast<uint16_t>(g_vi.renderHeight));
+-        Memory::Write16(kViXfbWidthAddr, static_cast<uint16_t>(g_vi.xfbWidth));
+-        Memory::Write16(kViXfbHeightAddr, static_cast<uint16_t>(g_vi.xfbHeight));
+-        Memory::Write32(kViRetraceCountAddr, g_vi.retraceCount);
+-        Memory::Write32(kViPreRetraceCallback, g_vi.preRetraceCallback);
+-        Memory::Write32(kViPostRetraceCallback, g_vi.postRetraceCallback);
++        WriteGuestIfMapped<uint8_t>(kViInitializedFlagAddr, 1);
++        WriteGuestIfMapped<uint8_t>(kViTimingGuardAddr, 1);
++        WriteGuestIfMapped<uint32_t>(kViTvFormatAddr, g_vi.tvFormat);
++        WriteGuestIfMapped<uint16_t>(kViRenderWidthAddr, static_cast<uint16_t>(g_vi.renderWidth));
++        WriteGuestIfMapped<uint16_t>(kViRenderHeightAddr, static_cast<uint16_t>(g_vi.renderHeight));
++        WriteGuestIfMapped<uint16_t>(kViXfbWidthAddr, static_cast<uint16_t>(g_vi.xfbWidth));
++        WriteGuestIfMapped<uint16_t>(kViXfbHeightAddr, static_cast<uint16_t>(g_vi.xfbHeight));
++        WriteGuestIfMapped<uint32_t>(kViRetraceCountAddr, g_vi.retraceCount);
++        WriteGuestIfMapped<uint32_t>(kViPreRetraceCallback, g_vi.preRetraceCallback);
++        WriteGuestIfMapped<uint32_t>(kViPostRetraceCallback, g_vi.postRetraceCallback);
+         // Write PENDING frame buffer to guest memory so SDK code sees the queued value
+-        Memory::Write32(kViNextFrameBufferAddr, g_vi.pendingNextFrameBuffer);
+-        Memory::Write32(kViNextFrameBufferHwAddr, g_vi.pendingNextFrameBuffer);
++        WriteGuestIfMapped<uint32_t>(kViNextFrameBufferAddr, g_vi.pendingNextFrameBuffer);
++        WriteGuestIfMapped<uint32_t>(kViNextFrameBufferHwAddr, g_vi.pendingNextFrameBuffer);
+     } catch (const ::Memory::AccessViolation& e) {
+         LogMemoryError(RT_TAG_VI, "WriteGuestStateLocked", e);
+     }
+@@ -343,7 +359,8 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
+         if (postCb) {
+             // Guard: only invoke callback if sSystem is initialized
+             // The callback dereferences sSystem which must be non-null
+-            uint32_t sSystemPtr = Memory::Read32(kEggSSystemAddr);
++            // (Mario Kart only: other games have no EGG system and call it directly.)
++            uint32_t sSystemPtr = kEggSSystemAddr ? Memory::Read32(kEggSSystemAddr) : 1u;
+             if (sSystemPtr != 0) {
+                 InvokeIndirectCpu(postCb, ctx);
+             }
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index 6d0dd6b..fdd4faa 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -863,10 +863,14 @@ void RuntimeAuroraLogCallback(AuroraLogLevel level, const char* module,
+ }
+ 
+ const TranslatedFunctionInfo* ResolveEntry() {
+-    const auto* entry = TranslatedFunctionRegistry::FindByAddressPtr(kDefaultEntryAddress);
++    // Excite Truck (REXE01) starts at __start = 0x80004170.
++    const uint32_t entryAddress = ::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck
++                                      ? 0x80004170u
++                                      : kDefaultEntryAddress;
++    const auto* entry = TranslatedFunctionRegistry::FindByAddressPtr(entryAddress);
+     if (!entry) {
+         std::ostringstream oss;
+-        oss << "No translated function registered at address 0x" << std::hex << kDefaultEntryAddress;
++        oss << "No translated function registered at address 0x" << std::hex << entryAddress;
+         throw std::runtime_error(oss.str());
+     }
+     return entry;
+diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
+index ed1a1b8..907840e 100644
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -1,4 +1,5 @@
+ #include "settings_overlay.h"
++#include "guest_abi/guest_region.h"
+ #include "gx_worker.h"
+ #include "audio_backend.h"
+ #include "aurora_events.h"
+@@ -1656,5 +1657,13 @@ void NotifyStrapInputAccepted() noexcept {
+     }
+ }
+ 
+-void AdvancePresentedFrame() noexcept { ++g_presentedFrame; }
++void AdvancePresentedFrame() noexcept
++{
++    ++g_presentedFrame;
++    // Only Mario Kart has the strap-scene hook that ends the startup screen. Other games end it
++    // on their first presented frame.
++    if (!::GuestRegion::IsMarioKart() && !g_strapInputAccepted.load(std::memory_order_relaxed)) {
++        NotifyStrapInputAccepted();
++    }
++}
+ } // namespace settings_overlay
+diff --git a/runtime/src/system_bridge.cpp b/runtime/src/system_bridge.cpp
+index 99f2abd..ad826d4 100644
+--- a/runtime/src/system_bridge.cpp
++++ b/runtime/src/system_bridge.cpp
+@@ -334,8 +334,10 @@ void SystemBridge::Initialize() {
+     // These set up vtables and other critical infrastructure
+     RT_LOG(RT_TAG_RUNTIME) << "Running static constructors for main DOL..." << std::endl;
+ 
+-    const uint32_t dolCtorStart = MKW_GADDR(80244DE0);
+-    const uint32_t dolCtorEnd = MKW_GADDR(80244EA0);
++    const bool exciteTruck = ::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck;
++    // Excite Truck: .ctors section of REXE01 main.dol (0x802ED060, 0x5E0 bytes).
++    const uint32_t dolCtorStart = exciteTruck ? 0x802ED060u : MKW_GADDR(80244DE0);
++    const uint32_t dolCtorEnd = exciteTruck ? 0x802ED640u : MKW_GADDR(80244EA0);
+ 
+     int dolCount = 0;
+     for (uint32_t addr = dolCtorStart; addr < dolCtorEnd; addr += 4) {
+@@ -374,8 +376,9 @@ void SystemBridge::Initialize() {
+     RT_LOG(RT_TAG_RUNTIME) << "Running static constructors for StaticR.rel..." << std::endl;
+ 
+     // Define range for StaticR.rel .ctors
+-    const uint32_t ctorStart = MKW_GADDR(8088f400);
+-    const uint32_t ctorEnd = MKW_GADDR(8088f704);
++    // Excite Truck has no StaticR.rel.
++    const uint32_t ctorStart = exciteTruck ? 0u : MKW_GADDR(8088f400);
++    const uint32_t ctorEnd = exciteTruck ? 0u : MKW_GADDR(8088f704);
+ 
+     int count = 0;
+     for (uint32_t addr = ctorStart; addr < ctorEnd; addr += 4) {
+diff --git a/translator/src/Translator.Core/GuestAddressTable.cs b/translator/src/Translator.Core/GuestAddressTable.cs
+index 871ee97..4e10bfa 100644
+--- a/translator/src/Translator.Core/GuestAddressTable.cs
++++ b/translator/src/Translator.Core/GuestAddressTable.cs
+@@ -8,6 +8,9 @@ public enum GuestRegion
+     Pal = 0,
+     NtscU = 1,
+     NtscJ = 2,
++    // Excite Truck (REXE01): a different game built on the same Wii SDK. Only the SDK functions
++    // and data that have a counterpart get an address; everything else maps to 0 (absent).
++    ExciteTruck = 3,
+ }
+ 
+ public static class GuestRegions
+@@ -21,6 +24,7 @@ public static class GuestRegions
+         "RMCE01" => GuestRegion.NtscU,
+         "RMCJ01" => GuestRegion.NtscJ,
+         "RMCP01" => GuestRegion.Pal,
++        "REXE01" => GuestRegion.ExciteTruck,
+         { } id when id.StartsWith("RMC", StringComparison.Ordinal) =>
+             throw new InvalidDataException($"Mario Kart Wii release '{gameId}' is not supported."),
+         _ => GuestRegion.Pal,
+@@ -103,6 +107,8 @@ public sealed partial class GuestAddressTable
+             if (lo > 0 && pal <= ranges[lo - 1].Last)
+                 return (uint)(pal + (long)ranges[lo - 1].Delta);
+         }
++        if (region == GuestRegion.ExciteTruck)
++            return 0; // no counterpart in this game
+         throw new InvalidDataException($"PAL address 0x{pal:X8} has no {region} address in {SourcePath}.");
+     }
+ 
+diff --git a/translator/src/Translator.Core/RuntimeNativeIndex.cs b/translator/src/Translator.Core/RuntimeNativeIndex.cs
+index 74c6fee..2985de4 100644
+--- a/translator/src/Translator.Core/RuntimeNativeIndex.cs
++++ b/translator/src/Translator.Core/RuntimeNativeIndex.cs
+@@ -49,16 +49,20 @@ public sealed record RuntimeNativeIndex(
+     /// keyed by <paramref name="region"/>'s addresses. Every address must have a counterpart in that region.
+     /// </summary>
+     public RuntimeNativeIndex ForRegion(GuestAddressTable table, GuestRegion region) => new(
+-        Registrations.Select(entry => entry with { Address = table.Map(entry.Address, region) }).ToArray(),
+-        VoidStubAbis.Select(entry => entry with { Address = table.Map(entry.Address, region) }).ToArray(),
++        // Entries with no counterpart in the region (address 0) are dropped.
++        Registrations.Select(entry => entry with { Address = table.Map(entry.Address, region) })
++            .Where(static entry => entry.Address != 0).ToArray(),
++        VoidStubAbis.Select(entry => entry with { Address = table.Map(entry.Address, region) })
++            .Where(static entry => entry.Address != 0).ToArray(),
+         Effects.Select(entry => entry with
+         {
+             Address = table.Map(entry.Address, region),
+             Contract = entry.Contract with
+             {
+-                DirectCallTargets = entry.Contract.DirectCallTargets.Select(target => table.Map(target, region)).ToArray()
++                DirectCallTargets = entry.Contract.DirectCallTargets.Select(target => table.Map(target, region))
++                    .Where(static target => target != 0).ToArray()
+             }
+-        }).ToArray());
++        }).Where(static entry => entry.Address != 0).ToArray());
+ }
+ 
+ public static class RuntimeNativeIndexBuilder

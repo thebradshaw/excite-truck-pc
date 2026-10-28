@@ -28,7 +28,7 @@ SDK functions Excite Truck never links (the linker stripped them).
 
 ## Patches to WiiCompiled
 
-[`patches/0001-excite-truck-address-column.patch`](../patches/0001-excite-truck-address-column.patch):
+[`patches/0001-excite-truck-runtime.patch`](../patches/0001-excite-truck-runtime.patch):
 
 - Translator: a `GuestRegion.ExciteTruck` column, selected by game ID `REXE01`. Hooks with no
   Excite Truck address map to 0 and are dropped from the native index.
@@ -44,3 +44,20 @@ GitHub `archive/*.tar.gz` downloads, `sqlite.org` and `files.twilitrealm.dev` ma
 Clone the dependencies with git and pass `FETCHCONTENT_SOURCE_DIR_<NAME>` for abseil-cpp,
 xxhash, fmt, zlib (zlib-ng), png, tracy, sdl, imgui, rmlui and freetype. For sqlite3, point at
 any SQLite amalgamation folder (`sqlite3.c`/`sqlite3.h`).
+
+## Boot fixes (step 2)
+
+The game now boots to its first menu ("create a save file?") at 60 fps. What it took, in boot order:
+
+- Entry point, `.ctors` range, IPC globals and a few hand-checked SDK mappings (`tools/manual_map.txt`, `tools/manual_data.txt`).
+- `runtime/src/hle/excite_truck/et_hooks.cpp` (game-only hooks, addressed through the `0x8F000000` alias):
+  - `WPADGetStatus`: services alarms while boot spins waiting for the Wii Remote library.
+  - `FAAttach`: the SD-card drive attaches with no card (the Music-folder feature replaces this later).
+  - `OSGetFontEncode` / `OSSetFontEncode`: default to ANSI instead of reading a VI register.
+  - `__OSReadROM`: serves the IPL ROM fonts from `assets/fonts` (Dolphin's Droid Sans replacements, Apache 2.0).
+  - `GXSetDrawDone`: finishes queued draws and calls the game's draw-done callback.
+- VI globals the game's older SDK lays out differently (retrace queue, render heights); globals with no counterpart are skipped.
+- GX: GP metrics and EFB pokes are no-ops; FIFO breakpoints are emulated by holding draw-sync tokens until `GXDisableBreakPt`, which is how the game keeps the GPU one frame behind and detects hangs.
+- The Mario Kart startup pipeline list is no longer bundled (`-DMKW_INITIAL_PIPELINE_CACHE=NONE`); Excite Truck's own recorded list replaces it later. The startup screen ends on the first frame.
+
+`scripts/cycle.sh` regenerates the address table, retranslates, builds and runs; `scripts/shot.sh` boots on a virtual display and takes screenshots; `scripts/hangdump.sh` dumps thread stacks of a hung run.

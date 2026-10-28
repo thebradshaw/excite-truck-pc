@@ -1,3 +1,8 @@
 # Hand-checked Excite Truck addresses for data globals.  <MKWii PAL> <ET> <name / evidence>
 803867EC 8055DCAC ipcBufferLo: IPCGetBufferLo 0x8009d2e8 lwz r3,-0x2c54(r13)
 803867F0 8055DCB0 ipcBufferHi: IPCGetBufferHi 0x8009d2e0 lwz r3,-0x2c50(r13)
+# VI (older SDK layout). Retrace queue from VIWaitForRetrace (addi r3, r13, -0x2d50).
+80386BC0 8055DBB0
+# HorVer render/XFB heights: same struct as 80350864->8038F39C and 80350872->8038F3AA (+0x3EB38).
+80350866 8038F39E
+8035087C 8038F3B4
