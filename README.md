@@ -21,8 +21,7 @@ races don't stutter. See
 
 ## Your own music
 
-Drop MP3s into the `Music` folder (on Linux `~/.local/share/WiiCompiled/Music`; it is created on
-first launch). Subfolders are fine, up to 100 songs. In the game, set Options > Race Music to
+Drop MP3s into `ExciteTruck/UserData/Music` (the build scripts create it). Subfolders are fine, up to 100 songs. In the game, set Options > Race Music to
 All Random and your songs play during races, as with an SD card on the Wii.
 
 ## Layout
@@ -35,12 +34,36 @@ All Random and your songs play during races, as with an SD card on the Wii.
 | `tools/` | Small Python helpers for reading the game's `main.dol` |
 | `scripts/translate.sh` | Runs the translation |
 
-## Translating the game
+## Building and playing
 
-1. Extract your disc: `nodtool extract "Excite Truck (USA).wbfs" extracted` (`cargo install nodtool`).
-2. Copy `extracted/sys/main.dol` to `Assets/main.dol`.
-3. Install the .NET SDK (8 or newer, with a compiler at least as new as SDK 8.0.2xx).
-4. Run `./scripts/translate.sh`. The output lands in `build/excite-truck/`.
+You need your own copy of the US disc (REXE01) as a .wbfs, .iso or .rvz image (a .zip holding
+one works on Windows). The scripts check the disc, fetch the pinned WiiCompiled sources, apply this
+repo's patches, translate the game's code to C++, compile it and put the game in `ExciteTruck/`.
+The first build takes a while (mostly compiling); nothing from the disc ends up in this repo.
+
+**Windows 10/11** (needs [Git for Windows](https://git-scm.com/download/win), for example
+`winget install Git.Git`; the compiler, CMake, Ninja, .NET and libraries are downloaded with
+pinned checksums):
+
+```powershell
+git clone https://github.com/thebradshaw/excite-truck-pc.git
+cd excite-truck-pc
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 "D:\Games\Excite Truck (USA).wbfs"
+```
+
+Then run `ExciteTruck\ExciteTruck.exe`. Build files go to `C:\ETBuild` (about 20 GB, safe to
+delete afterwards; `-Work` picks another folder).
+
+**Linux** (Debian/Ubuntu: `sudo apt install git cmake ninja-build clang python3 curl dotnet-sdk-8.0`):
+
+```sh
+scripts/build-linux.sh "/path/to/Excite Truck (USA).wbfs"
+./ExciteTruck/ExciteTruck
+```
+
+The game folder is portable: settings, saves and caches live in `ExciteTruck/UserData`, and your
+songs go in `ExciteTruck/UserData/Music`. Running the script again after `git pull` rebuilds only
+what changed.
 
 ## License
 

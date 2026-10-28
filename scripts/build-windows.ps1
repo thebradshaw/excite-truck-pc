@@ -1,0 +1,277 @@
+<#
+.SYNOPSIS
+One-step build of Excite Truck PC on Windows, from your own disc image.
+
+.DESCRIPTION
+Run from PowerShell in the repository folder:
+
+    powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 "D:\Games\Excite Truck (USA).wbfs"
+
+Accepts a .wbfs/.iso/.rvz/.ciso/.wia disc image, a .zip holding one (or the first part,
+.zip.001, of a zip split by 7-Zip), or a folder already
+extracted with nodtool (the one holding sys\ and files\). The result is a self-contained folder,
+ExciteTruck\ in the repository, with ExciteTruck.exe, its settings (ExciteTruck\UserData) and your
+Music folder.
+
+Needs Git for Windows (winget install Git.Git). Everything else (compiler, CMake, Ninja, .NET,
+nodtool, libraries) is downloaded into the work folder with pinned checksums. About 20 GB of
+free space during the build; the finished game is much smaller.
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory, Position = 0)] [string]$Disc,
+    # Where the game goes. Default: <repo>\ExciteTruck
+    [string]$Out,
+    # Scratch space for tools, sources and the build. Default: C:\ETBuild (a short path
+    # avoids Windows' path-length limit; it can be deleted after the build).
+    [string]$Work,
+    # Parallel compile jobs. Default: one per core, capped by memory.
+    [int]$Jobs = 0
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 3.0
+$ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is very slow with the progress bar
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+$WiiCompiledUrl = 'https://github.com/patchzyy/Wiicompiled.git'
+$WiiCompiledCommit = '4993b2226c8f24defe84fadf04e69732c635a90d'   # v0.9.2
+$AuroraCommit = '3c80a1a9e8d75c61d31a903c6a3cef5f54c02f33'
+$NodtoolUrl = 'https://github.com/encounter/nod/releases/download/v1.4.4/nodtool-windows-x86_64.exe'
+$NodtoolSha256 = 'fb3203a68a59fa19ba9de0aa2f8c339396b6e4c5f9274d0858d302074cdedf8b'
+$DolSha256 = '573b5dcf48ebe0e2fba11c5bbcd88cb149696924fea7ed0f98c78986671e76b6'
+
+$Repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (-not $Out) { $Out = Join-Path $Repo 'ExciteTruck' }
+if (-not $Work) { $Work = Join-Path $env:SystemDrive 'ETBuild' }
+$Out = [IO.Path]::GetFullPath($Out)
+$Work = [IO.Path]::GetFullPath($Work)
+
+function Step([string]$Text) { Write-Host ''; Write-Host "==> $Text" -ForegroundColor Cyan }
+function Fail([string]$Text) { Write-Host ''; Write-Host "Error: $Text" -ForegroundColor Red; exit 1 }
+function Sha256([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Run([string]$Exe, [string[]]$Arguments) {
+    & $Exe @Arguments
+    if ($LASTEXITCODE -ne 0) { Fail "$([IO.Path]::GetFileName($Exe)) $($Arguments[0]) failed (exit code $LASTEXITCODE)" }
+}
+function Download([string]$Uri, [string]$Path, [string]$Sha) {
+    if ((Test-Path -LiteralPath $Path -PathType Leaf) -and (Sha256 $Path) -eq $Sha) { return }
+    Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile "$Path.partial"
+    if ((Sha256 "$Path.partial") -ne $Sha) { Remove-Item -LiteralPath "$Path.partial" -Force; Fail "download is corrupt: $Uri" }
+    Move-Item -LiteralPath "$Path.partial" -Destination $Path -Force
+}
+
+if (-not (Test-Path -LiteralPath $Disc)) { Fail "not found: $Disc" }
+$Disc = (Resolve-Path -LiteralPath $Disc).Path
+if ($Work.Contains(' ')) { Fail "the work folder path must not contain spaces: $Work (pass -Work C:\ETBuild)" }
+[IO.Directory]::CreateDirectory($Work) | Out-Null
+[IO.Directory]::CreateDirectory($Out) | Out-Null
+$downloads = Join-Path $Work 'downloads'
+[IO.Directory]::CreateDirectory($downloads) | Out-Null
+
+Step 'Checking tools'
+$git = Get-Command git -ErrorAction SilentlyContinue
+if (-not $git) { Fail 'Git is not installed. Install it with: winget install Git.Git   (then open a new PowerShell window)' }
+if (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\vcruntime140.dll'))) {
+    Fail 'The Microsoft Visual C++ runtime is missing. Install it with: winget install Microsoft.VCRedist.2015+.x64'
+}
+if ($Jobs -le 0) {
+    $memoryGb = [math]::Floor((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+    # Translated sources are large; allow roughly 2 GB per compile job.
+    $Jobs = [math]::Max(1, [math]::Min([Environment]::ProcessorCount, [math]::Floor($memoryGb / 2)))
+}
+
+# .NET 8 SDK for the translator: use an installed one, or put a private copy in the work folder.
+$dotnet = $null
+$installed = Get-Command dotnet -ErrorAction SilentlyContinue
+if ($installed) {
+    $sdks = & $installed.Source --list-sdks 2>$null
+    if ($sdks | Where-Object { $_ -match '^(\d+)\.' -and [int]$Matches[1] -ge 8 }) { $dotnet = $installed.Source }
+}
+if (-not $dotnet) {
+    $dotnetRoot = Join-Path $Work 'dotnet'
+    $dotnet = Join-Path $dotnetRoot 'dotnet.exe'
+    if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf)) {
+        Step 'Downloading the .NET 8 SDK (private copy, no admin needed)'
+        $installer = Join-Path $downloads 'dotnet-install.ps1'
+        Invoke-WebRequest -UseBasicParsing -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile $installer
+        & $installer -Channel 8.0 -InstallDir $dotnetRoot -NoPath
+        if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf)) { Fail '.NET SDK install failed' }
+    }
+}
+$env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
+$env:DOTNET_NOLOGO = '1'
+
+# --- Disc --------------------------------------------------------------------------------
+$data = Join-Path $Out 'Disc'
+if (Test-Path -LiteralPath (Join-Path $Disc 'sys\main.dol') -PathType Leaf) {
+    $data = $Disc
+} elseif (-not (Test-Path -LiteralPath (Join-Path $data 'sys\main.dol') -PathType Leaf)) {
+    $image = $Disc
+    if ($Disc -match '\.zip\.\d{3}$') {
+        # A zip split into parts by 7-Zip (name.zip.001, .002, ...): join the parts back into one zip.
+        Step 'Joining the zip parts'
+        $prefix = $Disc.Substring(0, $Disc.Length - 4)
+        $joined = Join-Path $Work 'disc.zip'
+        $output = [IO.File]::Create($joined)
+        try {
+            for ($part = 1; Test-Path -LiteralPath ('{0}.{1:D3}' -f $prefix, $part); $part++) {
+                $stream = [IO.File]::OpenRead(('{0}.{1:D3}' -f $prefix, $part))
+                try { $stream.CopyTo($output) } finally { $stream.Dispose() }
+            }
+        } finally { $output.Dispose() }
+        $Disc = $joined
+        $image = $joined
+    }
+    if ([IO.Path]::GetExtension($image) -ieq '.zip') {
+        Step 'Unpacking the zip'
+        $unzipped = Join-Path $Work 'disc-zip'
+        if (Test-Path -LiteralPath $unzipped) { Remove-Item -LiteralPath $unzipped -Recurse -Force }
+        Expand-Archive -LiteralPath $image -DestinationPath $unzipped
+        $image = Get-ChildItem -LiteralPath $unzipped -Recurse -File |
+            Where-Object { $_.Extension -match '^\.(wbfs|iso|rvz|ciso|wia|gcz)$' } |
+            Select-Object -First 1 -ExpandProperty FullName
+        if (-not $image) { Fail 'the zip holds no .wbfs/.iso/.rvz disc image' }
+    }
+    $nodtool = Join-Path $Work 'tools\nodtool.exe'
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $nodtool)) | Out-Null
+    Step 'Downloading nodtool (reads Wii disc images)'
+    Download $NodtoolUrl $nodtool $NodtoolSha256
+    Step 'Extracting the disc'
+    $partial = "$data.partial"
+    if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Recurse -Force }
+    Run $nodtool @('extract', $image, $partial)
+    Move-Item -LiteralPath $partial -Destination $data
+    foreach ($temporary in (Join-Path $Work 'disc-zip'), (Join-Path $Work 'disc.zip')) {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+    }
+}
+$dol = Join-Path $data 'sys\main.dol'
+if (-not (Test-Path -LiteralPath $dol -PathType Leaf)) { Fail "no sys\main.dol in $data" }
+if ((Sha256 $dol) -ne $DolSha256) {
+    Fail "this is not the US Excite Truck disc (REXE01, revision 0); other versions aren't supported yet"
+}
+
+# --- WiiCompiled, patched for Excite Truck -----------------------------------------------
+$ws = Join-Path $Work 'wiicompiled'
+$stampInputs = @(Get-ChildItem -LiteralPath (Join-Path $Repo 'patches') -Filter '*.patch' -File) +
+    @(Get-Item -LiteralPath (Join-Path $Repo 'tools\sdk_map\et_versions.inc')) +
+    @(Get-ChildItem -LiteralPath (Join-Path $Repo 'projects\excite-truck') -File)
+$stamp = ($stampInputs | Sort-Object FullName | ForEach-Object { Sha256 $_.FullName }) -join ','
+$stampFile = Join-Path $ws '.et-patched'
+$current = if (Test-Path -LiteralPath $stampFile) { [IO.File]::ReadAllText($stampFile) } else { '' }
+if ($current -ne $stamp) {
+    Step 'Fetching WiiCompiled (the recompiler and runtime this port is built on)'
+    if (-not (Test-Path -LiteralPath (Join-Path $ws '.git'))) {
+        if (Test-Path -LiteralPath $ws) { Remove-Item -LiteralPath $ws -Recurse -Force }
+        # Keep LF line endings so the patches apply.
+        Run $git.Source @('-c', 'core.autocrlf=false', 'clone', '--quiet', $WiiCompiledUrl, $ws)
+        Run $git.Source @('-C', $ws, 'config', 'core.autocrlf', 'false')
+    }
+    & $git.Source -C $ws fetch --quiet origin $WiiCompiledCommit 2>$null
+    Run $git.Source @('-C', $ws, 'checkout', '--quiet', '--force', $WiiCompiledCommit)
+    Run $git.Source @('-C', $ws, 'clean', '-fdq', '-e', 'build', '-e', 'generated', '-e', 'Assets', '-e', 'Launcher/artifacts')
+    Run $git.Source @('-C', $ws, '-c', 'core.autocrlf=false', 'submodule', 'update', '--init', '--quiet', 'aurora-main')
+    $aurora = Join-Path $ws 'aurora-main'
+    Run $git.Source @('-C', $aurora, 'config', 'core.autocrlf', 'false')
+    Run $git.Source @('-C', $aurora, 'checkout', '--quiet', '--force', $AuroraCommit)
+    Run $git.Source @('-C', $aurora, 'clean', '-fdq')
+
+    Step 'Applying the Excite Truck patches'
+    Run $git.Source @('-C', $ws, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0001-excite-truck-runtime.patch'))
+    Run $git.Source @('-C', $aurora, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0002-aurora-channel-colors.patch'))
+    $versions = Join-Path $ws 'runtime\include\guest_abi\guest_versions.inc'
+    [IO.File]::AppendAllText($versions, [IO.File]::ReadAllText((Join-Path $Repo 'tools\sdk_map\et_versions.inc')))
+    $project = Join-Path $ws 'projects\excite-truck'
+    [IO.Directory]::CreateDirectory($project) | Out-Null
+    Copy-Item -Path (Join-Path $Repo 'projects\excite-truck\*') -Destination $project -Force
+    [IO.File]::WriteAllText($stampFile, $stamp)
+}
+
+# --- Build tools and libraries (WiiCompiled's own pinned set) ----------------------------
+$tools = Join-Path $Work 'toolchain'
+$deps = Join-Path $Work 'deps'
+Step 'Preparing the compiler, CMake and Ninja (downloaded once)'
+& (Join-Path $ws 'Launcher\Prepare-PortableTools.ps1') -Destination $tools
+Step 'Preparing the libraries (downloaded once)'
+& (Join-Path $ws 'Launcher\Prepare-Dependencies.ps1') -Destination $deps
+. (Join-Path $ws 'Launcher\NativeBuildFlags.ps1')
+$cmake = Join-Path $tools 'CMake\bin\cmake.exe'
+$ninja = Join-Path $tools 'Ninja\ninja.exe'
+$bin = Join-Path $tools 'llvm-mingw\bin'
+
+# --- Translate the game's code to C++ ----------------------------------------------------
+[IO.Directory]::CreateDirectory((Join-Path $ws 'Assets')) | Out-Null
+Copy-Item -LiteralPath $dol -Destination (Join-Path $ws 'Assets\main.dol') -Force
+$cli = Join-Path $ws 'translator\src\Translator.Cli\bin\Release\net8.0\Translator.Cli.dll'
+if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
+    Step 'Building the translator'
+    Run $dotnet @('build', (Join-Path $ws 'translator\src\Translator.Cli\Translator.Cli.csproj'), '-c', 'Release', '-v', 'quiet', '-nologo')
+}
+
+Push-Location $ws
+$oldPath = $env:PATH
+try {
+    $p = 'projects/excite-truck/recomp.yml'
+    Step "Translating the game's code (a few minutes)"
+    Run $dotnet @($cli, 'translate-recursive', '0x80004170', '--project', $p, '--outdir', 'generated/functions',
+        '--output-metadata', 'generated/base_translation_output.json',
+        '--production-source-bundle', 'generated/base_translation_sources.bin',
+        '--no-function-files', '--prune-stale', '--threads', "$([Environment]::ProcessorCount)")
+    Run $dotnet @($cli, 'generate-data-init', '--project', $p)
+    Run $dotnet @($cli, 'emit-build-shards', '--project', $p, '--base-metadata', 'generated/base_translation_output.json',
+        '--base-functions-dir', 'generated/functions', '--native-source-dir', 'runtime/src', '--out', 'generated/build_shards')
+
+    # --- Compile ------------------------------------------------------------------------
+    # x86-64-v3 (AVX2) is faster; older CPUs get v2.
+    Add-Type -Namespace EtBuild -Name Cpu -MemberDefinition '[DllImport("kernel32.dll")] public static extern bool IsProcessorFeaturePresent(uint feature);'
+    $cpuProfile = if ([EtBuild.Cpu]::IsProcessorFeaturePresent(40)) { 'v3' } else { 'v2' }
+    $env:PATH = Get-MkwToolchainPath $tools
+    $build = Join-Path $ws 'build\windows'
+    Step 'Configuring'
+    $configure = Get-MkwNativeConfigureArguments `
+        -SourceDirectory (Join-Path $ws 'runtime') -BuildDirectory $build `
+        -Ninja $ninja -CCompiler (Join-Path $bin 'x86_64-w64-mingw32-clang.exe') `
+        -CxxCompiler (Join-Path $bin 'x86_64-w64-mingw32-clang++.exe') `
+        -ResourceCompiler (Join-Path $bin 'x86_64-w64-mingw32-windres.exe') `
+        -DependenciesDirectory $deps `
+        -AdditionalArguments @(
+            "-DMKW_INITIAL_PIPELINE_CACHE=$(ConvertTo-MkwCMakePath (Join-Path $Repo 'assets\shaders\initial_pipeline_cache.db'))",
+            "-DMKW_TRANSLATED_COMPILE_JOBS=$Jobs", "-DMKW_X86_CPU_PROFILE=$cpuProfile")
+    Run $cmake $configure
+    Step "Compiling with $Jobs jobs (this is the long part: 20 to 60 minutes)"
+    Run $cmake @('--build', $build, '--target', 'WiiCompiled', '--parallel', "$Jobs")
+} finally {
+    $env:PATH = $oldPath
+    Pop-Location
+}
+
+# --- Package -----------------------------------------------------------------------------
+Step "Installing to $Out"
+Copy-Item -LiteralPath (Join-Path $build 'WiiCompiled.exe') -Destination (Join-Path $Out 'ExciteTruck.exe') -Force
+Get-ChildItem -LiteralPath $build -File |
+    Where-Object { $_.Extension -in '.dll', '.bin', '.pem', '.db', '.zip' } |
+    Copy-Item -Destination $Out -Force
+foreach ($name in 'fonts', 'wii_bootstrap', 'config') {
+    $directory = Join-Path $build $name
+    if (Test-Path -LiteralPath $directory -PathType Container) {
+        $target = Join-Path $Out $name
+        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+        Copy-Item -LiteralPath $directory -Destination $target -Recurse
+    }
+}
+# portable.txt keeps settings, saves and caches in UserData next to the game.
+New-Item -ItemType File -Force -Path (Join-Path $Out 'portable.txt') | Out-Null
+[IO.Directory]::CreateDirectory((Join-Path $Out 'UserData\Music')) | Out-Null
+$config = Join-Path $Out 'UserData\Config.toml'
+if (-not (Test-Path -LiteralPath $config)) {
+    $dvdRoot = if ($data -eq (Join-Path $Out 'Disc')) { '../Disc' } else { $data.Replace('\', '/') }
+    [IO.File]::WriteAllText($config, "[paths]`ndvd_root = `"$dvdRoot`"`n")
+}
+
+Write-Host ''
+Write-Host 'Done. Start the game with:' -ForegroundColor Green
+Write-Host "  $(Join-Path $Out 'ExciteTruck.exe')"
+Write-Host ''
+Write-Host "Your own songs go in $(Join-Path $Out 'UserData\Music') (MP3, up to 100)."
+Write-Host 'In the game set Options > Race Music to All Random. F10 opens the settings bar.'

@@ -1,0 +1,7 @@
+# The patches and address table must keep LF line endings to apply on Windows.
+*.patch -text
+*.inc text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+MAP.txt text eol=lf
+*.db binary

@@ -12,3 +12,5 @@ Assets/
 build/
 __pycache__/
 *.pyc
+# Output of the one-step build scripts
+/ExciteTruck/
