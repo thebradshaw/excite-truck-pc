@@ -5,7 +5,7 @@ cd /home/claude/work
 mkdir -p shots; rm -f shots/*.png
 Xvfb :82 -screen 0 1280x720x24 >/dev/null 2>&1 & XP=$!
 sleep 1
-WC_GAME_LOG=1 WC_TRACE_SLEEP=1 WC_TRACE_INPUT=1 SDL_AUDIO_DRIVER=dummy XDG_RUNTIME_DIR=/tmp/xdg DISPLAY=:82 timeout -s KILL ${RUNSECS:-120} ./wc-et/build-linux/WiiCompiled > run.log 2>&1 & GP=$!
+WC_GAME_LOG=1 WC_TRACE_SLEEP=1 WC_TRACE_INPUT=1 SDL_AUDIO_DRIVER=${AUDIODRV:-dummy} SDL_AUDIO_DISK_OUTPUT_FILE=/tmp/claude-0/audio.raw SDL_DISKAUDIOFILE=/tmp/claude-0/audio.raw XDG_RUNTIME_DIR=/tmp/xdg DISPLAY=:82 timeout -s KILL ${RUNSECS:-120} ./wc-et/build-linux/WiiCompiled > run.log 2>&1 & GP=$!
 sleep 3
 W=$(DISPLAY=:82 xdotool search --name "." 2>/dev/null | tail -1); echo "window=$W" >&2
 while read -r cmd a b; do

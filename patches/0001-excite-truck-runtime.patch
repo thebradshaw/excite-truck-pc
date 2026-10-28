@@ -160,10 +160,10 @@ index 2646e0f..53f892e 100644
          g_widescreenConfigured ? EggRecordWidth(kEggRecordWidth43, surfaceWidth, surfaceHeight)
 diff --git a/runtime/src/hle/excite_truck/et_hooks.cpp b/runtime/src/hle/excite_truck/et_hooks.cpp
 new file mode 100644
-index 0000000..59920f2
+index 0000000..2f621cf
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_hooks.cpp
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,198 @@
 +// Excite Truck (REXE01) specific hooks.
 +//
 +// Addresses here use the 0x8F000000 alias: guest_versions.inc maps 0x8F000000 + (ET address
@@ -174,6 +174,7 @@ index 0000000..59920f2
 +#include <chrono>
 +#include <cstdlib>
 +#include <cstdint>
++#include <cstring>
 +#include <fstream>
 +#include <iterator>
 +#include <thread>
@@ -329,6 +330,38 @@ index 0000000..59920f2
 +    }
 +}
 +PPC_NATIVE_OVERRIDE_VOID(8F2E30C8, ET_DebugPrintf_802e30c8, (CpuContext* ctx), (ctx));
++
++// The game's command-line parser (0x80004D64). Retail builds pass it an empty string, which
++// hides developer options such as "-direct_to_track:<event>". WC_ET_ARGS fills that string.
++// The parser itself (0x800199B8) still runs as translated code; this replaces only the wrapper,
++// which also looks for "-interlude" (flag byte at r13 - 0x12C4) and returns 1.
++extern "C" void ET_ParseCommandLine_80004d64(CpuContext* ctx)
++{
++    const uint32_t buf = ctx->gpr[3];
++    if (buf != 0) {
++        if (const char* args = std::getenv("WC_ET_ARGS"); args && *args) {
++            const size_t n = std::min<size_t>(std::strlen(args), 0xFF);
++            for (size_t i = 0; i < n; ++i) Memory::Write8(buf + uint32_t(i), uint8_t(args[i]));
++            Memory::Write8(buf + uint32_t(n), 0);
++            RT_LOGF(RT_TAG_HLE, "[et] command line: %s\n", args);
++        }
++        const uint32_t r13 = ctx->gpr[13];
++        InvokeDirectCpu<0x800199B8u>(ctx);
++        for (uint32_t p = buf;; ++p) {
++            const char c = char(Memory::Read8(p));
++            if (c == 0) break;
++            if (c != '-' && c != '/') continue;
++            static const char kInterlude[] = "interlude";
++            bool match = true;
++            for (uint32_t k = 0; k < 9; ++k) {
++                if (char(Memory::Read8(p + 1 + k)) != kInterlude[k]) { match = false; break; }
++            }
++            if (match) Memory::Write8(r13 - 0x12C4, 1);
++        }
++    }
++    ctx->gpr[3] = 1;
++}
++PPC_NATIVE_OVERRIDE_VOID(8F004D64, ET_ParseCommandLine_80004d64, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
 index 0000000..2c0d4e3

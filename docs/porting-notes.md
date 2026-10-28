@@ -116,3 +116,15 @@ a read-only virtual SD card built from a folder on the PC:
   after the copy, now wakes due sleepers and, when a thread is ready, parks the main thread for a
   moment so it runs (`OS_HLE_YieldToReadyThreads`). Other ET background threads benefit too.
 - `WC_TRACE_SD=1` logs every SDIO request.
+
+## Developer options and the first Excite race (step 2)
+
+The game parses a command line at boot (0x80004D64 → 0x800199B8), but retail builds pass it an
+empty string. `WC_ET_ARGS` now supplies one, which unlocks the developer options in the table at
+0x802FD528. The useful one for testing is `-direct_to_track:<event>`, which skips the menus and
+starts a race, for example `WC_ET_ARGS=-direct_to_track:canada` (an Excite race in Canada with five
+opponents). Others: `-no_music`, `-no_sound`, `-profile`, `-players:<n>`, `-locale:<x>`.
+
+A full race runs this way: countdown, HUD, AI opponents, stars, Tree Runs, jumps and boosts.
+Open: the player's truck draws nearly black (tutorial and races alike), and the container's
+software renderer only manages 7 to 10 fps in races, so scripted laps are slow.
