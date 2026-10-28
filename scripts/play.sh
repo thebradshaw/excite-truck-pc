@@ -11,7 +11,10 @@ W=$(DISPLAY=:82 xdotool search --name "." 2>/dev/null | tail -1); echo "window=$
 while read -r cmd a b; do
   case "$cmd" in
     sleep) sleep "$a" ;;
-    key) DISPLAY=:82 xdotool windowfocus "$W" 2>/dev/null; DISPLAY=:82 xdotool keydown --window "$W" "$a"; sleep "${b:-0.3}"; DISPLAY=:82 xdotool keyup --window "$W" "$a" ;;
+    key) [ -z "$W" ] && W=$(DISPLAY=:82 xdotool search --name "." 2>/dev/null | tail -1)
+         DISPLAY=:82 xdotool windowfocus "$W" 2>/dev/null; DISPLAY=:82 xdotool keydown --window "$W" "$a"; sleep "${b:-0.3}"; DISPLAY=:82 xdotool keyup --window "$W" "$a" ;;
+    down) DISPLAY=:82 xdotool keydown --window "$W" "$a" ;;
+    up) DISPLAY=:82 xdotool keyup --window "$W" "$a" ;;
     shot) DISPLAY=:82 import -window root "shots/$a.png" ;;
   esac
 done <<< "$SCRIPT"

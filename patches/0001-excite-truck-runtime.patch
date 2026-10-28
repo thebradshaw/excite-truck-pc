@@ -343,10 +343,10 @@ index 0000000..39d33e9
 +PPC_NATIVE_OVERRIDE_VOID(8F2E30C8, ET_DebugPrintf_802e30c8, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
-index 0000000..126d6a5
+index 0000000..2c0d4e3
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_input.cpp
-@@ -0,0 +1,315 @@
+@@ -0,0 +1,319 @@
 +// Excite Truck (REXE01): a virtual Wii Remote driven by an Xbox-style gamepad or the keyboard.
 +//
 +// Excite Truck only takes a sideways Wii Remote. Rather than emulate the remote's Bluetooth
@@ -363,9 +363,9 @@ index 0000000..126d6a5
 +// sideways remote reads acc = (0, -1, 0).
 +//
 +// Default layout (Chris's request): R / RT = gas (2), X = brake (1), A = turbo (D-pad),
-+// left stick X = steer, left stick Y = air control. Menus: D-pad moves, RT/R/Y confirm (2),
++// left stick X = steer, left stick Y = air control, Y = Wii A (reset). Menus: D-pad moves, RT/R confirm (2),
 +// X/B go back (1), Start = pause (+), Back = minus.
-+// Keyboard: arrows = steer + D-pad, W/S = air control, X or Enter = gas / confirm (2), Z or Backspace = brake / back (1),
++// Keyboard: arrows = steer (plus D-pad for menus while gas is up), W/S = air control, X or Enter = gas / confirm (2), Z or Backspace = brake / back (1),
 +// C = turbo, P = pause (+).
 +//
 +// Addresses use the 0x8F000000 alias (see et_hooks.cpp).
@@ -461,9 +461,10 @@ index 0000000..126d6a5
 +    if (SDL_Gamepad* pad = ActiveGamepad()) {
 +        auto button = [pad](SDL_GamepadButton b) { return SDL_GetGamepadButton(pad, b); };
 +        const bool rightTrigger = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000;
-+        if (rightTrigger || button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) || button(SDL_GAMEPAD_BUTTON_NORTH)) {
++        if (rightTrigger || button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) {
 +            in.hold |= kWpad2;
 +        }
++        if (button(SDL_GAMEPAD_BUTTON_NORTH)) in.hold |= kWpadA; // "Press A to reset"
 +        if (button(SDL_GAMEPAD_BUTTON_WEST) || button(SDL_GAMEPAD_BUTTON_EAST)) {
 +            in.hold |= kWpad1;
 +        }
@@ -490,8 +491,11 @@ index 0000000..126d6a5
 +        if (key(SDL_SCANCODE_P)) in.hold |= kWpadPlus;
 +        if (key(SDL_SCANCODE_A)) in.hold |= kWpadA;
 +        if (key(SDL_SCANCODE_B)) in.hold |= kWpadB;
-+        if (key(SDL_SCANCODE_LEFT)) { in.hold |= kSidewaysLeft; in.steer = -1.0f; }
-+        if (key(SDL_SCANCODE_RIGHT)) { in.hold |= kSidewaysRight; in.steer = 1.0f; }
++        // In a race any D-pad press is turbo, so Left/Right only add D-pad presses (for the menus)
++        // while gas is not held. Steering with gas held stays pure tilt.
++        const bool gasHeld = (in.hold & kWpad2) != 0;
++        if (key(SDL_SCANCODE_LEFT)) { if (!gasHeld) in.hold |= kSidewaysLeft; in.steer = -1.0f; }
++        if (key(SDL_SCANCODE_RIGHT)) { if (!gasHeld) in.hold |= kSidewaysRight; in.steer = 1.0f; }
 +        // Up/Down stay pure D-pad: the menus ignore the D-pad while the remote is tilted, so air
 +        // control (pitch) lives on W/S instead.
 +        if (key(SDL_SCANCODE_UP)) in.hold |= kSidewaysUp;
