@@ -385,6 +385,13 @@ try {
         if (Test-Path -LiteralPath $iconObj) { Remove-Item -LiteralPath $iconObj -Recurse -Force }
         Write-Host "Game icon written to $iconOut"
     } catch { Write-Warning "Could not make the game icon: $_" }
+    # Files from the setup carry the build machine's clock, which can be hours ahead of this PC's.
+    # A source dated in the future keeps build.ninja "dirty" forever (ninja gives up after 100
+    # tries), so pull any such date back to now.
+    $now = Get-Date
+    Get-ChildItem -LiteralPath $ws -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -gt $now } |
+        ForEach-Object { $_.LastWriteTime = $now }
     Step 'Configuring'
     $configure = Get-MkwNativeConfigureArguments `
         -SourceDirectory (Join-Path $ws 'runtime') -BuildDirectory $build `
