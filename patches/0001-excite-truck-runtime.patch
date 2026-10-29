@@ -4808,7 +4808,7 @@ index 6ff3248..0fd04a4 100644
 +    int m_traceCalls = 0;
  };
 diff --git a/runtime/include/aurora_events.h b/runtime/include/aurora_events.h
-index 27e84ea..4dc0031 100644
+index 27e84ea..e2021ec 100644
 --- a/runtime/include/aurora_events.h
 +++ b/runtime/include/aurora_events.h
 @@ -1,4 +1,7 @@
@@ -4819,7 +4819,7 @@ index 27e84ea..4dc0031 100644
  
  #include "friend_code_keyboard.h"
  #include "settings_overlay.h"
-@@ -139,10 +142,25 @@ void GxWorkerBeginFrame();
+@@ -139,10 +142,31 @@ void GxWorkerBeginFrame();
  void GxWorkerEndFrame(AuroraImguiFrame* imgui);
  void SetAuroraFrameGxBegun(bool begun);
  
@@ -4831,6 +4831,12 @@ index 27e84ea..4dc0031 100644
 +// during its logic phase, which overlapped the worker still uploading the previous frame
 +// (horizontal lines in the video). The menus hold 60 fps without pipelining anyway.
 +bool EtRaceRunningForGx();
++void EtArraySnapshotsBeginFrame(bool active);
++// Game thread: whether the frame being recorded copies its arrays, and for the last frame handed
++// to the worker, its CopyDisp ring position and that setting (read by the ET draw-done hook).
++inline bool g_etFrameSnapshots = false;
++inline uint64_t g_etCopyDispPos = 0;
++inline bool g_etCopyDispSnapshots = false;
 +inline bool PipelineGxFrames() {
 +    static const bool pipeline = !::GuestRegion::IsMarioKart() && std::getenv("WC_GX_FRAME_SYNC") == nullptr;
 +    return pipeline && EtRaceRunningForGx();
@@ -4846,7 +4852,23 @@ index 27e84ea..4dc0031 100644
          bool begun = false;
          {
              PerfStats::WaitScope wait;
-@@ -167,8 +185,13 @@ inline bool BeginAuroraFrame() {
+@@ -151,7 +175,14 @@ inline bool BeginAuroraFrame() {
+         if (!begun) {
+             return false;
+         }
+-        GxWorker::Submit([] { GxWorkerBeginFrame(); });
++        // Race frames copy the arrays their draws read (gx_dl.cpp), which lets the game stop
++        // waiting for aurora's FIFO processor at its draw-done (et_hooks.cpp).
++        const bool snapshots = PipelineGxFrames() && std::getenv("WC_ET_DRAWDONE_FULL") == nullptr;
++        g_etFrameSnapshots = snapshots;
++        GxWorker::Submit([snapshots] {
++            GxWorkerBeginFrame();
++            EtArraySnapshotsBeginFrame(snapshots);
++        });
+         ApplyPendingMkwDynamicAspectSurface();
+         return true;
+     }
+@@ -167,8 +198,13 @@ inline bool BeginAuroraFrame() {
  // overlaps guest memory the worker may still read.
  inline void EndAuroraFrame() {
      if (GxWorker::ShouldDefer()) {
@@ -4973,7 +4995,7 @@ index 1836717..f4daa52 100644
 +         : (0x##pal##u | 1u))
  #endif
 diff --git a/runtime/include/gx_worker.h b/runtime/include/gx_worker.h
-index 25179e2..9cb114a 100644
+index 25179e2..196ab16 100644
 --- a/runtime/include/gx_worker.h
 +++ b/runtime/include/gx_worker.h
 @@ -11,6 +11,9 @@
@@ -4986,6 +5008,18 @@ index 25179e2..9cb114a 100644
  
  namespace detail {
  inline constexpr size_t kAlign = 16;
+@@ -77,6 +80,11 @@ void SetWaitCallback(void (*callback)());
+ // Blocks until every recorded command has executed.
+ void Sync();
+ 
++// Ring position after everything recorded so far (pending FIFO bytes flushed first), and a wait
++// until the worker has finished every item before such a position. Game thread only.
++uint64_t RecordedPosition();
++void WaitUntilDone(uint64_t position);
++
+ // GX entry points run inline on the game thread while inside (after a Sync), for work whose
+ // results the guest needs immediately.
+ void BeginInline();
 diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
 index 3648d0e..db69abd 100644
 --- a/runtime/include/runtime_config.h
@@ -5170,10 +5204,10 @@ index 2646e0f..53f892e 100644
          g_widescreenConfigured ? EggRecordWidth(kEggRecordWidth43, surfaceWidth, surfaceHeight)
 diff --git a/runtime/src/hle/excite_truck/et_hooks.cpp b/runtime/src/hle/excite_truck/et_hooks.cpp
 new file mode 100644
-index 0000000..ace6b47
+index 0000000..fa973b6
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_hooks.cpp
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,224 @@
 +// Excite Truck (REXE01) specific hooks.
 +//
 +// Addresses here use the 0x8F000000 alias: guest_versions.inc maps 0x8F000000 + (ET address
@@ -5192,6 +5226,8 @@ index 0000000..ace6b47
 +
 +#include "abi_bridge.h"
 +#include "et_perf.h"
++#include "aurora_events.h"
++#include "gx_worker.h"
 +#include "hle_stubs.h"
 +#include "ppc_runtime.h"
 +#include "runtime_config.h"
@@ -5312,6 +5348,7 @@ index 0000000..ace6b47
 +// callback every frame and declares the GPU hung after 10 retraces without it. Draws are applied in
 +// order here, so finish the queued work and deliver the interrupt straight away.
 +extern "C" void GX__DrawDone_8016eab0();
++extern "C" void GX__FinishInterruptHandler_8016ed94();
 +
 +namespace {
 +constexpr uint32_t kGxDrawDoneFlag = 0x8055D970u;     // -0x2f90(r13)
@@ -5322,7 +5359,15 @@ index 0000000..ace6b47
 +{
 +    {
 +        EtPerf::Scope perfScope(EtPerf::kDrawDone);
-+        GX__DrawDone_8016eab0();
++        if (g_etCopyDispSnapshots && GxWorker::ShouldDefer()) {
++            // Race frames: wait only until the worker has replayed the last frame up to its
++            // CopyDisp. By then every read of guest memory for it is done (its arrays were copied),
++            // so the game may draw again while the worker and aurora finish that frame.
++            GxWorker::WaitUntilDone(g_etCopyDispPos);
++            GX__FinishInterruptHandler_8016ed94();
++        } else {
++            GX__DrawDone_8016eab0();
++        }
 +    }
 +    EtPerf::g_drawDoneAt = std::chrono::steady_clock::now();
 +    Memory::Write8(kGxDrawDoneFlag, 1);
@@ -6536,10 +6581,10 @@ index 0000000..e61f894
 +                         bool* pending);
 +int32_t SdCard_HLE_Ioctlv(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut, uint32_t vectorPtr);
 diff --git a/runtime/src/hle/gx/gx_copy.cpp b/runtime/src/hle/gx/gx_copy.cpp
-index 3dbdc8d..a4e4873 100644
+index 3dbdc8d..c93affe 100644
 --- a/runtime/src/hle/gx/gx_copy.cpp
 +++ b/runtime/src/hle/gx/gx_copy.cpp
-@@ -1,3 +1,19 @@
+@@ -1,3 +1,20 @@
 +#if defined(_WIN32)
 +// Declared by hand to keep <windows.h> macros out of this file (kernel32 export since Windows 7).
 +namespace {
@@ -6555,11 +6600,12 @@ index 3dbdc8d..a4e4873 100644
 +#include <sys/resource.h>
 +#endif
 +#include "et_perf.h"
++#include "aurora_events.h"
 +#include <chrono>
  // gx_copy.cpp - Framebuffer Copy Operations
  #include "gx_internal.h"
  
-@@ -6,6 +22,8 @@
+@@ -6,6 +23,8 @@
  #include <dolphin/gx/GXAurora.h>
  
  #include <algorithm>
@@ -6568,7 +6614,7 @@ index 3dbdc8d..a4e4873 100644
  #include <map>
  #include <mutex>
  #include <vector>
-@@ -122,11 +140,18 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g),
+@@ -122,11 +141,20 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g),
  // Copy Execution
  // ============================================================================
  
@@ -6581,13 +6627,15 @@ index 3dbdc8d..a4e4873 100644
 +    }
      EnsureAuroraFrameActive();
      if (GxWorker::ShouldDefer()) {
++        g_etCopyDispPos = GxWorker::RecordedPosition();
++        g_etCopyDispSnapshots = g_etFrameSnapshots;
          // The worker drains like the inline path; EndAuroraFrame joins it before the next frame.
          GxWorker::Submit([da, c] {
 +            EtPerf::Scope perfScope(EtPerf::kWorkerCopyDisp);
              GXDrawDone();
              GXCopyDisp(GuestToHostPtr(da), (GXBool)c);
          });
-@@ -141,6 +166,63 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+@@ -141,6 +169,63 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
          aurora_wait_for_frame_worker();
      }
      ++g_gxFrameCount;
@@ -6651,7 +6699,7 @@ index 3dbdc8d..a4e4873 100644
      VI_HLE_SetXfbReady(da);
      settings_overlay::Draw();
      // Seal, pace to the VI retrace boundary (Aurora renders the sealed frame
-@@ -151,29 +233,55 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+@@ -151,29 +236,55 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
  PPC_NATIVE_OVERRIDE_VOID(8016fc38, GX__CopyDisp_8016fc38, (uint32_t da, uint32_t c), (da, c));
  
  
@@ -6723,7 +6771,7 @@ index 3dbdc8d..a4e4873 100644
  }
  PPC_NATIVE_OVERRIDE_VOID(8016fd74, GX__CopyTex_8016fd74, (uint32_t da, uint32_t c), (da, c));
 diff --git a/runtime/src/hle/gx/gx_dl.cpp b/runtime/src/hle/gx/gx_dl.cpp
-index daceeb7..c6a5f86 100644
+index daceeb7..e49a831 100644
 --- a/runtime/src/hle/gx/gx_dl.cpp
 +++ b/runtime/src/hle/gx/gx_dl.cpp
 @@ -1,3 +1,4 @@
@@ -6731,7 +6779,102 @@ index daceeb7..c6a5f86 100644
  #include "gx_internal.h"
  #include "gx_stream_common.h"
  #include "gx_cp_decode.h"
-@@ -1289,11 +1290,81 @@ static bool ApplyAuroraIndexedXFArraysForDisplayList(const std::array<uint32_t,
+@@ -5,6 +6,8 @@
+ 
+ #include <cstdlib>
+ #include <unordered_map>
++#include <cstring>
++#include <memory>
+ 
+ // The display-list scan cache validates a cached scan against the live guest
+ // bytes with a 64-bit XXH3 digest (see GxDisplayListScanCache::CanReuse).
+@@ -1207,6 +1210,53 @@ static void SubmitLytDrawPacket(const uint8_t* packet, uint32_t packetBytes) {
+     SyncAppliedVtxStateFromHleReal();
+ }
+ 
++// Excite Truck races: the game no longer waits for aurora's FIFO processor at its draw-done (see
++// et_hooks.cpp), so the vertex and matrix arrays a frame's draws index are copied here, on the GX
++// worker, and aurora reads the copies. A copy lives until the frame ends; aurora's end of frame
++// drains the processor before the worker begins the next frame and resets the arena.
++namespace EtArraySnapshots {
++bool g_active = false;
++struct Block {
++    std::unique_ptr<uint8_t[]> data;
++    size_t size = 0;
++    size_t used = 0;
++};
++std::vector<Block> g_blocks;
++size_t g_current = 0;
++std::unordered_map<const void*, std::pair<const uint8_t*, uint32_t>> g_cache;
++
++const uint8_t* Copy(const uint8_t* src, uint32_t bytes) {
++    const size_t need = (static_cast<size_t>(bytes) + 63u) & ~size_t{63};
++    while (g_current < g_blocks.size() && g_blocks[g_current].used + need > g_blocks[g_current].size) {
++        ++g_current;
++    }
++    if (g_current == g_blocks.size()) {
++        Block block;
++        block.size = std::max<size_t>(need, size_t{8} << 20);
++        block.data.reset(new uint8_t[block.size]);
++        g_blocks.push_back(std::move(block));
++    }
++    Block& block = g_blocks[g_current];
++    uint8_t* dst = block.data.get() + block.used;
++    std::memcpy(dst, src, bytes);
++    block.used += need;
++    return dst;
++}
++
++const uint8_t* Snapshot(const uint8_t* src, uint32_t bytes) {
++    if (!g_active || src == nullptr || bytes == 0) {
++        return src;
++    }
++    auto it = g_cache.find(src);
++    if (it != g_cache.end() && it->second.second >= bytes) {
++        return it->second.first;
++    }
++    const uint8_t* copy = Copy(src, bytes);
++    g_cache[src] = {copy, bytes};
++    return copy;
++}
++} // namespace EtArraySnapshots
++
+ static bool ApplyAuroraArraysForDisplayList(const std::array<uint32_t, GX_VA_MAX_ATTR>& maxIdx,
+                                             const std::array<bool, GX_VA_MAX_ATTR>& sawIdx,
+                                             GXVtxFmt vtxfmt,
+@@ -1245,7 +1295,8 @@ static bool ApplyAuroraArraysForDisplayList(const std::array<uint32_t, GX_VA_MAX
+         // and honor the array stride. Keep the backing pointer stable so per-frame
+         // storage uploads can be cached instead of repacking every display-list call.
+         if (!needsPack) {
+-            ApplyAuroraArrayIfChanged(gxAttr, hostPtr, span, static_cast<uint8_t>(arr.stride));
++            ApplyAuroraArrayIfChanged(gxAttr, EtArraySnapshots::Snapshot(hostPtr, span), span,
++                                      static_cast<uint8_t>(arr.stride));
+             continue;
+         }
+         auto& packed = s_packedArrays[attr][++s_packedArrayCursor[attr] & 1u];
+@@ -1253,7 +1304,11 @@ static bool ApplyAuroraArraysForDisplayList(const std::array<uint32_t, GX_VA_MAX
+             ok = false;
+             continue;
+         }
+-        ApplyAuroraArrayIfChanged(gxAttr, packed.data(), static_cast<uint32_t>(packed.size()), static_cast<uint8_t>(elemSize));
++        const uint8_t* packedData = packed.data();
++        if (EtArraySnapshots::g_active) {
++            packedData = EtArraySnapshots::Copy(packed.data(), static_cast<uint32_t>(packed.size()));
++        }
++        ApplyAuroraArrayIfChanged(gxAttr, packedData, static_cast<uint32_t>(packed.size()), static_cast<uint8_t>(elemSize));
+     }
+     return ok;
+ }
+@@ -1282,18 +1337,89 @@ static bool ApplyAuroraIndexedXFArraysForDisplayList(const std::array<uint32_t,
+             ok = false;
+             continue;
+         }
+-        ApplyAuroraArrayIfChanged(static_cast<GXAttr>(attr), hostPtr, span, static_cast<uint8_t>(arr.stride));
++        ApplyAuroraArrayIfChanged(static_cast<GXAttr>(attr), EtArraySnapshots::Snapshot(hostPtr, span), span,
++                                  static_cast<uint8_t>(arr.stride));
+     }
+     return ok;
+ }
  
  } // namespace
  
@@ -6813,6 +6956,20 @@ index daceeb7..c6a5f86 100644
      if (nbytes == 0 || listAddr == 0) return;
      // List bytes and the arrays it indexes are GPU-side reads, so they are read when the worker runs.
      if (GxWorker::ShouldDefer()) {
+@@ -1529,3 +1655,13 @@ extern "C" void nw4r__lyt__detail__DrawQuad_80084d20(CpuContext* ctx) {
+ }
+ 
+ REGISTER_NATIVE_FUNCTION(0x80084D20, nw4r__lyt__detail__DrawQuad_80084d20);
++
++// Runs on the GX worker at the start of each frame (aurora_events.h).
++void EtArraySnapshotsBeginFrame(bool active) {
++    EtArraySnapshots::g_active = active;
++    for (auto& block : EtArraySnapshots::g_blocks) {
++        block.used = 0;
++    }
++    EtArraySnapshots::g_current = 0;
++    EtArraySnapshots::g_cache.clear();
++}
 diff --git a/runtime/src/hle/gx/gx_fatal_stubs.cpp b/runtime/src/hle/gx/gx_fatal_stubs.cpp
 index 0baaa0f..50a4fa3 100644
 --- a/runtime/src/hle/gx/gx_fatal_stubs.cpp
@@ -7405,7 +7562,7 @@ index 3a8c43b..c14fe0c 100644
          WriteDisplayListData((u8)(t|vf), 1);
          WriteDisplayListData((u16)nv, 2);
 diff --git a/runtime/src/hle/gx/gx_worker.cpp b/runtime/src/hle/gx/gx_worker.cpp
-index ac8983e..06d8952 100644
+index ac8983e..bc6e9b7 100644
 --- a/runtime/src/hle/gx/gx_worker.cpp
 +++ b/runtime/src/hle/gx/gx_worker.cpp
 @@ -1,3 +1,4 @@
@@ -7443,6 +7600,30 @@ index ac8983e..06d8952 100644
      // Guest callbacks serviced while waiting can record more work.
      do {
          if (detail::g_fifoPending) {
+@@ -327,6 +340,23 @@ void Sync() {
+     } while (detail::g_fifoPending || g_tail.load(std::memory_order_acquire) != g_write);
+ }
+ 
++uint64_t RecordedPosition() {
++    if (!Active() || detail::t_onWorker) {
++        return 0;
++    }
++    if (detail::g_fifoPending) {
++        detail::FlushFifo();
++    }
++    return g_write;
++}
++
++void WaitUntilDone(uint64_t position) {
++    if (!Active() || detail::t_onWorker || position == 0) {
++        return;
++    }
++    WaitForTail(position, true);
++}
++
+ void SetWaitCallback(void (*callback)()) { g_waitCallback = callback; }
+ 
+ void BeginInline() {
 diff --git a/runtime/src/hle/ios.cpp b/runtime/src/hle/ios.cpp
 index 9de2c3c..2cfff88 100644
 --- a/runtime/src/hle/ios.cpp

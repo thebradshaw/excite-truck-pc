@@ -269,3 +269,17 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
   (only at loads). Vulkan default reverted: the video lines are Vulkan-only and D3D12 felt better.
 - Audio speed matching now hands SDL a new ratio only in 0.1% steps (each change restarts SDL's
   resampler). `WC_AUDIO_NO_RATE=1` turns it off.
+
+## Draw-done without waiting for aurora (step 2, seventh run)
+
+- In races the ET draw-done hook (`ET_GXSetDrawDone_80040c1c`) no longer syncs the worker and
+  drains aurora's FIFO. It waits only until the worker has replayed the previous frame up to its
+  CopyDisp (`GxWorker::WaitUntilDone(g_etCopyDispPos)`). The worker's CopyDisp drain and aurora's
+  end of frame then overlap the game's next frame.
+- What made that safe: aurora reads indexed vertex arrays and indexed XF (matrix) arrays from the
+  pointer it is given when it processes a draw. For race frames the worker copies each array span
+  into a per-frame arena (`EtArraySnapshots` in gx_dl.cpp, one copy per array per frame) and hands
+  aurora the copy. The arena resets at the next GxWorkerBeginFrame, after aurora's end of frame
+  drained the processor. Textures are still read from guest memory by pointer.
+- Null-GPU container test at the start of Canada: ~18.5 ms per frame vs 22-29 ms with
+  `WC_ET_DRAWDONE_FULL=1` (the old behaviour). Screenshots while driving and crashing look right.
