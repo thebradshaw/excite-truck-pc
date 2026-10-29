@@ -426,6 +426,9 @@ foreach ($name in 'fonts', 'wii_bootstrap', 'config') {
 }
 $iconFile = Join-Path $ws 'runtime\resources\WiiCompiled.ico'
 if (Test-Path -LiteralPath $iconFile -PathType Leaf) { Copy-Item -LiteralPath $iconFile -Destination (Join-Path $Out 'ExciteTruck.ico') -Force }
+# Runs the game with frame timing logged to perf-log.txt (for tracking down slow spots).
+[IO.File]::WriteAllText((Join-Path $Out 'ExciteTruck-perf-log.bat'),
+    "@echo off`r`ncd /d `"%~dp0`"`r`nset WC_ET_PERF=1`r`nExciteTruck.exe > perf-log.txt 2>&1`r`n")
 # portable.txt keeps settings, saves and caches in UserData next to the game.
 New-Item -ItemType File -Force -Path (Join-Path $Out 'portable.txt') | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $Out 'UserData\Music')) | Out-Null

@@ -4791,6 +4791,20 @@ index 809f22e..97758a7 100644
  
      # Non-Windows TLS (runtime/src/hle/net/network_ssl.cpp's mbed TLS path) needs a trusted root
      # CA bundle to verify server certificates against - Windows gets this for free from the OS via
+diff --git a/runtime/include/audio_backend.h b/runtime/include/audio_backend.h
+index 6ff3248..7aa4b56 100644
+--- a/runtime/include/audio_backend.h
++++ b/runtime/include/audio_backend.h
+@@ -48,4 +48,9 @@ private:
+     bool m_silenced = false;
+     bool m_reportedDroppedBlock = false;
+     std::vector<int16_t> m_convertBuffer;
++    std::vector<uint8_t> m_silence;
++    bool m_hadAudio = false;
++    double m_rate = 1.0;
++    int m_drops = 0;
++    int m_traceCalls = 0;
+ };
 diff --git a/runtime/include/aurora_events.h b/runtime/include/aurora_events.h
 index 27e84ea..d10f927 100644
 --- a/runtime/include/aurora_events.h
@@ -5030,6 +5044,78 @@ index e339244..f4bd5bc 100644
      std::lock_guard<std::mutex> lock(RegistryMutex());
      if (RegistryFrozen().load(std::memory_order_acquire)) {
          RT_LOG(RT_TAG_RUNTIME) << "ERROR: Attempted to register function after registry was finalized: 0x"
+diff --git a/runtime/src/audio_backend.cpp b/runtime/src/audio_backend.cpp
+index fcb4fde..bf0ab4a 100644
+--- a/runtime/src/audio_backend.cpp
++++ b/runtime/src/audio_backend.cpp
+@@ -6,6 +6,8 @@
+ #include <cstdint>
+ #include <cstdlib>
+ #include <iostream>
++#include <chrono>
++#include <cstdio>
+ 
+ #include <SDL3/SDL_init.h>
+ 
+@@ -110,7 +112,9 @@ void AudioBackend::Shutdown() {
+ }
+ 
+ uint32_t AudioBackend::QueueLimitBytesLocked() const {
+-    constexpr uint32_t queueMs = 120;
++    // Room for the guest thread to stall (track loading runs long stretches of game code
++    // between audio services) without the output running dry. Was 120 ms.
++    constexpr uint32_t queueMs = 250;
+ 
+     const uint64_t bytesPerSecond = static_cast<uint64_t>(m_spec.freq) *
+                                     static_cast<uint64_t>(m_spec.channels) *
+@@ -127,12 +131,47 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+         return true;
+     }
+     const uint32_t maxQueued = QueueLimitBytesLocked();
++    static const bool trace = std::getenv("WC_TRACE_AUDIOQ") != nullptr;
++    if (trace) {
++        static int minQ = 1 << 30, maxQ = 0, pushes = 0, empties = 0; ++m_traceCalls;
++        static auto last = std::chrono::steady_clock::now();
++        minQ = std::min(minQ, queued); maxQ = std::max(maxQ, queued); ++pushes;
++        if (queued == 0) ++empties;
++        const auto now = std::chrono::steady_clock::now();
++        if (now - last > std::chrono::seconds(1)) {
++            std::fprintf(stderr, "[audioq] pushes %d queued min %d max %d (limit %u) empty %d drops %d rate %.4f\n", pushes, minQ, maxQ,
++                         maxQueued, empties, m_drops, m_rate);
++            m_drops = 0;
++            minQ = 1 << 30; maxQ = 0; pushes = 0; empties = 0; last = now;
++        }
++    }
++    // The output ran dry (the game stalled, e.g. while loading a track). Put back a short
++    // cushion of silence first, so playback restarts with headroom instead of running dry
++    // again on every block, which sounds like crackling.
++    if (queued == 0 && m_hadAudio) {
++        const uint64_t bytesPerSecond = static_cast<uint64_t>(m_spec.freq) * m_spec.channels * sizeof(int16_t);
++        const uint32_t cushion = static_cast<uint32_t>(bytesPerSecond * 40 / 1000) & ~3u;
++        m_silence.assign(cushion, 0);
++        SDL_PutAudioStreamData(m_stream, m_silence.data(), static_cast<int>(cushion));
++    }
++    m_hadAudio = true;
++    // The game makes audio by the CPU clock and the sound card plays it by its own clock, so the
++    // queue slowly fills up (and blocks get dropped: clicks) or runs dry (crackle). Nudge the
++    // playback speed by up to 2% to hold the queue near 70 ms. Not audible as a pitch change.
++    {
++        const double bytesPerMs = static_cast<double>(m_spec.freq) * m_spec.channels * sizeof(int16_t) / 1000.0;
++        const double error = (static_cast<double>(queued) - 70.0 * bytesPerMs) / (70.0 * bytesPerMs);
++        const double target = 1.0 + std::clamp(error * 0.02, -0.02, 0.02);
++        m_rate += (target - m_rate) * 0.05;
++        SDL_SetAudioStreamFrequencyRatio(m_stream, static_cast<float>(m_rate));
++    }
+     if (static_cast<uint64_t>(queued) + static_cast<uint64_t>(std::max(incomingBytes, 0)) > maxQueued) {
+         // Match Dolphin's FIFO overflow behavior: preserve the continuous audio
+         // already queued and discard the new block.  Clearing SDL's entire
+         // stream creates an audible discontinuity (the severe crackle seen when
+         // VI-batched DMA briefly outran playback).
+         // A drop is audible; report the first one so it is not invisible.
++        ++m_drops;
+         if (!m_reportedDroppedBlock) {
+             m_reportedDroppedBlock = true;
+             RT_LOG(RT_TAG_AUDIO) << "output queue full (" << queued << "/" << maxQueued
 diff --git a/runtime/src/dynamic_aspect.cpp b/runtime/src/dynamic_aspect.cpp
 index 2646e0f..53f892e 100644
 --- a/runtime/src/dynamic_aspect.cpp
@@ -5270,10 +5356,10 @@ index 0000000..ace6b47
 +PPC_NATIVE_OVERRIDE_VOID(8F161D50, ET_MandatoryTutorialChallenges_80161d50, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
-index 0000000..3ea6ac7
+index 0000000..04621fb
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_input.cpp
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,388 @@
 +// Excite Truck (REXE01): a virtual Wii Remote driven by an Xbox-style gamepad or the keyboard.
 +//
 +// Excite Truck only takes a sideways Wii Remote. Rather than emulate the remote's Bluetooth
@@ -5383,6 +5469,7 @@ index 0000000..3ea6ac7
 +    uint32_t hold = 0;
 +    float steer = 0.0f; // -1 left .. +1 right
 +    float pitch = 0.0f; // -1 nose down .. +1 nose up
++    bool boostTap = false; // A (or C) held in a race
 +};
 +
 +// Game state that decides between the driving and the menu layouts.
@@ -5445,11 +5532,13 @@ index 0000000..3ea6ac7
 +        if (button(SDL_GAMEPAD_BUTTON_START)) in.hold |= kWpadPlus;
 +        if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= kWpadMinus;
 +        if (racing) {
-+            if (button(SDL_GAMEPAD_BUTTON_SOUTH)) {
++            const bool aDown = button(SDL_GAMEPAD_BUTTON_SOUTH);
++            if (aDown) {
 +                // Turbo (any D-pad direction works in a race), plus 2 so that A also answers the
 +                // "press 2" boost after a crash. 2 is gas, which is held while boosting anyway.
 +                in.hold |= kSidewaysUp | kWpad2;
 +            }
++            in.boostTap = aDown;
 +            in.steer = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
 +            // Stick up reads negative. Inverted: stick up = nose down.
 +            const float stickY = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
@@ -5470,7 +5559,7 @@ index 0000000..3ea6ac7
 +        if (key(SDL_SCANCODE_Z) || key(SDL_SCANCODE_BACKSPACE)) in.hold |= kWpad1;
 +        if (key(SDL_SCANCODE_C)) {
 +            in.hold |= kSidewaysUp;
-+            if (racing) in.hold |= kWpad2;
++            if (racing) { in.hold |= kWpad2; in.boostTap = true; }
 +        }
 +        if (key(SDL_SCANCODE_P)) in.hold |= kWpadPlus;
 +        if (key(SDL_SCANCODE_A)) in.hold |= kWpadA;
@@ -5488,6 +5577,13 @@ index 0000000..3ea6ac7
 +        if (key(SDL_SCANCODE_S)) in.pitch = invertAir ? 1.0f : -1.0f;
 +        if (!racing) in.steer = 0.0f; // keep the remote level in the menus
 +    }
++    // The crash recovery counts presses of 2. With gas (R/RT) already holding 2, a tap of A would
++    // add no new press, so each A tap lets go of 2 for one read and presses it again on the next.
++    static bool tapWasDown = false;
++    if (in.boostTap && !tapWasDown && (g_previousHold & kWpad2) != 0) {
++        in.hold &= ~kWpad2;
++    }
++    tapWasDown = in.boostTap;
 +    return in;
 +}
 +

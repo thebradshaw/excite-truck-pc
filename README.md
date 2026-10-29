@@ -24,7 +24,7 @@ races don't stutter. See
 Xbox-style gamepad, in a race: RT or RB drive, X brake, A turbo, left stick steers and tilts the
 truck in the air. Air control is inverted by default (push up to dip the nose); turn that off with
 "Invert air control" in the F10 settings bar under Controllers. A also presses the "2" button, so
-it answers the "press 2" boost after a crash. Y is the Wii A button.
+it answers the "press 2" boost after a crash, even while R is held. Y is the Wii A button.
 
 In menus and the pause menu: A selects, B goes back, and the left stick or D-pad moves.
 

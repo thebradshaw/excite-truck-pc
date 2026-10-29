@@ -212,3 +212,16 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
   with "Auto (window size)" render resolution (`[excite_truck] defaults_version = 1`). F10 can
   change either afterwards.
 - Discord presence names Excite Truck instead of Mario Kart Wii.
+
+## Crash taps, audio drift, perf log (step 2, Chris's third run)
+
+- **Crash recovery taps.** The recovery counts presses of 2. With R (gas = 2) held, A added no
+  new press, so each A tap now releases 2 for one KPAD read and presses it on the next.
+- **Audio crackle.** The game makes audio on the CPU clock and the device plays on its own. The
+  output queue sat at its limit and dropped blocks all the time (each drop is a click). The backend
+  now nudges SDL's stream frequency ratio (up to 2%) to hold about 70 ms queued, the cap went from
+  120 to 250 ms, and an emptied queue gets a 40 ms silence cushion. Container test: 0 drops.
+  `WC_TRACE_AUDIOQ=1` prints queue stats once a second.
+- **Motion blur** is not extra work: the same four EFB copies run each frame at any speed.
+- **ExciteTruck-perf-log.bat** in the install folder runs the game with `WC_ET_PERF=1` and writes
+  `perf-log.txt`, so frame time on a player's PC can be read back.
