@@ -5380,10 +5380,10 @@ index 0000000..ace6b47
 +PPC_NATIVE_OVERRIDE_VOID(8F161D50, ET_MandatoryTutorialChallenges_80161d50, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
-index 0000000..5934d36
+index 0000000..d3b5b4c
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_input.cpp
-@@ -0,0 +1,451 @@
+@@ -0,0 +1,524 @@
 +// Excite Truck (REXE01): a virtual Wii Remote driven by an Xbox-style gamepad or the keyboard.
 +//
 +// Excite Truck only takes a sideways Wii Remote. Rather than emulate the remote's Bluetooth
@@ -5399,7 +5399,7 @@ index 0000000..5934d36
 +// acc.z (steer = clamp(-2 * acc.z, -1, 1)), and air pitch from -atan2(acc.x, -acc.y). At rest a
 +// sideways remote reads acc = (0, -1, 0).
 +//
-+// Default layout (Chris's request). Driving: R / RT = gas (2), X = brake (1), A = turbo (D-pad),
++// Default layout (Chris's request). Driving: R / RT = gas (2), X or L / LT = brake (1), A = turbo (D-pad),
 +// left stick X = steer, left stick Y = air control (inverted by default: push up to dip the nose;
 +// "Invert air control" in the F10 controller settings), Y = Wii A (reset). A also presses 2, so
 +// it answers the "press 2" boost after a crash. Menus (anything but a running race, pause
@@ -5415,6 +5415,16 @@ index 0000000..5934d36
 +#include <SDL3/SDL_keyboard.h>
 +#include <SDL3/SDL_events.h>
 +#include <atomic>
++#include <thread>
++#if defined(_WIN32)
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#endif
 +#include <chrono>
 +
 +#include <algorithm>
@@ -5468,16 +5478,65 @@ index 0000000..5934d36
 +SDL_Gamepad* g_gamepad = nullptr;
 +std::atomic<int> g_pendingTaps{0};
 +
++std::atomic<bool> g_xinputTaps{false};
++
++void AddTap()
++{
++    if (g_pendingTaps.load(std::memory_order_relaxed) < 8) {
++        g_pendingTaps.fetch_add(1, std::memory_order_relaxed);
++    }
++}
++
 +// Counts A (and keyboard C) presses as they happen, so fast taps between two game frames count.
 +bool SDLCALL CountBoostTaps(void*, SDL_Event* ev)
 +{
-+    const bool tap = (ev->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && ev->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) ||
-+                     (ev->type == SDL_EVENT_KEY_DOWN && !ev->key.repeat && ev->key.scancode == SDL_SCANCODE_C);
-+    if (tap && g_pendingTaps.load(std::memory_order_relaxed) < 8) {
-+        g_pendingTaps.fetch_add(1, std::memory_order_relaxed);
++    const bool padTap = ev->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && ev->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH &&
++                        !g_xinputTaps.load(std::memory_order_relaxed);
++    const bool keyTap = ev->type == SDL_EVENT_KEY_DOWN && !ev->key.repeat && ev->key.scancode == SDL_SCANCODE_C;
++    if (padTap || keyTap) {
++        AddTap();
 +    }
 +    return true;
 +}
++
++#if defined(_WIN32)
++// SDL samples the pad once per game frame, so at 30 fps a quick A tap can start and end between two
++// samples and never be seen. On Windows a small thread reads XInput every 4 ms just to count A
++// presses (Chris: some taps were lost in the crash recovery).
++struct EtXInputGamepad { WORD wButtons; BYTE bLeftTrigger, bRightTrigger; SHORT sThumbLX, sThumbLY, sThumbRX, sThumbRY; };
++struct EtXInputState { DWORD dwPacketNumber; EtXInputGamepad Gamepad; };
++using EtXInputGetState = DWORD(WINAPI*)(DWORD, EtXInputState*);
++
++void StartXInputTapThread()
++{
++    static bool started = false;
++    if (started) return;
++    started = true;
++    HMODULE lib = LoadLibraryA("xinput1_4.dll");
++    if (!lib) lib = LoadLibraryA("xinput9_1_0.dll");
++    if (!lib) return;
++    auto getState = reinterpret_cast<EtXInputGetState>(GetProcAddress(lib, "XInputGetState"));
++    if (!getState) return;
++    std::thread([getState] {
++        bool wasDown[4] = {};
++        for (;;) {
++            bool any = false;
++            for (DWORD i = 0; i < 4; ++i) {
++                EtXInputState st{};
++                if (getState(i, &st) != 0) { wasDown[i] = false; continue; }
++                any = true;
++                const bool down = (st.Gamepad.wButtons & 0x1000) != 0; // XINPUT_GAMEPAD_A
++                if (down && !wasDown[i]) AddTap();
++                wasDown[i] = down;
++            }
++            g_xinputTaps.store(any, std::memory_order_relaxed);
++            Sleep(any ? 4 : 500);
++        }
++    }).detach();
++}
++#else
++void StartXInputTapThread() {}
++#endif
 +
 +SDL_Gamepad* ActiveGamepad()
 +{
@@ -5571,6 +5630,7 @@ index 0000000..5934d36
 +{
 +    static const bool watching = SDL_AddEventWatch(CountBoostTaps, nullptr);
 +    (void)watching;
++    StartXInputTapThread();
 +    RemoteInput in;
 +    const bool racing = RaceRunning();
 +    const bool invertAir = RuntimeConfigFile::InvertAirControl(true);
@@ -5599,6 +5659,11 @@ index 0000000..5934d36
 +                in.hold |= kSidewaysUp | kWpad2;
 +            }
 +            in.boostTap = aDown;
++            // L / LT also brake (1), next to the gas on R / RT.
++            if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000 ||
++                button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) {
++                in.hold |= kWpad1;
++            }
 +            in.steer = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
 +            // Stick up reads negative. Inverted: stick up = nose down.
 +            const float stickY = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
@@ -5800,6 +5865,14 @@ index 0000000..5934d36
 +        return;
 +    }
 +    ReportConnected(ctx);
++    if (std::getenv("WC_TRACE_KPAD")) {
++        static int lastFrame = -1, reads = 0;
++        ++reads;
++        if (g_gxFrameCount != lastFrame) {
++            RT_LOGF(RT_TAG_HLE, "KPADRead frame %d reads %d lr=%08X len=%u\n", g_gxFrameCount, reads, ctx->lr, length);
++            lastFrame = g_gxFrameCount; reads = 0;
++        }
++    }
 +
 +    const RemoteInput in = ReadInput();
 +    const uint32_t hold = in.hold;
@@ -6454,7 +6527,7 @@ index 0000000..e61f894
 +                         bool* pending);
 +int32_t SdCard_HLE_Ioctlv(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut, uint32_t vectorPtr);
 diff --git a/runtime/src/hle/gx/gx_copy.cpp b/runtime/src/hle/gx/gx_copy.cpp
-index 3dbdc8d..abe6848 100644
+index 3dbdc8d..a4e4873 100644
 --- a/runtime/src/hle/gx/gx_copy.cpp
 +++ b/runtime/src/hle/gx/gx_copy.cpp
 @@ -1,3 +1,19 @@
@@ -6505,7 +6578,7 @@ index 3dbdc8d..abe6848 100644
              GXDrawDone();
              GXCopyDisp(GuestToHostPtr(da), (GXBool)c);
          });
-@@ -141,6 +166,49 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+@@ -141,6 +166,63 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
          aurora_wait_for_frame_worker();
      }
      ++g_gxFrameCount;
@@ -6515,6 +6588,20 @@ index 3dbdc8d..abe6848 100644
 +            namespace GW = GxWorker;
 +            static auto last = std::chrono::steady_clock::now();
 +            static uint64_t frames = 0;
++            {   // Single long frames (they cut the sound out) hide in the 120-frame averages.
++                static auto prevFrame = std::chrono::steady_clock::now();
++                static uint64_t prevDrawDone = 0, prevCopyDisp = 0, prevBusy = 0;
++                const auto t = std::chrono::steady_clock::now();
++                const double frameMs = std::chrono::duration<double, std::milli>(t - prevFrame).count();
++                const uint64_t dd = EtPerf::g_ns[EtPerf::kDrawDone].load(), cd = EtPerf::g_ns[EtPerf::kWorkerCopyDisp].load(),
++                               wb = EtPerf::g_ns[EtPerf::kWorkerBusy].load();
++                if (frameMs > 100.0 && frames > 0) {
++                    std::fprintf(stderr, "[perf] hitch: one frame took %.0f ms (waiting on graphics %.0f ms, worker drain %.0f ms, worker busy %.0f ms)\n",
++                                 frameMs, (dd >= prevDrawDone ? dd - prevDrawDone : dd) / 1e6, (cd >= prevCopyDisp ? cd - prevCopyDisp : cd) / 1e6,
++                                 (wb >= prevBusy ? wb - prevBusy : wb) / 1e6);
++                }
++                prevFrame = t; prevDrawDone = dd; prevCopyDisp = cd; prevBusy = wb;
++            }
 +            if (++frames % 120 == 0) {
 +                const auto now = std::chrono::steady_clock::now();
 +                const double ms = std::chrono::duration<double, std::milli>(now - last).count() / 120.0;
@@ -6555,7 +6642,7 @@ index 3dbdc8d..abe6848 100644
      VI_HLE_SetXfbReady(da);
      settings_overlay::Draw();
      // Seal, pace to the VI retrace boundary (Aurora renders the sealed frame
-@@ -151,29 +219,55 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+@@ -151,29 +233,55 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
  PPC_NATIVE_OVERRIDE_VOID(8016fc38, GX__CopyDisp_8016fc38, (uint32_t da, uint32_t c), (da, c));
  
  

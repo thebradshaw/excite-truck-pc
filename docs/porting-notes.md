@@ -252,3 +252,16 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
 - After the audio output runs dry, the next block fades in over 256 samples.
 - The game peeks the EFB through 0xC8xxxxxx at frame end (func_802CECF4, likely sun/lens-flare
   visibility); those reads get zero-filled memory.
+
+## L brake, XInput tap counter, hitch log (step 2, sixth run)
+
+- Chris's memory log: working set ~750 MB of 12 GB, so not paging. Soft page faults (up to 24k
+  per 120 frames) rise with the slow frames, which also have the longest worker drain: the
+  graphics side is catching up then.
+- L / LT (and LB) brake.
+- On Windows a thread polls XInput every 4 ms and counts A presses into the tap queue, because SDL
+  only samples the pad once per game frame and quick taps fell between samples. SDL A events are
+  ignored while XInput sees a pad, so a press is never counted twice.
+- `[perf] hitch:` lines report any single frame over 100 ms (Chris hears the sound cut out for half
+  a second; audio is produced on the game thread, so a long stall empties the output).
+- Menu video lines appeared together with the switch to Vulkan; not visible in the container.
