@@ -14,7 +14,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <ApplicationIcon Condition="Exists('app.ico')">app.ico</ApplicationIcon>
-    <Version>0.1.1</Version>
+    <Version>0.1.2</Version>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="payload.zip" LogicalName="payload.zip" />
