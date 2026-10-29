@@ -4792,16 +4792,17 @@ index 809f22e..97758a7 100644
      # Non-Windows TLS (runtime/src/hle/net/network_ssl.cpp's mbed TLS path) needs a trusted root
      # CA bundle to verify server certificates against - Windows gets this for free from the OS via
 diff --git a/runtime/include/audio_backend.h b/runtime/include/audio_backend.h
-index 6ff3248..764df1b 100644
+index 6ff3248..0fd04a4 100644
 --- a/runtime/include/audio_backend.h
 +++ b/runtime/include/audio_backend.h
-@@ -48,4 +48,10 @@ private:
+@@ -48,4 +48,11 @@ private:
      bool m_silenced = false;
      bool m_reportedDroppedBlock = false;
      std::vector<int16_t> m_convertBuffer;
 +    std::vector<uint8_t> m_silence;
 +    bool m_hadAudio = false;
 +    double m_rate = 1.0;
++    double m_appliedRate = 1.0;
 +    bool m_fadeInNext = false;
 +    int m_drops = 0;
 +    int m_traceCalls = 0;
@@ -5050,19 +5051,20 @@ index e339244..f4bd5bc 100644
      if (RegistryFrozen().load(std::memory_order_acquire)) {
          RT_LOG(RT_TAG_RUNTIME) << "ERROR: Attempted to register function after registry was finalized: 0x"
 diff --git a/runtime/src/audio_backend.cpp b/runtime/src/audio_backend.cpp
-index fcb4fde..0b29df2 100644
+index fcb4fde..9442067 100644
 --- a/runtime/src/audio_backend.cpp
 +++ b/runtime/src/audio_backend.cpp
-@@ -6,6 +6,8 @@
+@@ -6,6 +6,9 @@
  #include <cstdint>
  #include <cstdlib>
  #include <iostream>
 +#include <chrono>
++#include <cmath>
 +#include <cstdio>
  
  #include <SDL3/SDL_init.h>
  
-@@ -110,7 +112,9 @@ void AudioBackend::Shutdown() {
+@@ -110,7 +113,9 @@ void AudioBackend::Shutdown() {
  }
  
  uint32_t AudioBackend::QueueLimitBytesLocked() const {
@@ -5073,7 +5075,7 @@ index fcb4fde..0b29df2 100644
  
      const uint64_t bytesPerSecond = static_cast<uint64_t>(m_spec.freq) *
                                      static_cast<uint64_t>(m_spec.channels) *
-@@ -127,12 +131,48 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+@@ -127,12 +132,55 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
          return true;
      }
      const uint32_t maxQueued = QueueLimitBytesLocked();
@@ -5110,7 +5112,14 @@ index fcb4fde..0b29df2 100644
 +        const double error = (static_cast<double>(queued) - 70.0 * bytesPerMs) / (70.0 * bytesPerMs);
 +        const double target = 1.0 + std::clamp(error * 0.02, -0.02, 0.02);
 +        m_rate += (target - m_rate) * 0.05;
-+        SDL_SetAudioStreamFrequencyRatio(m_stream, static_cast<float>(m_rate));
++        // Only hand SDL a new ratio in 0.1% steps: every change restarts its resampler, and
++        // changing it on every block (hundreds of times a second) is itself audible as static.
++        static const bool noRate = std::getenv("WC_AUDIO_NO_RATE") != nullptr;
++        const double quantized = std::round(m_rate * 1000.0) / 1000.0;
++        if (!noRate && quantized != m_appliedRate) {
++            m_appliedRate = quantized;
++            SDL_SetAudioStreamFrequencyRatio(m_stream, static_cast<float>(quantized));
++        }
 +    }
      if (static_cast<uint64_t>(queued) + static_cast<uint64_t>(std::max(incomingBytes, 0)) > maxQueued) {
          // Match Dolphin's FIFO overflow behavior: preserve the continuous audio
@@ -5122,7 +5131,7 @@ index fcb4fde..0b29df2 100644
          if (!m_reportedDroppedBlock) {
              m_reportedDroppedBlock = true;
              RT_LOG(RT_TAG_AUDIO) << "output queue full (" << queued << "/" << maxQueued
-@@ -178,6 +218,17 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
+@@ -178,6 +226,17 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
      if (!QueueHasCapacityLocked(lenBytes)) {
          return true;
      }
@@ -8143,7 +8152,7 @@ index cd236a9..b452810 100644
  }
  PPC_NATIVE_OVERRIDE_VOID(801BA9A4, VIFlush_HLE_801ba9a4, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index 6d0dd6b..dcc6b2a 100644
+index 6d0dd6b..d17d9a3 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -68,6 +68,8 @@
@@ -8205,17 +8214,10 @@ index 6d0dd6b..dcc6b2a 100644
          const bool configWidescreen = RuntimeConfigFile::WidescreenEnabled(true);
          const bool forceAspect169 = RuntimeConfigFile::ForceAspect169Enabled();
          auroraConfig.windowWidth = (configWidescreen || forceAspect169) ? 854 : 640;
-@@ -1453,6 +1475,18 @@ int RuntimeMain(int argc, char** argv) {
+@@ -1453,6 +1475,11 @@ int RuntimeMain(int argc, char** argv) {
                  break;
              }
          }
-+#if defined(_WIN32)
-+        // Excite Truck on Windows: Vulkan cost less CPU time per frame than D3D12 on Chris's
-+        // AMD card (FX-8350 + RX 570). "auto" picks it; aurora falls back if Vulkan is missing.
-+        if (backend == "auto" && GuestRegion::Current() == GuestRegion::Id::ExciteTruck) {
-+            auroraConfig.desiredBackend = BACKEND_VULKAN;
-+        }
-+#endif
 +        // Profiling aid: WC_NULL_GPU=1 renders nothing (Dawn's null backend), so CPU-side frame
 +        // costs can be measured on machines without a GPU.
 +        if (std::getenv("WC_NULL_GPU")) {
@@ -8224,7 +8226,7 @@ index 6d0dd6b..dcc6b2a 100644
          const AuroraBackend requestedBackend = auroraConfig.desiredBackend;
  
          // SDL reads its device hints when the joystick subsystem starts, which
-@@ -1566,6 +1600,38 @@ int RuntimeMain(int argc, char** argv) {
+@@ -1566,6 +1593,38 @@ int RuntimeMain(int argc, char** argv) {
      }
  }
  

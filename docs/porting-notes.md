@@ -265,3 +265,7 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
 - `[perf] hitch:` lines report any single frame over 100 ms (Chris hears the sound cut out for half
   a second; audio is produced on the game thread, so a long stall empties the output).
 - Menu video lines appeared together with the switch to Vulkan; not visible in the container.
+- Chris's D3D12 run (0.1.8): menu video clean, race frames 17-32 ms, no hitches during the race
+  (only at loads). Vulkan default reverted: the video lines are Vulkan-only and D3D12 felt better.
+- Audio speed matching now hands SDL a new ratio only in 0.1% steps (each change restarts SDL's
+  resampler). `WC_AUDIO_NO_RATE=1` turns it off.
