@@ -4792,21 +4792,22 @@ index 809f22e..97758a7 100644
      # Non-Windows TLS (runtime/src/hle/net/network_ssl.cpp's mbed TLS path) needs a trusted root
      # CA bundle to verify server certificates against - Windows gets this for free from the OS via
 diff --git a/runtime/include/audio_backend.h b/runtime/include/audio_backend.h
-index 6ff3248..7aa4b56 100644
+index 6ff3248..764df1b 100644
 --- a/runtime/include/audio_backend.h
 +++ b/runtime/include/audio_backend.h
-@@ -48,4 +48,9 @@ private:
+@@ -48,4 +48,10 @@ private:
      bool m_silenced = false;
      bool m_reportedDroppedBlock = false;
      std::vector<int16_t> m_convertBuffer;
 +    std::vector<uint8_t> m_silence;
 +    bool m_hadAudio = false;
 +    double m_rate = 1.0;
++    bool m_fadeInNext = false;
 +    int m_drops = 0;
 +    int m_traceCalls = 0;
  };
 diff --git a/runtime/include/aurora_events.h b/runtime/include/aurora_events.h
-index 27e84ea..d10f927 100644
+index 27e84ea..4dc0031 100644
 --- a/runtime/include/aurora_events.h
 +++ b/runtime/include/aurora_events.h
 @@ -1,4 +1,7 @@
@@ -4817,7 +4818,7 @@ index 27e84ea..d10f927 100644
  
  #include "friend_code_keyboard.h"
  #include "settings_overlay.h"
-@@ -139,10 +142,21 @@ void GxWorkerBeginFrame();
+@@ -139,10 +142,25 @@ void GxWorkerBeginFrame();
  void GxWorkerEndFrame(AuroraImguiFrame* imgui);
  void SetAuroraFrameGxBegun(bool begun);
  
@@ -4825,9 +4826,13 @@ index 27e84ea..d10f927 100644
 +// GPU did: the game waits for its own GXSetDrawDone (a full sync, see et_hooks.cpp) before it
 +// draws again, which is what keeps it from overwriting data the worker still reads. Other games
 +// join the worker at every frame boundary. WC_GX_FRAME_SYNC=1 restores the join for Excite Truck.
++// Only while a race runs: in the menus the game decodes the background video into a texture
++// during its logic phase, which overlapped the worker still uploading the previous frame
++// (horizontal lines in the video). The menus hold 60 fps without pipelining anyway.
++bool EtRaceRunningForGx();
 +inline bool PipelineGxFrames() {
 +    static const bool pipeline = !::GuestRegion::IsMarioKart() && std::getenv("WC_GX_FRAME_SYNC") == nullptr;
-+    return pipeline;
++    return pipeline && EtRaceRunningForGx();
 +}
 +
  inline bool BeginAuroraFrame() {
@@ -4840,7 +4845,7 @@ index 27e84ea..d10f927 100644
          bool begun = false;
          {
              PerfStats::WaitScope wait;
-@@ -167,8 +181,13 @@ inline bool BeginAuroraFrame() {
+@@ -167,8 +185,13 @@ inline bool BeginAuroraFrame() {
  // overlaps guest memory the worker may still read.
  inline void EndAuroraFrame() {
      if (GxWorker::ShouldDefer()) {
@@ -5045,7 +5050,7 @@ index e339244..f4bd5bc 100644
      if (RegistryFrozen().load(std::memory_order_acquire)) {
          RT_LOG(RT_TAG_RUNTIME) << "ERROR: Attempted to register function after registry was finalized: 0x"
 diff --git a/runtime/src/audio_backend.cpp b/runtime/src/audio_backend.cpp
-index fcb4fde..bf0ab4a 100644
+index fcb4fde..0b29df2 100644
 --- a/runtime/src/audio_backend.cpp
 +++ b/runtime/src/audio_backend.cpp
 @@ -6,6 +6,8 @@
@@ -5068,7 +5073,7 @@ index fcb4fde..bf0ab4a 100644
  
      const uint64_t bytesPerSecond = static_cast<uint64_t>(m_spec.freq) *
                                      static_cast<uint64_t>(m_spec.channels) *
-@@ -127,12 +131,47 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+@@ -127,12 +131,48 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
          return true;
      }
      const uint32_t maxQueued = QueueLimitBytesLocked();
@@ -5094,6 +5099,7 @@ index fcb4fde..bf0ab4a 100644
 +        const uint32_t cushion = static_cast<uint32_t>(bytesPerSecond * 40 / 1000) & ~3u;
 +        m_silence.assign(cushion, 0);
 +        SDL_PutAudioStreamData(m_stream, m_silence.data(), static_cast<int>(cushion));
++        m_fadeInNext = true;
 +    }
 +    m_hadAudio = true;
 +    // The game makes audio by the CPU clock and the sound card plays it by its own clock, so the
@@ -5116,6 +5122,24 @@ index fcb4fde..bf0ab4a 100644
          if (!m_reportedDroppedBlock) {
              m_reportedDroppedBlock = true;
              RT_LOG(RT_TAG_AUDIO) << "output queue full (" << queued << "/" << maxQueued
+@@ -178,6 +218,17 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
+     if (!QueueHasCapacityLocked(lenBytes)) {
+         return true;
+     }
++    if (m_fadeInNext) {
++        // Restarting after the output ran dry: ramp the first block in so it starts without a
++        // click (a run of these during loading sounded like static).
++        m_fadeInNext = false;
++        const size_t rampFrames = std::min<size_t>(frameCount, 256);
++        for (size_t f = 0; f < rampFrames; ++f) {
++            const float g = static_cast<float>(f) / static_cast<float>(rampFrames);
++            m_convertBuffer[f * 2] = static_cast<int16_t>(m_convertBuffer[f * 2] * g);
++            m_convertBuffer[f * 2 + 1] = static_cast<int16_t>(m_convertBuffer[f * 2 + 1] * g);
++        }
++    }
+     if (!SDL_PutAudioStreamData(m_stream, m_convertBuffer.data(), lenBytes)) {
+         RT_LOG(RT_TAG_AUDIO) << "SDL_PutAudioStreamData failed: " << SDL_GetError() << std::endl;
+         return false;
 diff --git a/runtime/src/dynamic_aspect.cpp b/runtime/src/dynamic_aspect.cpp
 index 2646e0f..53f892e 100644
 --- a/runtime/src/dynamic_aspect.cpp
@@ -5356,10 +5380,10 @@ index 0000000..ace6b47
 +PPC_NATIVE_OVERRIDE_VOID(8F161D50, ET_MandatoryTutorialChallenges_80161d50, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
-index 0000000..036bd14
+index 0000000..5934d36
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_input.cpp
-@@ -0,0 +1,448 @@
+@@ -0,0 +1,451 @@
 +// Excite Truck (REXE01): a virtual Wii Remote driven by an Xbox-style gamepad or the keyboard.
 +//
 +// Excite Truck only takes a sideways Wii Remote. Rather than emulate the remote's Bluetooth
@@ -5507,7 +5531,7 @@ index 0000000..036bd14
 +
 +// The time step is not cleared when a race ends, so after returning to the menus it would still
 +// read as racing (Chris: the stick stopped moving the menu cursor after a race). A race also has
-+// to have its clock moving: frozen for half a second means we are not in a running race.
++// to have its clock moving: frozen for 1.5 s means we are not in a running race.
 +bool RaceRunning()
 +{
 +    if (!(ReadF32(kRaceTimeStep) > 0.0f)) {
@@ -5521,7 +5545,7 @@ index 0000000..036bd14
 +        lastClock = clock;
 +        lastChange = now;
 +    }
-+    return now - lastChange < std::chrono::milliseconds(500);
++    return now - lastChange < std::chrono::milliseconds(1500);
 +}
 +
 +// The left stick acts as a D-pad in menus, with some hysteresis so a held stick doesn't flicker.
@@ -5616,7 +5640,7 @@ index 0000000..036bd14
 +    // The crash recovery counts presses of 2. Every A tap (counted from SDL events, so a tap
 +    // shorter than a frame still counts) becomes one game frame with 2 released, then one game
 +    // frame with 2 pressed, whether or not R/RT is holding 2 for gas.
-+    if (racing) {
++    {
 +        enum class Phase { Idle, Release, Press };
 +        static Phase phase = Phase::Idle;
 +        static int phaseFrame = 0;
@@ -5641,8 +5665,6 @@ index 0000000..036bd14
 +                in.hold |= kWpad2;
 +            }
 +        }
-+    } else {
-+        g_pendingTaps.store(0, std::memory_order_relaxed);
 +    }
 +    return in;
 +}
@@ -5682,6 +5704,11 @@ index 0000000..036bd14
 +}
 +
 +} // namespace
++
++bool EtRaceRunningForGx()
++{
++    return RaceRunning();
++}
 +
 +// s32 WPADProbe(s32 chan, u32* type)
 +extern "C" void ET_WPADProbe_800602dc(CpuContext* ctx)
@@ -7995,7 +8022,7 @@ index cd236a9..b452810 100644
  }
  PPC_NATIVE_OVERRIDE_VOID(801BA9A4, VIFlush_HLE_801ba9a4, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index 6d0dd6b..d17d9a3 100644
+index 6d0dd6b..dcc6b2a 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -68,6 +68,8 @@
@@ -8057,10 +8084,17 @@ index 6d0dd6b..d17d9a3 100644
          const bool configWidescreen = RuntimeConfigFile::WidescreenEnabled(true);
          const bool forceAspect169 = RuntimeConfigFile::ForceAspect169Enabled();
          auroraConfig.windowWidth = (configWidescreen || forceAspect169) ? 854 : 640;
-@@ -1453,6 +1475,11 @@ int RuntimeMain(int argc, char** argv) {
+@@ -1453,6 +1475,18 @@ int RuntimeMain(int argc, char** argv) {
                  break;
              }
          }
++#if defined(_WIN32)
++        // Excite Truck on Windows: Vulkan cost less CPU time per frame than D3D12 on Chris's
++        // AMD card (FX-8350 + RX 570). "auto" picks it; aurora falls back if Vulkan is missing.
++        if (backend == "auto" && GuestRegion::Current() == GuestRegion::Id::ExciteTruck) {
++            auroraConfig.desiredBackend = BACKEND_VULKAN;
++        }
++#endif
 +        // Profiling aid: WC_NULL_GPU=1 renders nothing (Dawn's null backend), so CPU-side frame
 +        // costs can be measured on machines without a GPU.
 +        if (std::getenv("WC_NULL_GPU")) {
@@ -8069,7 +8103,7 @@ index 6d0dd6b..d17d9a3 100644
          const AuroraBackend requestedBackend = auroraConfig.desiredBackend;
  
          // SDL reads its device hints when the joystick subsystem starts, which
-@@ -1566,6 +1593,38 @@ int RuntimeMain(int argc, char** argv) {
+@@ -1566,6 +1600,38 @@ int RuntimeMain(int argc, char** argv) {
      }
  }
  

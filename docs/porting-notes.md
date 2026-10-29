@@ -239,3 +239,16 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
   (6 ms logic, 14 ms render recording). Not draining at CopyDisp would overlap more, but aurora
   reads vertex arrays from guest memory when it processes a draw (`push_storage` on
   `array.data`), so the game could overwrite them first; that needs array snapshots first.
+
+## Vulkan default, menu video, taps everywhere (step 2, fifth run)
+
+- Chris's Vulkan log: race frames 19-31 ms vs 23-36 ms on D3D12, so "auto" now means Vulkan for
+  Excite Truck on Windows (aurora falls back if Vulkan is missing).
+- Frame pipelining is now on only while a race runs. In the menus the game decodes the background
+  video into a texture during its logic phase, which overlapped the worker's upload of the previous
+  frame and showed lines in the video.
+- A-tap release/press pulses now run in every state; the crash sequence can freeze the race clock,
+  which made `RaceRunning()` false and skipped them. The clock freeze window is now 1.5 s.
+- After the audio output runs dry, the next block fades in over 256 samples.
+- The game peeks the EFB through 0xC8xxxxxx at frame end (func_802CECF4, likely sun/lens-flare
+  visibility); those reads get zero-filled memory.
