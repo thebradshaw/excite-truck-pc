@@ -30,6 +30,9 @@ In menus and the pause menu: A selects, B goes back, and the left stick or D-pad
 
 New profiles skip the tutorial that the game normally forces; it is still in the main menu.
 
+The game opens borderless full screen at your monitor's resolution (1080p on a 1080p screen).
+Alt+Enter switches to a window; F10 has the display and resolution settings.
+
 ## Your own music
 
 Drop MP3s into `ExciteTruck/UserData/Music` (the build scripts create it). Subfolders are fine, up to 100 songs. In the game, set Options > Race Music to

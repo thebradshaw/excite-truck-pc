@@ -4791,6 +4791,85 @@ index 809f22e..97758a7 100644
  
      # Non-Windows TLS (runtime/src/hle/net/network_ssl.cpp's mbed TLS path) needs a trusted root
      # CA bundle to verify server certificates against - Windows gets this for free from the OS via
+diff --git a/runtime/include/aurora_events.h b/runtime/include/aurora_events.h
+index 27e84ea..d10f927 100644
+--- a/runtime/include/aurora_events.h
++++ b/runtime/include/aurora_events.h
+@@ -1,4 +1,7 @@
+ #pragma once
++#include "et_perf.h"
++#include "guest_abi/guest_region.h"
++#include <cstdlib>
+ 
+ #include "friend_code_keyboard.h"
+ #include "settings_overlay.h"
+@@ -139,10 +142,21 @@ void GxWorkerBeginFrame();
+ void GxWorkerEndFrame(AuroraImguiFrame* imgui);
+ void SetAuroraFrameGxBegun(bool begun);
+ 
++// Excite Truck lets the GX worker finish a frame while the game starts the next one, as the Wii's
++// GPU did: the game waits for its own GXSetDrawDone (a full sync, see et_hooks.cpp) before it
++// draws again, which is what keeps it from overwriting data the worker still reads. Other games
++// join the worker at every frame boundary. WC_GX_FRAME_SYNC=1 restores the join for Excite Truck.
++inline bool PipelineGxFrames() {
++    static const bool pipeline = !::GuestRegion::IsMarioKart() && std::getenv("WC_GX_FRAME_SYNC") == nullptr;
++    return pipeline;
++}
++
+ inline bool BeginAuroraFrame() {
+     if (GxWorker::ShouldDefer()) {
+         // The window half can touch the surface and render targets the worker draws into.
+-        GxWorker::Sync();
++        if (!PipelineGxFrames()) {
++            GxWorker::Sync();
++        }
+         bool begun = false;
+         {
+             PerfStats::WaitScope wait;
+@@ -167,8 +181,13 @@ inline bool BeginAuroraFrame() {
+ // overlaps guest memory the worker may still read.
+ inline void EndAuroraFrame() {
+     if (GxWorker::ShouldDefer()) {
+-        AuroraImguiFrame* imgui = aurora_end_frame_window();
++        AuroraImguiFrame* imgui = nullptr;
++        { EtPerf::Scope perfScope(EtPerf::kEndWindow); imgui = aurora_end_frame_window(); }
+         GxWorker::Submit([imgui] { GxWorkerEndFrame(imgui); });
++        if (PipelineGxFrames()) {
++            return;
++        }
++        EtPerf::Scope perfScope(EtPerf::kEndSync);
+         GxWorker::Sync();
+         return;
+     }
+diff --git a/runtime/include/et_perf.h b/runtime/include/et_perf.h
+new file mode 100644
+index 0000000..501dcc7
+--- /dev/null
++++ b/runtime/include/et_perf.h
+@@ -0,0 +1,23 @@
++#pragma once
++// WC_ET_PERF timing buckets: nanoseconds spent in named frame phases, printed every 120 frames.
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++
++namespace EtPerf {
++enum Bucket { kDrawDone, kEndFrame, kPace, kBeginFrame, kWorkerEndFrame, kWorkerCopyDisp, kEndWindow, kEndSync, kGap, kWorkerBusy, kCount };
++inline std::atomic<uint64_t> g_ns[kCount];
++inline const char* const kNames[kCount] = {"drawdone", "endframe", "pace", "beginframe", "w:endframe", "w:copydisp", "endwindow", "endsync", "drawdone->copydisp", "w:busy"};
++inline std::chrono::steady_clock::time_point g_drawDoneAt{};
++
++struct Scope {
++    Bucket bucket;
++    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
++    explicit Scope(Bucket b) : bucket(b) {}
++    ~Scope() {
++        g_ns[bucket].fetch_add(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                                   std::chrono::steady_clock::now() - start).count()),
++                               std::memory_order_relaxed);
++    }
++};
++} // namespace EtPerf
 diff --git a/runtime/include/guest_abi/guest_region.h b/runtime/include/guest_abi/guest_region.h
 index 1836717..f4daa52 100644
 --- a/runtime/include/guest_abi/guest_region.h
@@ -4888,27 +4967,30 @@ index 25179e2..9cb114a 100644
  namespace detail {
  inline constexpr size_t kAlign = 16;
 diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
-index 3648d0e..a143b6d 100644
+index 3648d0e..db69abd 100644
 --- a/runtime/include/runtime_config.h
 +++ b/runtime/include/runtime_config.h
-@@ -69,6 +69,8 @@ struct RuntimeUserConfig {
+@@ -69,6 +69,10 @@ struct RuntimeUserConfig {
      std::optional<int32_t> wiiIrSensitivity;
      std::optional<int32_t> wiiSpeakerVolume;
      std::optional<bool> wiiRumble;
 +    // Excite Truck: stick up tips the truck's nose down in the air (flight style). Default on.
 +    std::optional<bool> invertAirControl;
++    // Excite Truck: which one-time default changes have been applied to this config (see main.cpp).
++    std::optional<int64_t> etDefaultsVersion;
      std::optional<bool> networkEnabled;
      std::optional<bool> discordPresenceEnabled;
      // The application ID of the WiiCompiled Discord application. This is only
-@@ -473,6 +475,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
+@@ -473,6 +477,8 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
          config.wiiSpeakerVolume = *value;
      }
      config.wiiRumble = FindConfigValue<bool>(document, "controller", "wii_rumble");
 +    config.invertAirControl = FindConfigValue<bool>(document, "controller", "invert_air_control");
++    config.etDefaultsVersion = FindConfigValue<int64_t>(document, "excite_truck", "defaults_version");
      config.networkEnabled = FindConfigValue<bool>(document, "network", "enabled");
      config.discordPresenceEnabled = FindConfigValue<bool>(document, "discord", "enabled");
      config.discordClientId = FindConfigValue<std::string>(document, "discord", "client_id");
-@@ -890,6 +893,15 @@ inline bool SetWiiRumbleEnabled(bool value) {
+@@ -890,6 +896,24 @@ inline bool SetWiiRumbleEnabled(bool value) {
      return WriteSetting("controller", "wii_rumble", value ? "true" : "false");
  }
  
@@ -4919,6 +5001,15 @@ index 3648d0e..a143b6d 100644
 +inline bool SetInvertAirControl(bool value) {
 +    Mutable().invertAirControl = value;
 +    return WriteSetting("controller", "invert_air_control", value ? "true" : "false");
++}
++
++inline int64_t EtDefaultsVersion() {
++    return Get().etDefaultsVersion.value_or(0);
++}
++
++inline bool SetEtDefaultsVersion(int64_t value) {
++    Mutable().etDefaultsVersion = value;
++    return WriteSetting("excite_truck", "defaults_version", std::to_string(value));
 +}
 +
  // Target frame rate for frame interpolation, or 0 to disable it.
@@ -4960,10 +5051,10 @@ index 2646e0f..53f892e 100644
          g_widescreenConfigured ? EggRecordWidth(kEggRecordWidth43, surfaceWidth, surfaceHeight)
 diff --git a/runtime/src/hle/excite_truck/et_hooks.cpp b/runtime/src/hle/excite_truck/et_hooks.cpp
 new file mode 100644
-index 0000000..03d1973
+index 0000000..ace6b47
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_hooks.cpp
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,213 @@
 +// Excite Truck (REXE01) specific hooks.
 +//
 +// Addresses here use the 0x8F000000 alias: guest_versions.inc maps 0x8F000000 + (ET address
@@ -4981,6 +5072,7 @@ index 0000000..03d1973
 +#include <vector>
 +
 +#include "abi_bridge.h"
++#include "et_perf.h"
 +#include "hle_stubs.h"
 +#include "ppc_runtime.h"
 +#include "runtime_config.h"
@@ -5109,7 +5201,11 @@ index 0000000..03d1973
 +
 +extern "C" void ET_GXSetDrawDone_80040c1c(CpuContext* ctx)
 +{
-+    GX__DrawDone_8016eab0();
++    {
++        EtPerf::Scope perfScope(EtPerf::kDrawDone);
++        GX__DrawDone_8016eab0();
++    }
++    EtPerf::g_drawDoneAt = std::chrono::steady_clock::now();
 +    Memory::Write8(kGxDrawDoneFlag, 1);
 +    const uint32_t callback = Memory::Read32(kGxDrawDoneCallback);
 +    if (callback != 0) {
@@ -6175,15 +6271,16 @@ index 0000000..e61f894
 +                         bool* pending);
 +int32_t SdCard_HLE_Ioctlv(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut, uint32_t vectorPtr);
 diff --git a/runtime/src/hle/gx/gx_copy.cpp b/runtime/src/hle/gx/gx_copy.cpp
-index 3dbdc8d..d9bab70 100644
+index 3dbdc8d..d458652 100644
 --- a/runtime/src/hle/gx/gx_copy.cpp
 +++ b/runtime/src/hle/gx/gx_copy.cpp
-@@ -1,3 +1,4 @@
+@@ -1,3 +1,5 @@
++#include "et_perf.h"
 +#include <chrono>
  // gx_copy.cpp - Framebuffer Copy Operations
  #include "gx_internal.h"
  
-@@ -6,6 +7,8 @@
+@@ -6,6 +8,8 @@
  #include <dolphin/gx/GXAurora.h>
  
  #include <algorithm>
@@ -6192,16 +6289,26 @@ index 3dbdc8d..d9bab70 100644
  #include <map>
  #include <mutex>
  #include <vector>
-@@ -122,6 +125,8 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g),
+@@ -122,11 +126,18 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g),
  // Copy Execution
  // ============================================================================
  
 +bool g_gxTraceFrame = false;
 +
  extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
++    if (EtPerf::g_drawDoneAt != std::chrono::steady_clock::time_point{}) {
++        EtPerf::g_ns[EtPerf::kGap] += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - EtPerf::g_drawDoneAt).count());
++        EtPerf::g_drawDoneAt = {};
++    }
      EnsureAuroraFrameActive();
      if (GxWorker::ShouldDefer()) {
-@@ -141,6 +146,26 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+         // The worker drains like the inline path; EndAuroraFrame joins it before the next frame.
+         GxWorker::Submit([da, c] {
++            EtPerf::Scope perfScope(EtPerf::kWorkerCopyDisp);
+             GXDrawDone();
+             GXCopyDisp(GuestToHostPtr(da), (GXBool)c);
+         });
+@@ -141,6 +152,29 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
          aurora_wait_for_frame_worker();
      }
      ++g_gxFrameCount;
@@ -6216,6 +6323,9 @@ index 3dbdc8d..d9bab70 100644
 +                const double ms = std::chrono::duration<double, std::milli>(now - last).count() / 120.0;
 +                std::fprintf(stderr, "[perf] frame %.2f ms, GX sync wait %.2f ms in %.1f syncs per frame\n", ms,
 +                             double(GW::g_perfSyncNs) / 1e6 / 120.0, double(GW::g_perfSyncCount) / 120.0);
++                std::fprintf(stderr, "[perf]  ms/frame:");
++                for (int b = 0; b < EtPerf::kCount; ++b) std::fprintf(stderr, " %s %.2f", EtPerf::kNames[b], double(EtPerf::g_ns[b].exchange(0)) / 1e6 / 120.0);
++                std::fprintf(stderr, "\n");
 +                GW::g_perfSyncNs = 0; GW::g_perfSyncCount = 0; last = now;
 +            }
 +        }
@@ -6228,7 +6338,7 @@ index 3dbdc8d..d9bab70 100644
      VI_HLE_SetXfbReady(da);
      settings_overlay::Draw();
      // Seal, pace to the VI retrace boundary (Aurora renders the sealed frame
-@@ -151,29 +176,48 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+@@ -151,29 +185,55 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
  PPC_NATIVE_OVERRIDE_VOID(8016fc38, GX__CopyDisp_8016fc38, (uint32_t da, uint32_t c), (da, c));
  
  
@@ -6236,17 +6346,26 @@ index 3dbdc8d..d9bab70 100644
 -    // Begin the frame before going inline so a deferred begin reaches the worker first.
 -    EnsureAuroraFrameActive();
 -    GX_SYNC_INLINE();
-+namespace {
-+// Runs one texture copy against a snapshot of the copy source/destination state. On the GX
-+// worker it executes in FIFO order with the draws before it, so it needs no sync.
-+void RunCopyTex(uint32_t da, uint32_t c, const TexCopyState& state) {
-     // Match GX FIFO ordering: texture copies observe all prior draws.
-     GXDrawDone();
+-    // Match GX FIFO ordering: texture copies observe all prior draws.
+-    GXDrawDone();
 -    const uint16_t rawSrcLeft = g_texCopyState.srcLeft;
 -    const uint16_t rawSrcTop = g_texCopyState.srcTop;
 -    const uint16_t rawSrcWidth = g_texCopyState.srcWidth;
 -    const uint16_t rawSrcHeight = g_texCopyState.srcHeight;
 -
++namespace {
++// Runs one texture copy against a snapshot of the copy source/destination state. On the GX
++// worker it executes in FIFO order with the draws before it, so it needs no sync.
++void RunCopyTex(uint32_t da, uint32_t c, const TexCopyState& state) {
++    // Texture copies observe all prior draws. Aurora encodes the copy into the same FIFO, so order
++    // alone guarantees that; draining here only stalled the worker on the FIFO processor.
++    // WC_COPYTEX_DRAIN=1 restores the old full drain.
++    static const bool drain = std::getenv("WC_COPYTEX_DRAIN") != nullptr;
++    if (drain) {
++        GXDrawDone();
++    } else {
++        GXFlush();
++    }
      // Keep the source in guest EFB coordinates. Aurora maps it to the scaled
      // EFB exactly once, matching Dolphin's ConvertEFBRectangle path.
 -    GXSetTexCopySrc(rawSrcLeft, rawSrcTop, rawSrcWidth, rawSrcHeight);
@@ -6467,6 +6586,23 @@ index 108e4fd..a587ab2 100644
              GXApplyBPReg(static_cast<uint8_t>(bpWord >> 24), bpWord & 0x00FFFFFFu);
              offset += 5u;
              continue;
+diff --git a/runtime/src/hle/gx/gx_frame.cpp b/runtime/src/hle/gx/gx_frame.cpp
+index 78fd1cc..bb7d873 100644
+--- a/runtime/src/hle/gx/gx_frame.cpp
++++ b/runtime/src/hle/gx/gx_frame.cpp
+@@ -1,3 +1,4 @@
++#include "et_perf.h"
+ #include "gx_internal.h"
+ #include "runtime_log.h"
+ 
+@@ -131,6 +132,7 @@ void GxWorkerBeginFrame() {
+ }
+ 
+ void GxWorkerEndFrame(AuroraImguiFrame* imgui) {
++    EtPerf::Scope perfScope(EtPerf::kWorkerEndFrame);
+     if (g_frameGxBegun) {
+         aurora_end_frame_gx(imgui);
+     } else {
 diff --git a/runtime/src/hle/gx/gx_init.cpp b/runtime/src/hle/gx/gx_init.cpp
 index edf6f9c..e890b8b 100644
 --- a/runtime/src/hle/gx/gx_init.cpp
@@ -6956,10 +7092,23 @@ index 3a8c43b..c14fe0c 100644
          WriteDisplayListData((u8)(t|vf), 1);
          WriteDisplayListData((u16)nv, 2);
 diff --git a/runtime/src/hle/gx/gx_worker.cpp b/runtime/src/hle/gx/gx_worker.cpp
-index ac8983e..685e72b 100644
+index ac8983e..06d8952 100644
 --- a/runtime/src/hle/gx/gx_worker.cpp
 +++ b/runtime/src/hle/gx/gx_worker.cpp
-@@ -314,10 +314,21 @@ void FifoBurst(const uint8_t* data, uint32_t sizeBytes) {
+@@ -1,3 +1,4 @@
++#include "et_perf.h"
+ #include "gx_worker.h"
+ 
+ #include "perf_stats.h"
+@@ -217,6 +218,7 @@ void WorkerMain() {
+             }
+             continue;
+         }
++        EtPerf::Scope busyScope(EtPerf::kWorkerBusy);
+         while (tail != head) {
+             if (g_abandon.load(std::memory_order_acquire)) {
+                 return;
+@@ -314,10 +316,21 @@ void FifoBurst(const uint8_t* data, uint32_t sizeBytes) {
      }
  }
  
@@ -7535,15 +7684,16 @@ index d91dd89..3e51721 100644
                  if (numIn != 0 || numOut != 1) {
                      return ISFS_EINVAL;
 diff --git a/runtime/src/hle/vi.cpp b/runtime/src/hle/vi.cpp
-index cd236a9..ebebac4 100644
+index cd236a9..b452810 100644
 --- a/runtime/src/hle/vi.cpp
 +++ b/runtime/src/hle/vi.cpp
-@@ -1,3 +1,4 @@
+@@ -1,3 +1,5 @@
++#include "et_perf.h"
 +#include <cstdlib>
  #include "hle_stubs.h"
  #include "memory.h"
  #include "abi_bridge.h"
-@@ -9,6 +10,7 @@
+@@ -9,6 +11,7 @@
  #include "platform/host_platform.h"
  #include "runtime_log.h"
  #include "perf_stats.h"
@@ -7551,7 +7701,7 @@ index cd236a9..ebebac4 100644
  
  #include <dolphin/vi.h>
  
-@@ -34,6 +36,7 @@
+@@ -34,6 +37,7 @@
  // Forward declaration for OSWakeupThread - used to wake threads on VI retrace queue
  extern "C" void OSWakeupThread_HLE_801aaaa4(CpuContext* ctx);
  
@@ -7559,7 +7709,7 @@ index cd236a9..ebebac4 100644
  // Forward declaration for OSSleepThread - used by VIWaitForRetrace HLE
  extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* cpu);
  extern "C" int g_gxFrameCount;
-@@ -220,21 +223,37 @@ void ViSetR3(CpuContext* ctx, uint32_t value)
+@@ -220,21 +224,37 @@ void ViSetR3(CpuContext* ctx, uint32_t value)
      }
  }
  
@@ -7609,7 +7759,7 @@ index cd236a9..ebebac4 100644
      } catch (const ::Memory::AccessViolation& e) {
          LogMemoryError(RT_TAG_VI, "WriteGuestStateLocked", e);
      }
-@@ -268,9 +287,28 @@ static std::atomic<bool> s_presentSequenceActive{false};
+@@ -268,9 +288,28 @@ static std::atomic<bool> s_presentSequenceActive{false};
  void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool serviceAurora) {
      // Prevent re-entry - this can happen if OSWakeupThread triggers SelectThread
      // which goes idle and calls ProcessTimerEvents again
@@ -7638,7 +7788,7 @@ index cd236a9..ebebac4 100644
      
      uint32_t preCb = 0;
      uint32_t postCb = 0;
-@@ -343,7 +381,8 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
+@@ -343,7 +382,8 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
          if (postCb) {
              // Guard: only invoke callback if sSystem is initialized
              // The callback dereferences sSystem which must be non-null
@@ -7648,7 +7798,7 @@ index cd236a9..ebebac4 100644
              if (sSystemPtr != 0) {
                  InvokeIndirectCpu(postCb, ctx);
              }
-@@ -375,8 +414,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
+@@ -375,8 +415,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
          }
      }
  
@@ -7658,7 +7808,26 @@ index cd236a9..ebebac4 100644
  }
  
  bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
-@@ -796,6 +834,10 @@ extern "C" void VIFlush_HLE_801ba9a4(CpuContext* ctx)
+@@ -579,8 +618,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+         aurora_set_present_schedule(0, 0);
+     }
+ 
+-    EndAuroraFrame();
++    { EtPerf::Scope perfScope(EtPerf::kEndFrame); EndAuroraFrame(); }
+     if (paceThisFrame) {
++        EtPerf::Scope perfScope(EtPerf::kPace);
+         PaceToRetraceBoundary(paceDeadline);
+         std::lock_guard<std::mutex> lock(g_viMutex);
+         s_lastPacedRetraceCount = g_vi.retraceCount;
+@@ -596,6 +636,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+     }
+     // Pre-warm the next frame so subsequent GX work has a valid frame context.
+     {
++        EtPerf::Scope perfScope(EtPerf::kBeginFrame);
+         UpdateAuroraAndProcessEvents();
+         if (BeginAuroraFrame()) {
+             g_auroraFrameActive.store(true, std::memory_order_release);
+@@ -796,6 +837,10 @@ extern "C" void VIFlush_HLE_801ba9a4(CpuContext* ctx)
      // GXCopyDisp (which sets hasValidXfb = true), as that's when the EFB->XFB
      // copy is complete and we have a valid frame to present.
  
@@ -7670,10 +7839,19 @@ index cd236a9..ebebac4 100644
  }
  PPC_NATIVE_OVERRIDE_VOID(801BA9A4, VIFlush_HLE_801ba9a4, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index 6d0dd6b..fdd4faa 100644
+index 6d0dd6b..d17d9a3 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
-@@ -863,10 +863,14 @@ void RuntimeAuroraLogCallback(AuroraLogLevel level, const char* module,
+@@ -68,6 +68,8 @@
+ #include "aurora_events.h"
+ #include "wiimote_host.h"
+ #include "discord_presence.h"
++#include <iterator>
++static bool LoadExciteTruckWindowIcon(std::vector<uint8_t>& rgba);
+ #include "fiber_manager.h"
+ #include "gx_worker.h"
+ #include "hle_stubs.h"
+@@ -863,10 +865,14 @@ void RuntimeAuroraLogCallback(AuroraLogLevel level, const char* module,
  }
  
  const TranslatedFunctionInfo* ResolveEntry() {
@@ -7690,6 +7868,90 @@ index 6d0dd6b..fdd4faa 100644
          throw std::runtime_error(oss.str());
      }
      return entry;
+@@ -1366,7 +1372,8 @@ int RuntimeMain(int argc, char** argv) {
+         }
+         RuntimeConfigFile::LogLoadedConfig();
+         if (!g_headless && RuntimeConfigFile::DiscordPresenceEnabled()) {
+-            DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(), "Mario Kart Wii");
++            DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(),
++                                        GuestRegion::IsMarioKart() ? "Mario Kart Wii" : "Excite Truck");
+         }
+         SystemBridge::Initialize();
+         TranslatedFunctionRegistry::Finalize();
+@@ -1390,7 +1397,22 @@ int RuntimeMain(int argc, char** argv) {
+         auroraConfig.userPath = auroraUserPath.c_str();
+         auroraConfig.cachePath = auroraCachePath.c_str();
+         auroraConfig.logCallback = &RuntimeAuroraLogCallback;
++        static std::vector<uint8_t> etIcon;
++        if (GuestRegion::Current() == GuestRegion::Id::ExciteTruck && LoadExciteTruckWindowIcon(etIcon)) {
++            auroraConfig.iconRGBA8 = etIcon.data();
++            auroraConfig.iconWidth = 48;
++            auroraConfig.iconHeight = 48;
++        }
+         auroraConfig.logLevel = LOG_DEBUG;
++        // Excite Truck defaults, applied once per config so a later change in F10 sticks:
++        // borderless full screen with the render resolution following the window (1080p on a
++        // 1080p monitor) instead of a small window at the Wii's 480p.
++        if (GuestRegion::Current() == GuestRegion::Id::ExciteTruck &&
++            RuntimeConfigFile::EtDefaultsVersion() < 1) {
++            RuntimeConfigFile::SetDisplayMode("borderless");
++            RuntimeConfigFile::SetResolutionMultiplier(0.0f);
++            RuntimeConfigFile::SetEtDefaultsVersion(1);
++        }
+         const bool configWidescreen = RuntimeConfigFile::WidescreenEnabled(true);
+         const bool forceAspect169 = RuntimeConfigFile::ForceAspect169Enabled();
+         auroraConfig.windowWidth = (configWidescreen || forceAspect169) ? 854 : 640;
+@@ -1453,6 +1475,11 @@ int RuntimeMain(int argc, char** argv) {
+                 break;
+             }
+         }
++        // Profiling aid: WC_NULL_GPU=1 renders nothing (Dawn's null backend), so CPU-side frame
++        // costs can be measured on machines without a GPU.
++        if (std::getenv("WC_NULL_GPU")) {
++            auroraConfig.desiredBackend = BACKEND_NULL;
++        }
+         const AuroraBackend requestedBackend = auroraConfig.desiredBackend;
+ 
+         // SDL reads its device hints when the joystick subsystem starts, which
+@@ -1566,6 +1593,38 @@ int RuntimeMain(int argc, char** argv) {
+     }
+ }
+ 
++
++// Excite Truck: the window/taskbar icon is the game's own 48x48 save icon, read from the player's
++// disc (files/mcbanner.res, a WIBN banner with the RGB5A3 icon 0x60A0 bytes in, in 4x4 tiles).
++static bool LoadExciteTruckWindowIcon(std::vector<uint8_t>& rgba) {
++    std::ifstream in(RuntimeConfigFile::ResolvedDvdRoot() / "files" / "mcbanner.res", std::ios::binary);
++    if (!in) return false;
++    const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
++    size_t wibn = std::string::npos;
++    for (size_t i = 0; i + 4 <= bytes.size(); i += 4) {
++        if (bytes[i] == 'W' && bytes[i + 1] == 'I' && bytes[i + 2] == 'B' && bytes[i + 3] == 'N') { wibn = i; break; }
++    }
++    if (wibn == std::string::npos || wibn + 0x60A0 + 48 * 48 * 2 > bytes.size()) return false;
++    const uint8_t* src = bytes.data() + wibn + 0x60A0;
++    rgba.assign(48 * 48 * 4, 0);
++    size_t k = 0;
++    for (int ty = 0; ty < 48; ty += 4)
++        for (int tx = 0; tx < 48; tx += 4)
++            for (int y = 0; y < 4; ++y)
++                for (int x = 0; x < 4; ++x, k += 2) {
++                    const uint32_t v = (uint32_t(src[k]) << 8) | src[k + 1];
++                    uint32_t r, g, b, a;
++                    if (v & 0x8000) {
++                        a = 255; r = ((v >> 10) & 31) * 255 / 31; g = ((v >> 5) & 31) * 255 / 31; b = (v & 31) * 255 / 31;
++                    } else {
++                        a = ((v >> 12) & 7) * 255 / 7; r = ((v >> 8) & 15) * 17; g = ((v >> 4) & 15) * 17; b = (v & 15) * 17;
++                    }
++                    uint8_t* px = &rgba[((ty + y) * 48 + tx + x) * 4];
++                    px[0] = uint8_t(r); px[1] = uint8_t(g); px[2] = uint8_t(b); px[3] = uint8_t(a);
++                }
++    return true;
++}
++
+ int main(int argc, char** argv) {
+     return RuntimeMain(argc, argv);
+ }
 diff --git a/runtime/src/music_attenuation.cpp b/runtime/src/music_attenuation.cpp
 index ad031c1..338cf09 100644
 --- a/runtime/src/music_attenuation.cpp
@@ -7705,7 +7967,7 @@ index ad031c1..338cf09 100644
      const uint32_t soundPlayerArray = ResolveSoundPlayerArray();
      if (soundPlayerArray == 0) {
 diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
-index ed1a1b8..fb3d523 100644
+index ed1a1b8..1103931 100644
 --- a/runtime/src/settings_overlay.cpp
 +++ b/runtime/src/settings_overlay.cpp
 @@ -1,4 +1,5 @@
@@ -7730,7 +7992,24 @@ index ed1a1b8..fb3d523 100644
      for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
          DrawPlayerRow(port);
      }
-@@ -1656,5 +1666,13 @@ void NotifyStrapInputAccepted() noexcept {
+@@ -1541,9 +1551,16 @@ void InitializeRuntimeSettings() noexcept {
+ #if defined(__APPLE__)
+     aurora_set_metalfx_spatial(g_metalFxSpatialUpscaling);
+ #endif
++    g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
+     const uint32_t targetFps = kFrameInterpolationTargetFps[static_cast<size_t>(g_frameInterpolationMode)];
+     LimitResolutionForFrameRate();
+     aurora_set_frame_interpolation_fps(targetFps);
++    {   // Re-read: main() may have changed the configured mode after the static initializer ran.
++        const std::string mode = RuntimeConfigFile::DisplayMode("windowed");
++        g_displayMode = mode == "borderless" ? static_cast<int>(AURORA_DISPLAY_MODE_BORDERLESS)
++                        : mode == "exclusive" ? static_cast<int>(AURORA_DISPLAY_MODE_EXCLUSIVE)
++                                              : static_cast<int>(AURORA_DISPLAY_MODE_WINDOWED);
++    }
+     aurora_set_display_mode(static_cast<AuroraDisplayMode>(g_displayMode));
+     g_displayMode = static_cast<int>(aurora_get_display_mode());
+     aurora_set_disable_copy_filter(g_disableCopyFilter);
+@@ -1656,5 +1673,13 @@ void NotifyStrapInputAccepted() noexcept {
      }
  }
  

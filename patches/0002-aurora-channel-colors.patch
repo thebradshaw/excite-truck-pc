@@ -44,3 +44,16 @@ index 4a88255..6b465d3 100644
    __gx->bpSent = 0;
  }
  
+diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
+index afe6328..67b1f0f 100644
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -26,7 +26,7 @@ uint32_t sDlWritePos = 0;
+ namespace {
+ constexpr Module Log{"aurora::gx::fifo"};
+ constexpr auto kProcessingMode = ProcessingMode::Thread;
+-constexpr uint32_t kDrawBatchSize = 1;
++constexpr uint32_t kDrawBatchSize = 64;
+ 
+ bool sFrameActive = false;
+ uint32_t sPendingDraws = 0;

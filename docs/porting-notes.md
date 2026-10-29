@@ -186,3 +186,29 @@ blend modes, vertex layouts), no game graphics.
   the old path. `WC_ET_PERF=1` prints frame time and the time spent waiting on the worker.
 - **Icon.** build-windows.ps1 decodes the 48x48 RGB5A3 save icon (WIBN banner in files/mcbanner.res,
   icon at +0x60A0) into `runtime/resources/WiiCompiled.ico` before compiling, and the shortcut uses it.
+
+## Frame rate, icon and 1080p (step 2, Chris's second Windows run)
+
+Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost only) and
+`WC_ET_PERF=1` at the start of Canada: 43 ms per frame before, 25-31 ms after.
+
+- **Draw batching.** Aurora's FIFO processor used to be woken after every draw
+  (`kDrawBatchSize = 1` in `lib/gx/fifo.cpp`); it is now woken every 64 draws (patch 0002).
+- **Pipelined frames.** `BeginAuroraFrame`/`EndAuroraFrame` no longer wait for the GX worker
+  (`PipelineGxFrames()` in `aurora_events.h`), so the game thread runs the next frame's logic while
+  the worker is still submitting the last one. This is safe for Excite Truck because the game waits
+  for its own draw-done (0x802CFDE0) before it touches render data again, as on hardware.
+  `WC_GX_FRAME_SYNC=1` restores the old full sync.
+- **Texture copies.** `RunCopyTex` flushes instead of draining: aurora encodes the copy into the same
+  FIFO, so order alone keeps it after the draws it reads. `WC_COPYTEX_DRAIN=1` restores the drain.
+- **Tried and dropped:** collecting GXBegin vertices into one packet (direct or indexed). Direct
+  packets gave no measurable gain; indexed packets overflowed aurora's 8 MB vertex buffer.
+- What is left is mostly the game's own translated code (flat profile, no single hot function) and
+  the worker replaying display lists.
+- **Icon.** The runtime sets the window and taskbar icon from the disc's save icon
+  (`files/mcbanner.res`). The build script also forces the exe's icon resource to rebuild, since the
+  resource compiler does not notice a changed `.ico`.
+- **1080p.** On first launch of this version the config is switched once to borderless full screen
+  with "Auto (window size)" render resolution (`[excite_truck] defaults_version = 1`). F10 can
+  change either afterwards.
+- Discord presence names Excite Truck instead of Mario Kart Wii.

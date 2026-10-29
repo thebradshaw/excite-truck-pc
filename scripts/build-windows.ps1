@@ -376,7 +376,15 @@ try {
     $build = Join-Path $ws 'build\windows'
     # The game's own icon (the 48x48 save icon in files\mcbanner.res) replaces WiiCompiled's.
     $iconOut = Join-Path $ws 'runtime\resources\WiiCompiled.ico'
-    try { Write-EtIcon (Join-Path $data 'files\mcbanner.res') $iconOut } catch { Write-Warning "Could not make the game icon: $_" }
+    try {
+        Write-EtIcon (Join-Path $data 'files\mcbanner.res') $iconOut
+        # The resource compiler does not track the .ico, so force the icon resource to rebuild:
+        # touch the .rc and drop its old object (a build from an earlier setup kept the old icon).
+        (Get-Item -LiteralPath (Join-Path $ws 'runtime\resources\WiiCompiled.rc')).LastWriteTime = Get-Date
+        $iconObj = Join-Path $build 'CMakeFiles\WiiCompiled_icon.dir'
+        if (Test-Path -LiteralPath $iconObj) { Remove-Item -LiteralPath $iconObj -Recurse -Force }
+        Write-Host "Game icon written to $iconOut"
+    } catch { Write-Warning "Could not make the game icon: $_" }
     Step 'Configuring'
     $configure = Get-MkwNativeConfigureArguments `
         -SourceDirectory (Join-Path $ws 'runtime') -BuildDirectory $build `
