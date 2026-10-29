@@ -19,6 +19,17 @@ play, with the trucks in their proper colours. Every shader is compiled on the s
 races don't stutter. See
 [docs/porting-notes.md](docs/porting-notes.md).
 
+## Controls
+
+Xbox-style gamepad, in a race: RT or RB drive, X brake, A turbo, left stick steers and tilts the
+truck in the air. Air control is inverted by default (push up to dip the nose); turn that off with
+"Invert air control" in the F10 settings bar under Controllers. A also presses the "2" button, so
+it answers the "press 2" boost after a crash. Y is the Wii A button.
+
+In menus and the pause menu: A selects, B goes back, and the left stick or D-pad moves.
+
+New profiles skip the tutorial that the game normally forces; it is still in the main menu.
+
 ## Your own music
 
 Drop MP3s into `ExciteTruck/UserData/Music` (the build scripts create it). Subfolders are fine, up to 100 songs. In the game, set Options > Race Music to

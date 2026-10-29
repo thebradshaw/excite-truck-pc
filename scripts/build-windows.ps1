@@ -82,6 +82,61 @@ function Run([string]$Exe, [string[]]$Arguments) {
     & $Exe @Arguments 2>&1 | ForEach-Object { "$_" } | Out-Host
     if ($LASTEXITCODE -ne 0) { Fail "$([IO.Path]::GetFileName($Exe)) $($Arguments[0]) failed (exit code $LASTEXITCODE)" }
 }
+# Builds an .ico from the Wii save icon inside mcbanner.res (a WIBN banner: the 48x48 RGB5A3
+# icon sits 0x60A0 bytes in). Sizes 16 to 256 are stored as PNG, which Windows Vista and later read.
+function Write-EtIcon([string]$BannerRes, [string]$IcoPath) {
+    Add-Type -AssemblyName System.Drawing
+    $bytes = [IO.File]::ReadAllBytes($BannerRes)
+    $wibn = -1
+    for ($i = 0; $i -lt $bytes.Length - 4; $i += 4) {
+        if ($bytes[$i] -eq 0x57 -and $bytes[$i + 1] -eq 0x49 -and $bytes[$i + 2] -eq 0x42 -and $bytes[$i + 3] -eq 0x4E) { $wibn = $i; break }
+    }
+    if ($wibn -lt 0) { throw "no save banner in $BannerRes" }
+    $base = $wibn + 0x60A0
+    $icon = New-Object System.Drawing.Bitmap 48, 48, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $k = 0
+    for ($ty = 0; $ty -lt 48; $ty += 4) {
+        for ($tx = 0; $tx -lt 48; $tx += 4) {
+            for ($y = 0; $y -lt 4; $y++) {
+                for ($x = 0; $x -lt 4; $x++) {
+                    $v = ([int]$bytes[$base + $k] -shl 8) -bor $bytes[$base + $k + 1]; $k += 2
+                    if ($v -band 0x8000) {
+                        $a = 255; $r = (($v -shr 10) -band 31) * 255 / 31; $g = (($v -shr 5) -band 31) * 255 / 31; $b = ($v -band 31) * 255 / 31
+                    } else {
+                        $a = (($v -shr 12) -band 7) * 255 / 7; $r = (($v -shr 8) -band 15) * 17; $g = (($v -shr 4) -band 15) * 17; $b = ($v -band 15) * 17
+                    }
+                    $icon.SetPixel($tx + $x, $ty + $y, [System.Drawing.Color]::FromArgb([int]$a, [int]$r, [int]$g, [int]$b))
+                }
+            }
+        }
+    }
+    $images = foreach ($size in 16, 32, 48, 256) {
+        $bmp = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+        $gfx.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $gfx.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+        $gfx.DrawImage($icon, 0, 0, $size, $size)
+        $gfx.Dispose()
+        $png = New-Object IO.MemoryStream
+        $bmp.Save($png, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bmp.Dispose()
+        [pscustomobject]@{ Size = $size; Data = $png.ToArray() }
+    }
+    $icon.Dispose()
+    $out = New-Object IO.MemoryStream
+    $w = New-Object IO.BinaryWriter $out
+    $w.Write([uint16]0); $w.Write([uint16]1); $w.Write([uint16]$images.Count)
+    $offset = 6 + 16 * $images.Count
+    foreach ($img in $images) {
+        $dim = if ($img.Size -ge 256) { 0 } else { $img.Size }
+        $w.Write([byte]$dim); $w.Write([byte]$dim); $w.Write([byte]0); $w.Write([byte]0)
+        $w.Write([uint16]1); $w.Write([uint16]32); $w.Write([uint32]$img.Data.Length); $w.Write([uint32]$offset)
+        $offset += $img.Data.Length
+    }
+    foreach ($img in $images) { $w.Write($img.Data) }
+    $w.Flush()
+    [IO.File]::WriteAllBytes($IcoPath, $out.ToArray())
+}
 function Download([string]$Uri, [string]$Path, [string]$Sha) {
     if ((Test-Path -LiteralPath $Path -PathType Leaf) -and (Sha256 $Path) -eq $Sha) { return }
     Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile "$Path.partial"
@@ -319,6 +374,9 @@ try {
     $cpuProfile = if ([EtBuild.Cpu]::IsProcessorFeaturePresent(40)) { 'v3' } else { 'v2' }
     $env:PATH = Get-MkwToolchainPath $tools
     $build = Join-Path $ws 'build\windows'
+    # The game's own icon (the 48x48 save icon in files\mcbanner.res) replaces WiiCompiled's.
+    $iconOut = Join-Path $ws 'runtime\resources\WiiCompiled.ico'
+    try { Write-EtIcon (Join-Path $data 'files\mcbanner.res') $iconOut } catch { Write-Warning "Could not make the game icon: $_" }
     Step 'Configuring'
     $configure = Get-MkwNativeConfigureArguments `
         -SourceDirectory (Join-Path $ws 'runtime') -BuildDirectory $build `
@@ -351,6 +409,8 @@ foreach ($name in 'fonts', 'wii_bootstrap', 'config') {
         Copy-Item -LiteralPath $directory -Destination $target -Recurse
     }
 }
+$iconFile = Join-Path $ws 'runtime\resources\WiiCompiled.ico'
+if (Test-Path -LiteralPath $iconFile -PathType Leaf) { Copy-Item -LiteralPath $iconFile -Destination (Join-Path $Out 'ExciteTruck.ico') -Force }
 # portable.txt keeps settings, saves and caches in UserData next to the game.
 New-Item -ItemType File -Force -Path (Join-Path $Out 'portable.txt') | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $Out 'UserData\Music')) | Out-Null
@@ -366,6 +426,8 @@ if ($Shortcut) {
     $link = $shell.CreateShortcut((Join-Path $desktop 'Excite Truck.lnk'))
     $link.TargetPath = Join-Path $Out 'ExciteTruck.exe'
     $link.WorkingDirectory = $Out
+    $gameIcon = Join-Path $Out 'ExciteTruck.ico'
+    if (Test-Path -LiteralPath $gameIcon -PathType Leaf) { $link.IconLocation = "$gameIcon,0" }
     $link.Save()
     $link = $shell.CreateShortcut((Join-Path $desktop 'Excite Truck Music.lnk'))
     $link.TargetPath = Join-Path $Out 'UserData\Music'

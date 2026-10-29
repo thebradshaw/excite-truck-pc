@@ -4873,6 +4873,57 @@ index 1836717..f4daa52 100644
 +         ? ::GuestRegion::RowOf(0x##pal##u).In(static_cast<::GuestRegion::Id>(MKW_TRANSLATED_GUEST_REGION)) \
 +         : (0x##pal##u | 1u))
  #endif
+diff --git a/runtime/include/gx_worker.h b/runtime/include/gx_worker.h
+index 25179e2..9cb114a 100644
+--- a/runtime/include/gx_worker.h
++++ b/runtime/include/gx_worker.h
+@@ -11,6 +11,9 @@
+ // the worker executes them. While active, GX work runs on the worker except inside inline scopes,
+ // which run on the game thread after the worker has caught up.
+ namespace GxWorker {
++// Time the game thread spent in Sync (WC_ET_PERF); not thread-safe, read once per frame.
++extern uint64_t g_perfSyncNs;
++extern uint32_t g_perfSyncCount;
+ 
+ namespace detail {
+ inline constexpr size_t kAlign = 16;
+diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
+index 3648d0e..a143b6d 100644
+--- a/runtime/include/runtime_config.h
++++ b/runtime/include/runtime_config.h
+@@ -69,6 +69,8 @@ struct RuntimeUserConfig {
+     std::optional<int32_t> wiiIrSensitivity;
+     std::optional<int32_t> wiiSpeakerVolume;
+     std::optional<bool> wiiRumble;
++    // Excite Truck: stick up tips the truck's nose down in the air (flight style). Default on.
++    std::optional<bool> invertAirControl;
+     std::optional<bool> networkEnabled;
+     std::optional<bool> discordPresenceEnabled;
+     // The application ID of the WiiCompiled Discord application. This is only
+@@ -473,6 +475,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
+         config.wiiSpeakerVolume = *value;
+     }
+     config.wiiRumble = FindConfigValue<bool>(document, "controller", "wii_rumble");
++    config.invertAirControl = FindConfigValue<bool>(document, "controller", "invert_air_control");
+     config.networkEnabled = FindConfigValue<bool>(document, "network", "enabled");
+     config.discordPresenceEnabled = FindConfigValue<bool>(document, "discord", "enabled");
+     config.discordClientId = FindConfigValue<std::string>(document, "discord", "client_id");
+@@ -890,6 +893,15 @@ inline bool SetWiiRumbleEnabled(bool value) {
+     return WriteSetting("controller", "wii_rumble", value ? "true" : "false");
+ }
+ 
++inline bool InvertAirControl(bool fallback = true) {
++    return Get().invertAirControl.value_or(fallback);
++}
++
++inline bool SetInvertAirControl(bool value) {
++    Mutable().invertAirControl = value;
++    return WriteSetting("controller", "invert_air_control", value ? "true" : "false");
++}
++
+ // Target frame rate for frame interpolation, or 0 to disable it.
+ inline uint32_t FrameInterpolationFps(uint32_t fallback = 0) {
+     return Get().frameInterpolationFps.value_or(fallback);
 diff --git a/runtime/src/abi_bridge.cpp b/runtime/src/abi_bridge.cpp
 index e339244..f4bd5bc 100644
 --- a/runtime/src/abi_bridge.cpp
@@ -4909,10 +4960,10 @@ index 2646e0f..53f892e 100644
          g_widescreenConfigured ? EggRecordWidth(kEggRecordWidth43, surfaceWidth, surfaceHeight)
 diff --git a/runtime/src/hle/excite_truck/et_hooks.cpp b/runtime/src/hle/excite_truck/et_hooks.cpp
 new file mode 100644
-index 0000000..2f621cf
+index 0000000..03d1973
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_hooks.cpp
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,208 @@
 +// Excite Truck (REXE01) specific hooks.
 +//
 +// Addresses here use the 0x8F000000 alias: guest_versions.inc maps 0x8F000000 + (ET address
@@ -5111,12 +5162,22 @@ index 0000000..2f621cf
 +    ctx->gpr[3] = 1;
 +}
 +PPC_NATIVE_OVERRIDE_VOID(8F004D64, ET_ParseCommandLine_80004d64, (CpuContext* ctx), (ctx));
++
++// New profiles are sent straight into the tutorial. The front end (0x80247C18) compares the
++// tutorial challenges a profile has passed against this function's count of challenges in
++// tutorial contests marked "mandatory" (common.res chal_eves.val), and forces the tutorial while
++// fewer have been passed. Reporting none as mandatory skips that; the tutorial itself stays.
++extern "C" void ET_MandatoryTutorialChallenges_80161d50(CpuContext* ctx)
++{
++    ctx->gpr[3] = 0;
++}
++PPC_NATIVE_OVERRIDE_VOID(8F161D50, ET_MandatoryTutorialChallenges_80161d50, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
-index 0000000..2c0d4e3
+index 0000000..3ea6ac7
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_input.cpp
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,378 @@
 +// Excite Truck (REXE01): a virtual Wii Remote driven by an Xbox-style gamepad or the keyboard.
 +//
 +// Excite Truck only takes a sideways Wii Remote. Rather than emulate the remote's Bluetooth
@@ -5132,9 +5193,12 @@ index 0000000..2c0d4e3
 +// acc.z (steer = clamp(-2 * acc.z, -1, 1)), and air pitch from -atan2(acc.x, -acc.y). At rest a
 +// sideways remote reads acc = (0, -1, 0).
 +//
-+// Default layout (Chris's request): R / RT = gas (2), X = brake (1), A = turbo (D-pad),
-+// left stick X = steer, left stick Y = air control, Y = Wii A (reset). Menus: D-pad moves, RT/R confirm (2),
-+// X/B go back (1), Start = pause (+), Back = minus.
++// Default layout (Chris's request). Driving: R / RT = gas (2), X = brake (1), A = turbo (D-pad),
++// left stick X = steer, left stick Y = air control (inverted by default: push up to dip the nose;
++// "Invert air control" in the F10 controller settings), Y = Wii A (reset). A also presses 2, so
++// it answers the "press 2" boost after a crash. Menus (anything but a running race, pause
++// included): A = OK (2), B / X = back (1), left stick or D-pad move, RT/R also OK.
++// Start = pause (+), Back = minus.
 +// Keyboard: arrows = steer (plus D-pad for menus while gas is up), W/S = air control, X or Enter = gas / confirm (2), Z or Backspace = brake / back (1),
 +// C = turbo, P = pause (+).
 +//
@@ -5154,6 +5218,7 @@ index 0000000..2c0d4e3
 +#include "abi_bridge.h"
 +#include "hle_stubs.h"
 +#include "ppc_runtime.h"
++#include "runtime_config.h"
 +#include "runtime_log.h"
 +
 +namespace {
@@ -5224,9 +5289,48 @@ index 0000000..2c0d4e3
 +    float pitch = 0.0f; // -1 nose down .. +1 nose up
 +};
 +
++// Game state that decides between the driving and the menu layouts.
++//   r13-0x1DEC (float): the race simulation's time step. Non-zero while a race runs, zero in the
++//                       menus and while the race is paused.
++constexpr uint32_t kRaceTimeStep = 0x8055EB14u;
++
++float ReadF32(uint32_t addr)
++{
++    const uint32_t bits = Memory::Read32(addr);
++    float v;
++    std::memcpy(&v, &bits, sizeof(v));
++    return v;
++}
++
++bool RaceRunning()
++{
++    return ReadF32(kRaceTimeStep) > 0.0f;
++}
++
++// The left stick acts as a D-pad in menus, with some hysteresis so a held stick doesn't flicker.
++uint32_t StickAsDpad(SDL_Gamepad* pad)
++{
++    static uint32_t held = 0;
++    const float x = static_cast<float>(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX)) / 32767.0f;
++    const float y = static_cast<float>(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY)) / 32767.0f;
++    auto axis = [](float v, bool wasNeg, bool wasPos, bool& neg, bool& pos) {
++        const float on = 0.5f, off = 0.35f;
++        neg = v < -(wasNeg ? off : on);
++        pos = v > (wasPos ? off : on);
++    };
++    bool left, right, up, down;
++    axis(x, held & kSidewaysLeft, held & kSidewaysRight, left, right);
++    axis(y, held & kSidewaysUp, held & kSidewaysDown, up, down);
++    held = (left ? kSidewaysLeft : 0) | (right ? kSidewaysRight : 0) | (up ? kSidewaysUp : 0) |
++           (down ? kSidewaysDown : 0);
++    return held;
++}
++
 +RemoteInput ReadInput()
 +{
 +    RemoteInput in;
++    const bool racing = RaceRunning();
++    const bool invertAir = RuntimeConfigFile::InvertAirControl(true);
 +
 +    if (SDL_Gamepad* pad = ActiveGamepad()) {
 +        auto button = [pad](SDL_GamepadButton b) { return SDL_GetGamepadButton(pad, b); };
@@ -5238,17 +5342,28 @@ index 0000000..2c0d4e3
 +        if (button(SDL_GAMEPAD_BUTTON_WEST) || button(SDL_GAMEPAD_BUTTON_EAST)) {
 +            in.hold |= kWpad1;
 +        }
-+        if (button(SDL_GAMEPAD_BUTTON_SOUTH)) {
-+            in.hold |= kSidewaysUp; // turbo: any D-pad direction works in a race
-+        }
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_UP)) in.hold |= kSidewaysUp;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_DOWN)) in.hold |= kSidewaysDown;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_LEFT)) in.hold |= kSidewaysLeft;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) in.hold |= kSidewaysRight;
 +        if (button(SDL_GAMEPAD_BUTTON_START)) in.hold |= kWpadPlus;
 +        if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= kWpadMinus;
-+        in.steer = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
-+        in.pitch = -StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTY); // stick up = nose up
++        if (racing) {
++            if (button(SDL_GAMEPAD_BUTTON_SOUTH)) {
++                // Turbo (any D-pad direction works in a race), plus 2 so that A also answers the
++                // "press 2" boost after a crash. 2 is gas, which is held while boosting anyway.
++                in.hold |= kSidewaysUp | kWpad2;
++            }
++            in.steer = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
++            // Stick up reads negative. Inverted: stick up = nose down.
++            const float stickY = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
++            in.pitch = invertAir ? stickY : -stickY;
++        } else {
++            // Menus: A is OK and the stick moves the cursor. The remote stays level, since the
++            // menus ignore the D-pad while it is tilted.
++            if (button(SDL_GAMEPAD_BUTTON_SOUTH)) in.hold |= kWpad2;
++            in.hold |= StickAsDpad(pad);
++        }
 +    }
 +
 +    int keyCount = 0;
@@ -5257,7 +5372,10 @@ index 0000000..2c0d4e3
 +        auto key = [keys, keyCount](SDL_Scancode sc) { return static_cast<int>(sc) < keyCount && keys[sc]; };
 +        if (key(SDL_SCANCODE_X) || key(SDL_SCANCODE_RETURN)) in.hold |= kWpad2;
 +        if (key(SDL_SCANCODE_Z) || key(SDL_SCANCODE_BACKSPACE)) in.hold |= kWpad1;
-+        if (key(SDL_SCANCODE_C)) in.hold |= kSidewaysUp;
++        if (key(SDL_SCANCODE_C)) {
++            in.hold |= kSidewaysUp;
++            if (racing) in.hold |= kWpad2;
++        }
 +        if (key(SDL_SCANCODE_P)) in.hold |= kWpadPlus;
 +        if (key(SDL_SCANCODE_A)) in.hold |= kWpadA;
 +        if (key(SDL_SCANCODE_B)) in.hold |= kWpadB;
@@ -5270,8 +5388,9 @@ index 0000000..2c0d4e3
 +        // control (pitch) lives on W/S instead.
 +        if (key(SDL_SCANCODE_UP)) in.hold |= kSidewaysUp;
 +        if (key(SDL_SCANCODE_DOWN)) in.hold |= kSidewaysDown;
-+        if (key(SDL_SCANCODE_W)) in.pitch = 1.0f;
-+        if (key(SDL_SCANCODE_S)) in.pitch = -1.0f;
++        if (key(SDL_SCANCODE_W)) in.pitch = invertAir ? -1.0f : 1.0f;
++        if (key(SDL_SCANCODE_S)) in.pitch = invertAir ? 1.0f : -1.0f;
++        if (!racing) in.steer = 0.0f; // keep the remote level in the menus
 +    }
 +    return in;
 +}
@@ -5406,7 +5525,8 @@ index 0000000..2c0d4e3
 +    const RemoteInput in = ReadInput();
 +    const uint32_t hold = in.hold;
 +    if (hold != g_previousHold && std::getenv("WC_TRACE_INPUT")) {
-+        RT_LOGF(RT_TAG_HLE, "ET remote hold=0x%04X steer=%.2f pitch=%.2f\n", hold, in.steer, in.pitch);
++        RT_LOGF(RT_TAG_HLE, "ET remote hold=0x%04X steer=%.2f pitch=%.2f racing=%d\n", hold, in.steer,
++                in.pitch, RaceRunning() ? 1 : 0);
 +    }
 +    const uint32_t trig = hold & ~g_previousHold;
 +    const uint32_t release = g_previousHold & ~hold;
@@ -6055,10 +6175,15 @@ index 0000000..e61f894
 +                         bool* pending);
 +int32_t SdCard_HLE_Ioctlv(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut, uint32_t vectorPtr);
 diff --git a/runtime/src/hle/gx/gx_copy.cpp b/runtime/src/hle/gx/gx_copy.cpp
-index 3dbdc8d..690962f 100644
+index 3dbdc8d..d9bab70 100644
 --- a/runtime/src/hle/gx/gx_copy.cpp
 +++ b/runtime/src/hle/gx/gx_copy.cpp
-@@ -6,6 +6,8 @@
+@@ -1,3 +1,4 @@
++#include <chrono>
+ // gx_copy.cpp - Framebuffer Copy Operations
+ #include "gx_internal.h"
+ 
+@@ -6,6 +7,8 @@
  #include <dolphin/gx/GXAurora.h>
  
  #include <algorithm>
@@ -6067,7 +6192,7 @@ index 3dbdc8d..690962f 100644
  #include <map>
  #include <mutex>
  #include <vector>
-@@ -122,6 +124,8 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g),
+@@ -122,6 +125,8 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g),
  // Copy Execution
  // ============================================================================
  
@@ -6076,10 +6201,25 @@ index 3dbdc8d..690962f 100644
  extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
      EnsureAuroraFrameActive();
      if (GxWorker::ShouldDefer()) {
-@@ -141,6 +145,11 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+@@ -141,6 +146,26 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
          aurora_wait_for_frame_worker();
      }
      ++g_gxFrameCount;
++    {   // WC_ET_PERF=1: per-frame time and time the game thread spent waiting on the GX worker.
++        static const bool perf = std::getenv("WC_ET_PERF") != nullptr;
++        if (perf) {
++            namespace GW = GxWorker;
++            static auto last = std::chrono::steady_clock::now();
++            static uint64_t frames = 0;
++            if (++frames % 120 == 0) {
++                const auto now = std::chrono::steady_clock::now();
++                const double ms = std::chrono::duration<double, std::milli>(now - last).count() / 120.0;
++                std::fprintf(stderr, "[perf] frame %.2f ms, GX sync wait %.2f ms in %.1f syncs per frame\n", ms,
++                             double(GW::g_perfSyncNs) / 1e6 / 120.0, double(GW::g_perfSyncCount) / 120.0);
++                GW::g_perfSyncNs = 0; GW::g_perfSyncCount = 0; last = now;
++            }
++        }
++    }
 +    {
 +        static const long traceFrame = std::getenv("WC_TRACE_GX_FRAME") ? std::atol(std::getenv("WC_TRACE_GX_FRAME")) : -1;
 +        g_gxTraceFrame = traceFrame >= 0 && long(g_gxFrameCount) == traceFrame;
@@ -6088,19 +6228,68 @@ index 3dbdc8d..690962f 100644
      VI_HLE_SetXfbReady(da);
      settings_overlay::Draw();
      // Seal, pace to the VI retrace boundary (Aurora renders the sealed frame
-@@ -170,6 +179,12 @@ extern "C" void GX__CopyTex_8016fd74(uint32_t da, uint32_t c) {
+@@ -151,29 +176,48 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+ PPC_NATIVE_OVERRIDE_VOID(8016fc38, GX__CopyDisp_8016fc38, (uint32_t da, uint32_t c), (da, c));
+ 
+ 
+-extern "C" void GX__CopyTex_8016fd74(uint32_t da, uint32_t c) {
+-    // Begin the frame before going inline so a deferred begin reaches the worker first.
+-    EnsureAuroraFrameActive();
+-    GX_SYNC_INLINE();
++namespace {
++// Runs one texture copy against a snapshot of the copy source/destination state. On the GX
++// worker it executes in FIFO order with the draws before it, so it needs no sync.
++void RunCopyTex(uint32_t da, uint32_t c, const TexCopyState& state) {
+     // Match GX FIFO ordering: texture copies observe all prior draws.
+     GXDrawDone();
+-    const uint16_t rawSrcLeft = g_texCopyState.srcLeft;
+-    const uint16_t rawSrcTop = g_texCopyState.srcTop;
+-    const uint16_t rawSrcWidth = g_texCopyState.srcWidth;
+-    const uint16_t rawSrcHeight = g_texCopyState.srcHeight;
+-
+     // Keep the source in guest EFB coordinates. Aurora maps it to the scaled
+     // EFB exactly once, matching Dolphin's ConvertEFBRectangle path.
+-    GXSetTexCopySrc(rawSrcLeft, rawSrcTop, rawSrcWidth, rawSrcHeight);
++    GXSetTexCopySrc(state.srcLeft, state.srcTop, state.srcWidth, state.srcHeight);
+     // EFB copies stay GPU-only except probe-sized ones (e.g. the 4x4 lens-flare depth probe),
+     // which Aurora reads back asynchronously via efb_ram::schedule and land in guest RAM a frame
      // later. RISK: copies above the probe threshold, or on the offscreen list, are not
      // auto-downloaded, so guest reads see stale RAM; call aurora_flush_efb_copies_to_ram if a
      // copy needs reading back.
-+    GXT("[gxt] copytex dst=%08X %ux%u fmt=%u clear=%u\n", da, g_texCopyState.dstWidth, g_texCopyState.dstHeight, unsigned(g_texCopyState.dstFormat), c);
-+    if (std::getenv("WC_TRACE_COPY")) {
-+        std::fprintf(stderr, "[copy] tex dst=0x%08X src=%u,%u %ux%u -> %ux%u fmt=%u clear=%u\n", da, rawSrcLeft, rawSrcTop,
-+                     rawSrcWidth, rawSrcHeight, g_texCopyState.dstWidth, g_texCopyState.dstHeight,
-+                     unsigned(g_texCopyState.dstFormat), c);
++    GXT("[gxt] copytex dst=%08X %ux%u fmt=%u clear=%u\n", da, state.dstWidth, state.dstHeight, unsigned(state.dstFormat), c);
++    static const bool traceCopy = std::getenv("WC_TRACE_COPY") != nullptr;
++    if (traceCopy) {
++        std::fprintf(stderr, "[copy] tex dst=0x%08X src=%u,%u %ux%u -> %ux%u fmt=%u clear=%u\n", da, state.srcLeft,
++                     state.srcTop, state.srcWidth, state.srcHeight, state.dstWidth, state.dstHeight,
++                     unsigned(state.dstFormat), c);
 +    }
      GXCopyTex(GuestToHostPtr(da), (GXBool)c);
      RememberEfbCopyDestination(
-         da, GXGetTexBufferSize(g_texCopyState.dstWidth, g_texCopyState.dstHeight,
+-        da, GXGetTexBufferSize(g_texCopyState.dstWidth, g_texCopyState.dstHeight,
+-                               g_texCopyState.dstFormat, GX_FALSE, 0));
+-    GXSetTexCopySrc(rawSrcLeft, rawSrcTop, rawSrcWidth, rawSrcHeight);
++        da, GXGetTexBufferSize(state.dstWidth, state.dstHeight, state.dstFormat, GX_FALSE, 0));
++    GXSetTexCopySrc(state.srcLeft, state.srcTop, state.srcWidth, state.srcHeight);
++}
++} // namespace
++
++extern "C" void GX__CopyTex_8016fd74(uint32_t da, uint32_t c) {
++    // Begin the frame first so a deferred begin reaches the worker before the copy.
++    EnsureAuroraFrameActive();
++    const TexCopyState state = g_texCopyState;
++    // Excite Truck copies the EFB to textures several times a frame (environment map, effects).
++    // Recording the copy for the worker, like GXCopyDisp, instead of waiting for the worker to
++    // catch up each time lets the game thread and the GX worker overlap. WC_SYNC_COPYTEX=1 goes
++    // back to running copies inline.
++    static const bool syncCopies = std::getenv("WC_SYNC_COPYTEX") != nullptr;
++    if (!syncCopies && GxWorker::ShouldDefer()) {
++        GxWorker::Submit([da, c, state] { RunCopyTex(da, c, state); });
++        return;
++    }
++    GX_SYNC_INLINE();
++    RunCopyTex(da, c, state);
+ }
+ PPC_NATIVE_OVERRIDE_VOID(8016fd74, GX__CopyTex_8016fd74, (uint32_t da, uint32_t c), (da, c));
 diff --git a/runtime/src/hle/gx/gx_dl.cpp b/runtime/src/hle/gx/gx_dl.cpp
 index daceeb7..c6a5f86 100644
 --- a/runtime/src/hle/gx/gx_dl.cpp
@@ -6766,6 +6955,32 @@ index 3a8c43b..c14fe0c 100644
      if(IsDisplayListActive()){
          WriteDisplayListData((u8)(t|vf), 1);
          WriteDisplayListData((u16)nv, 2);
+diff --git a/runtime/src/hle/gx/gx_worker.cpp b/runtime/src/hle/gx/gx_worker.cpp
+index ac8983e..685e72b 100644
+--- a/runtime/src/hle/gx/gx_worker.cpp
++++ b/runtime/src/hle/gx/gx_worker.cpp
+@@ -314,10 +314,21 @@ void FifoBurst(const uint8_t* data, uint32_t sizeBytes) {
+     }
+ }
+ 
++uint64_t g_perfSyncNs = 0;
++uint32_t g_perfSyncCount = 0;
++
+ void Sync() {
+     if (!Active() || detail::t_onWorker) {
+         return;
+     }
++    const auto perfStart = std::chrono::steady_clock::now();
++    struct PerfScope {
++        std::chrono::steady_clock::time_point start;
++        ~PerfScope() {
++            g_perfSyncNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
++            ++g_perfSyncCount;
++        }
++    } perfScope{perfStart};
+     // Guest callbacks serviced while waiting can record more work.
+     do {
+         if (detail::g_fifoPending) {
 diff --git a/runtime/src/hle/ios.cpp b/runtime/src/hle/ios.cpp
 index 9de2c3c..2cfff88 100644
 --- a/runtime/src/hle/ios.cpp
@@ -7490,7 +7705,7 @@ index ad031c1..338cf09 100644
      const uint32_t soundPlayerArray = ResolveSoundPlayerArray();
      if (soundPlayerArray == 0) {
 diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
-index ed1a1b8..907840e 100644
+index ed1a1b8..fb3d523 100644
 --- a/runtime/src/settings_overlay.cpp
 +++ b/runtime/src/settings_overlay.cpp
 @@ -1,4 +1,5 @@
@@ -7499,7 +7714,23 @@ index ed1a1b8..907840e 100644
  #include "gx_worker.h"
  #include "audio_backend.h"
  #include "aurora_events.h"
-@@ -1656,5 +1657,13 @@ void NotifyStrapInputAccepted() noexcept {
+@@ -956,6 +957,15 @@ void DrawPlayerRow(uint32_t port) {
+ 
+ void DrawControllerSettings() {
+     ImGui::Dummy(ImVec2(kControllerMenuWidth, 0.0f));
++    if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
++        static bool invertAir = RuntimeConfigFile::InvertAirControl(true);
++        if (ImGui::Checkbox("Invert air control (push up to dip the nose)", &invertAir)) {
++            RuntimeConfigFile::SetInvertAirControl(invertAir);
++        }
++        ImGui::TextDisabled("Gamepad: RT/R drive, X brake, A turbo, left stick steers and tilts in the air.");
++        ImGui::TextDisabled("Menus: A select, B back, left stick or D-pad move.");
++        ImGui::Separator();
++    }
+     for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
+         DrawPlayerRow(port);
+     }
+@@ -1656,5 +1666,13 @@ void NotifyStrapInputAccepted() noexcept {
      }
  }
  

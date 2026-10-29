@@ -169,3 +169,20 @@ startup from then on.
 To refresh the set after playing more of the game: `scripts/export-shaders.sh` merges your
 `pipeline_cache.db` into the shipped file. The file holds only GPU state descriptions (TEV stages,
 blend modes, vertex layouts), no game graphics.
+
+## Controls, tutorial and copies (step 2, Chris's first Windows run)
+
+- **Menu or race.** The float at r13-0x1DEC (0x8055EB14) is the race simulation's time step: non-zero
+  while a race runs, zero in menus and while paused. `et_input.cpp` uses it to switch between the
+  driving layout (stick = tilt, A = turbo + 2) and the menu layout (A = 2, stick = D-pad, remote
+  level, since the menus ignore the D-pad while the remote is tilted). Found by diffing MEM1 dumps
+  taken in menus, mid-race, paused and after a crash.
+- **Mandatory tutorial.** `contest tutorial 0 mandatory yes` in common.res/chal_eves.val. 0x80161D50
+  sums the challenges of mandatory tutorial contests; the front end (0x80247C18) forces the tutorial
+  while a profile has passed fewer. The override returns 0. The res entries are CRC-checked, so the
+  data can't simply be patched.
+- **Texture copies.** `GXCopyTex` used to sync the GX worker (3 to 4 times a frame in a race). It now
+  records the copy for the worker with a snapshot of the copy state; `WC_SYNC_COPYTEX=1` restores
+  the old path. `WC_ET_PERF=1` prints frame time and the time spent waiting on the worker.
+- **Icon.** build-windows.ps1 decodes the 48x48 RGB5A3 save icon (WIBN banner in files/mcbanner.res,
+  icon at +0x60A0) into `runtime/resources/WiiCompiled.ico` before compiling, and the shortcut uses it.
