@@ -6454,16 +6454,30 @@ index 0000000..e61f894
 +                         bool* pending);
 +int32_t SdCard_HLE_Ioctlv(uint32_t fd, uint32_t cmd, uint32_t numIn, uint32_t numOut, uint32_t vectorPtr);
 diff --git a/runtime/src/hle/gx/gx_copy.cpp b/runtime/src/hle/gx/gx_copy.cpp
-index 3dbdc8d..d458652 100644
+index 3dbdc8d..abe6848 100644
 --- a/runtime/src/hle/gx/gx_copy.cpp
 +++ b/runtime/src/hle/gx/gx_copy.cpp
-@@ -1,3 +1,5 @@
+@@ -1,3 +1,19 @@
++#if defined(_WIN32)
++// Declared by hand to keep <windows.h> macros out of this file (kernel32 export since Windows 7).
++namespace {
++struct EtProcessMemoryCounters {
++    unsigned long cb, PageFaultCount;
++    size_t PeakWorkingSetSize, WorkingSetSize, QuotaPeakPagedPoolUsage, QuotaPagedPoolUsage,
++        QuotaPeakNonPagedPoolUsage, QuotaNonPagedPoolUsage, PagefileUsage, PeakPagefileUsage;
++};
++}
++extern "C" __declspec(dllimport) int __stdcall K32GetProcessMemoryInfo(void* process, EtProcessMemoryCounters* counters,
++                                                                       unsigned long cb);
++#else
++#include <sys/resource.h>
++#endif
 +#include "et_perf.h"
 +#include <chrono>
  // gx_copy.cpp - Framebuffer Copy Operations
  #include "gx_internal.h"
  
-@@ -6,6 +8,8 @@
+@@ -6,6 +22,8 @@
  #include <dolphin/gx/GXAurora.h>
  
  #include <algorithm>
@@ -6472,7 +6486,7 @@ index 3dbdc8d..d458652 100644
  #include <map>
  #include <mutex>
  #include <vector>
-@@ -122,11 +126,18 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g),
+@@ -122,11 +140,18 @@ PPC_NATIVE_OVERRIDE_VOID(8016fc24, GX__SetDispCopyGamma_8016fc24, (uint32_t g),
  // Copy Execution
  // ============================================================================
  
@@ -6491,7 +6505,7 @@ index 3dbdc8d..d458652 100644
              GXDrawDone();
              GXCopyDisp(GuestToHostPtr(da), (GXBool)c);
          });
-@@ -141,6 +152,29 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+@@ -141,6 +166,49 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
          aurora_wait_for_frame_worker();
      }
      ++g_gxFrameCount;
@@ -6506,6 +6520,26 @@ index 3dbdc8d..d458652 100644
 +                const double ms = std::chrono::duration<double, std::milli>(now - last).count() / 120.0;
 +                std::fprintf(stderr, "[perf] frame %.2f ms, GX sync wait %.2f ms in %.1f syncs per frame\n", ms,
 +                             double(GW::g_perfSyncNs) / 1e6 / 120.0, double(GW::g_perfSyncCount) / 120.0);
++                {   // Memory: to tell paging apart from slow frames in a player's log.
++#if defined(_WIN32)
++                    EtProcessMemoryCounters pmc{};
++                    pmc.cb = sizeof(pmc);
++                    static unsigned long lastFaults = 0;
++                    if (K32GetProcessMemoryInfo(reinterpret_cast<void*>(intptr_t(-1)), &pmc, sizeof(pmc))) {
++                        std::fprintf(stderr, "[perf] memory: working set %zu MB, page faults %lu\n",
++                                     size_t(pmc.WorkingSetSize >> 20), (unsigned long)(pmc.PageFaultCount - lastFaults));
++                        lastFaults = pmc.PageFaultCount;
++                    }
++#else
++                    struct rusage ru{};
++                    static long lastMaj = 0;
++                    if (getrusage(RUSAGE_SELF, &ru) == 0) {
++                        std::fprintf(stderr, "[perf] memory: peak %ld MB, major page faults %ld\n", ru.ru_maxrss >> 10,
++                                     ru.ru_majflt - lastMaj);
++                        lastMaj = ru.ru_majflt;
++                    }
++#endif
++                }
 +                std::fprintf(stderr, "[perf]  ms/frame:");
 +                for (int b = 0; b < EtPerf::kCount; ++b) std::fprintf(stderr, " %s %.2f", EtPerf::kNames[b], double(EtPerf::g_ns[b].exchange(0)) / 1e6 / 120.0);
 +                std::fprintf(stderr, "\n");
@@ -6521,7 +6555,7 @@ index 3dbdc8d..d458652 100644
      VI_HLE_SetXfbReady(da);
      settings_overlay::Draw();
      // Seal, pace to the VI retrace boundary (Aurora renders the sealed frame
-@@ -151,29 +185,55 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
+@@ -151,29 +219,55 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
  PPC_NATIVE_OVERRIDE_VOID(8016fc38, GX__CopyDisp_8016fc38, (uint32_t da, uint32_t c), (da, c));
  
  
