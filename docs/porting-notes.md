@@ -225,3 +225,17 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
 - **Motion blur** is not extra work: the same four EFB copies run each frame at any speed.
 - **ExciteTruck-perf-log.bat** in the install folder runs the game with `WC_ET_PERF=1` and writes
   `perf-log.txt`, so frame time on a player's PC can be read back.
+
+## Menus after a race, tap counting, Chris's perf log (step 2, fourth run)
+
+- **Race detection.** The time step at r13-0x1DEC is not cleared when a race ends, so the menus
+  after a race got the driving layout (stick steering, no cursor). `RaceRunning()` now also needs
+  the race clock (r13-0x1DE8, 0x8055EB18, seconds) to have moved in the last 0.5 s.
+- **A taps** are counted from SDL events (an event watch), and each becomes one game frame with 2
+  released and one with 2 pressed (frames counted by `g_gxFrameCount`), so fast taps are not lost.
+- **Chris's FX-8350 + RX 570 log (D3D12).** Menus: 16.7 ms (paced). Races: 23-36 ms. Of that, the
+  game thread waits 8-13 ms at its draw-done; the GX worker spends 7-12 ms of each frame waiting
+  in the CopyDisp drain for aurora's FIFO processor. The game thread's own work is ~20 ms
+  (6 ms logic, 14 ms render recording). Not draining at CopyDisp would overlap more, but aurora
+  reads vertex arrays from guest memory when it processes a draw (`push_storage` on
+  `array.data`), so the game could overwrite them first; that needs array snapshots first.

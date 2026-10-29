@@ -5356,10 +5356,10 @@ index 0000000..ace6b47
 +PPC_NATIVE_OVERRIDE_VOID(8F161D50, ET_MandatoryTutorialChallenges_80161d50, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
-index 0000000..04621fb
+index 0000000..036bd14
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_input.cpp
-@@ -0,0 +1,388 @@
+@@ -0,0 +1,448 @@
 +// Excite Truck (REXE01): a virtual Wii Remote driven by an Xbox-style gamepad or the keyboard.
 +//
 +// Excite Truck only takes a sideways Wii Remote. Rather than emulate the remote's Bluetooth
@@ -5389,6 +5389,9 @@ index 0000000..04621fb
 +#include <cstdio>
 +#include <SDL3/SDL_gamepad.h>
 +#include <SDL3/SDL_keyboard.h>
++#include <SDL3/SDL_events.h>
++#include <atomic>
++#include <chrono>
 +
 +#include <algorithm>
 +#include <array>
@@ -5402,6 +5405,8 @@ index 0000000..04621fb
 +#include "ppc_runtime.h"
 +#include "runtime_config.h"
 +#include "runtime_log.h"
++
++extern "C" int g_gxFrameCount;
 +
 +namespace {
 +
@@ -5437,6 +5442,18 @@ index 0000000..04621fb
 +bool g_connectReported = false;
 +uint32_t g_previousHold = 0;
 +SDL_Gamepad* g_gamepad = nullptr;
++std::atomic<int> g_pendingTaps{0};
++
++// Counts A (and keyboard C) presses as they happen, so fast taps between two game frames count.
++bool SDLCALL CountBoostTaps(void*, SDL_Event* ev)
++{
++    const bool tap = (ev->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && ev->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) ||
++                     (ev->type == SDL_EVENT_KEY_DOWN && !ev->key.repeat && ev->key.scancode == SDL_SCANCODE_C);
++    if (tap && g_pendingTaps.load(std::memory_order_relaxed) < 8) {
++        g_pendingTaps.fetch_add(1, std::memory_order_relaxed);
++    }
++    return true;
++}
 +
 +SDL_Gamepad* ActiveGamepad()
 +{
@@ -5485,9 +5502,26 @@ index 0000000..04621fb
 +    return v;
 +}
 +
++// r13-0x1DE8 (float): the race clock in seconds. It stops when the race is paused or over.
++constexpr uint32_t kRaceClock = 0x8055EB18u;
++
++// The time step is not cleared when a race ends, so after returning to the menus it would still
++// read as racing (Chris: the stick stopped moving the menu cursor after a race). A race also has
++// to have its clock moving: frozen for half a second means we are not in a running race.
 +bool RaceRunning()
 +{
-+    return ReadF32(kRaceTimeStep) > 0.0f;
++    if (!(ReadF32(kRaceTimeStep) > 0.0f)) {
++        return false;
++    }
++    static float lastClock = -1.0f;
++    static auto lastChange = std::chrono::steady_clock::now();
++    const float clock = ReadF32(kRaceClock);
++    const auto now = std::chrono::steady_clock::now();
++    if (clock != lastClock) {
++        lastClock = clock;
++        lastChange = now;
++    }
++    return now - lastChange < std::chrono::milliseconds(500);
 +}
 +
 +// The left stick acts as a D-pad in menus, with some hysteresis so a held stick doesn't flicker.
@@ -5511,6 +5545,8 @@ index 0000000..04621fb
 +
 +RemoteInput ReadInput()
 +{
++    static const bool watching = SDL_AddEventWatch(CountBoostTaps, nullptr);
++    (void)watching;
 +    RemoteInput in;
 +    const bool racing = RaceRunning();
 +    const bool invertAir = RuntimeConfigFile::InvertAirControl(true);
@@ -5577,13 +5613,37 @@ index 0000000..04621fb
 +        if (key(SDL_SCANCODE_S)) in.pitch = invertAir ? 1.0f : -1.0f;
 +        if (!racing) in.steer = 0.0f; // keep the remote level in the menus
 +    }
-+    // The crash recovery counts presses of 2. With gas (R/RT) already holding 2, a tap of A would
-+    // add no new press, so each A tap lets go of 2 for one read and presses it again on the next.
-+    static bool tapWasDown = false;
-+    if (in.boostTap && !tapWasDown && (g_previousHold & kWpad2) != 0) {
-+        in.hold &= ~kWpad2;
++    // The crash recovery counts presses of 2. Every A tap (counted from SDL events, so a tap
++    // shorter than a frame still counts) becomes one game frame with 2 released, then one game
++    // frame with 2 pressed, whether or not R/RT is holding 2 for gas.
++    if (racing) {
++        enum class Phase { Idle, Release, Press };
++        static Phase phase = Phase::Idle;
++        static int phaseFrame = 0;
++        const int frame = g_gxFrameCount;
++        if (phase == Phase::Idle && g_pendingTaps.load(std::memory_order_relaxed) > 0) {
++            g_pendingTaps.fetch_sub(1, std::memory_order_relaxed);
++            phase = Phase::Release;
++            phaseFrame = frame;
++        }
++        if (phase == Phase::Release) {
++            if (frame != phaseFrame) {
++                phase = Phase::Press;
++                phaseFrame = frame;
++            } else {
++                in.hold &= ~kWpad2;
++            }
++        }
++        if (phase == Phase::Press) {
++            if (frame != phaseFrame) {
++                phase = Phase::Idle;
++            } else {
++                in.hold |= kWpad2;
++            }
++        }
++    } else {
++        g_pendingTaps.store(0, std::memory_order_relaxed);
 +    }
-+    tapWasDown = in.boostTap;
 +    return in;
 +}
 +
