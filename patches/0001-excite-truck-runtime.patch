@@ -5440,10 +5440,10 @@ index 0000000..fa973b6
 +PPC_NATIVE_OVERRIDE_VOID(8F161D50, ET_MandatoryTutorialChallenges_80161d50, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
-index 0000000..2d33e3b
+index 0000000..32296de
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_input.cpp
-@@ -0,0 +1,533 @@
+@@ -0,0 +1,541 @@
 +// Excite Truck (REXE01): a virtual Wii Remote driven by an Xbox-style gamepad or the keyboard.
 +//
 +// Excite Truck only takes a sideways Wii Remote. Rather than emulate the remote's Bluetooth
@@ -5763,16 +5763,20 @@ index 0000000..2d33e3b
 +        if (!racing) in.steer = 0.0f; // keep the remote level in the menus
 +    }
 +    // The crash recovery counts presses of 2. Every A tap (counted from SDL events, so a tap
-+    // shorter than a frame still counts) becomes one game frame with 2 released, then one game
-+    // frame with 2 pressed, whether or not R/RT is holding 2 for gas.
++    // shorter than a frame still counts) becomes one game frame with 2 pressed, preceded by one
++    // frame with 2 released when R/RT is holding 2 for gas.
 +    {
 +        enum class Phase { Idle, Release, Press };
 +        static Phase phase = Phase::Idle;
 +        static int phaseFrame = 0;
 +        const int frame = g_gxFrameCount;
++        static bool lastHad2 = false;
++        static int lastFrame = -1;
 +        if (phase == Phase::Idle && g_pendingTaps.load(std::memory_order_relaxed) > 0) {
 +            g_pendingTaps.fetch_sub(1, std::memory_order_relaxed);
-+            phase = Phase::Release;
++            // If the game last saw 2 released, the tap can press 2 on this very frame.
++            // Otherwise (R held for gas) it needs one frame with 2 released first.
++            phase = (lastFrame != frame && !lastHad2) ? Phase::Press : Phase::Release;
 +            phaseFrame = frame;
 +        }
 +        if (phase == Phase::Release) {
@@ -5796,6 +5800,10 @@ index 0000000..2d33e3b
 +            } else {
 +                in.hold |= kWpad2;
 +            }
++        }
++        if (lastFrame != frame) {
++            lastFrame = frame;
++            lastHad2 = (in.hold & kWpad2) != 0;
 +        }
 +    }
 +    return in;
@@ -7528,10 +7536,15 @@ index 0f79533..8a1bb3d 100644
      try { uint32_t gd = Memory::Read32(kGXDataPtrAddr); if (gd) Memory::Write16(gd + 2, 0); } catch (...) {}
  }
 diff --git a/runtime/src/hle/gx/gx_vertex.cpp b/runtime/src/hle/gx/gx_vertex.cpp
-index 3a8c43b..c14fe0c 100644
+index 3a8c43b..285f1c5 100644
 --- a/runtime/src/hle/gx/gx_vertex.cpp
 +++ b/runtime/src/hle/gx/gx_vertex.cpp
-@@ -5,8 +5,6 @@
+@@ -1,12 +1,11 @@
+ // gx_vertex.cpp - Vertex Descriptor and Attribute Functions
++#include "hle_stubs.h"
+ #include "gx_internal.h"
+ #include "gx_stream_common.h"
+ #include "fiber_manager.h"
  #include "guest_interrupt_context.h"
  #include "runtime_log.h"
  
@@ -7540,7 +7553,7 @@ index 3a8c43b..c14fe0c 100644
  
  namespace {
  uint32_t CanonicalVtxAttr(uint32_t attr) {
-@@ -41,7 +39,10 @@ bool ApiVtxArray(uint32_t attr, uint32_t& base, uint32_t& stride) {
+@@ -41,7 +40,10 @@ bool ApiVtxArray(uint32_t attr, uint32_t& base, uint32_t& stride) {
  // Vertex Descriptor
  // ============================================================================
  
@@ -7551,7 +7564,7 @@ index 3a8c43b..c14fe0c 100644
      GX_DEFER_CALL0(GX__ClearVtxDesc_8016dc34);
      bool changed = false;
      for(int i=0; i<26; ++i){
-@@ -55,6 +56,7 @@ extern "C" void GX__ClearVtxDesc_8016dc34() {
+@@ -55,6 +57,7 @@ extern "C" void GX__ClearVtxDesc_8016dc34() {
  PPC_NATIVE_OVERRIDE_VOID(8016dc34, GX__ClearVtxDesc_8016dc34, (), ());
  
  extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
@@ -7559,7 +7572,7 @@ index 3a8c43b..c14fe0c 100644
      GX_DEFER_CALL(GX__SetVtxDesc_8016d3a4, a, t);
      const uint32_t attr = CanonicalVtxAttr(a);
      if(attr>=26||attr==GX_VA_NULL) return;
-@@ -70,6 +72,7 @@ extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
+@@ -70,6 +73,7 @@ extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
  PPC_NATIVE_OVERRIDE_VOID(8016d3a4, GX__SetVtxDesc_8016d3a4, (uint32_t a, uint32_t t), (a, t));
  
  extern "C" void GX__SetVtxDescv_8016d608(uint32_t la) {
@@ -7567,7 +7580,17 @@ index 3a8c43b..c14fe0c 100644
      if(!la) return; uint32_t p=la;
      std::vector<std::array<uint32_t, 2>> list;
      while(true){
-@@ -312,7 +315,7 @@ void ServiceDeferredTimingDuringGxWork() {
+@@ -302,6 +306,9 @@ void ServiceDeferredTimingDuringGxWork() {
+             GuestInterruptCallbackContext interrupt;
+             VI_HLE_PollRetrace(interrupt.get());
+         }
++        // Audio DMA too: Excite Truck no longer waits for the graphics side in races, so a busy
++        // frame can go 20+ ms without an idle point, and the sound ran dry between frames.
++        Audio_HLE_PollDeferred();
+     } catch (...) {
+         g_inGxBeginOrFifo = false;
+         throw;
+@@ -312,7 +319,7 @@ void ServiceDeferredTimingDuringGxWork() {
  
  static void GxBeginImpl(uint32_t t, uint32_t vf, uint32_t nv);
  

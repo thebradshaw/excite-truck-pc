@@ -294,3 +294,9 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
 - 0.2.1 dropped to 8-10 fps on Chris's PC. Cause: the `WC_TRACE_IDX` check called `getenv` on every aurora index push (~14,000 per frame). That is cheap on Linux but takes tens of ms per frame on Windows. The setting is now read once. Other per-frame `getenv` calls were made static as well.
 - Vertex and storage buffers back to 8 MB (index stays 8 MB). The 16 MB ones ran Dawn's null device out of memory in the container.
 - Crash recovery: each queued A tap now takes two game frames instead of three, and up to 16 taps can queue.
+
+## 0.2.3 (2026-10-30)
+
+- Sound: audio DMA blocks are only delivered when the guest thread reaches a service point (idle loop, VI pacing, aurora waits). Since 0.2.0 the game no longer waits for the graphics side in races, so a busy frame could pass 20+ ms with no service point. The output queue swung between ~0 and ~130 ms (container: min 28 bytes), which sounds like crackle and dropouts. `ServiceDeferredTimingDuringGxWork` (runs at most every 1 ms from GXBegin) now also calls `Audio_HLE_PollDeferred`. Container: steady 333 blocks/s, queue 12-22 KB, never near empty.
+- Crash recovery: a tap presses 2 on the same frame when 2 was released the frame before. A release frame is only inserted when R/RT is holding 2.
+- Chris's 0.2.2 log showed one ~6 s stretch at ~110 ms/frame, with the game thread and the worker both slowed 3-4x and no graphics wait. Not reproduced in the container.
