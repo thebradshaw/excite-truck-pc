@@ -288,3 +288,9 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
 
 - Crash fix: 0.2.0 overflowed aurora's 2 MB index buffer ("ByteBuffer overflow"). Vertex and storage buffers are now 16 MB and the index buffer 8 MB. `WC_TRACE_IDX=1` prints the index high-water mark.
 - Sound fix: the audio speed-matching reacted too quickly and made the pitch wobble. It now averages the queue level slowly, ignores small errors (within 40% of the 90 ms target) and changes the rate by at most 0.5%. `WC_AUDIO_NO_RATE=1` turns it off.
+
+## 0.2.2 (2026-10-30)
+
+- 0.2.1 dropped to 8-10 fps on Chris's PC. Cause: the `WC_TRACE_IDX` check called `getenv` on every aurora index push (~14,000 per frame). That is cheap on Linux but takes tens of ms per frame on Windows. The setting is now read once. Other per-frame `getenv` calls were made static as well.
+- Vertex and storage buffers back to 8 MB (index stays 8 MB). The 16 MB ones ran Dawn's null device out of memory in the container.
+- Crash recovery: each queued A tap now takes two game frames instead of three, and up to 16 taps can queue.

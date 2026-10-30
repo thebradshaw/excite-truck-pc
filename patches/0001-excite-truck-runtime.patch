@@ -4809,7 +4809,7 @@ index 6ff3248..b845d85 100644
 +    int m_traceCalls = 0;
  };
 diff --git a/runtime/include/aurora_events.h b/runtime/include/aurora_events.h
-index 27e84ea..e2021ec 100644
+index 27e84ea..c7f071d 100644
 --- a/runtime/include/aurora_events.h
 +++ b/runtime/include/aurora_events.h
 @@ -1,4 +1,7 @@
@@ -4853,14 +4853,15 @@ index 27e84ea..e2021ec 100644
          bool begun = false;
          {
              PerfStats::WaitScope wait;
-@@ -151,7 +175,14 @@ inline bool BeginAuroraFrame() {
+@@ -151,7 +175,15 @@ inline bool BeginAuroraFrame() {
          if (!begun) {
              return false;
          }
 -        GxWorker::Submit([] { GxWorkerBeginFrame(); });
 +        // Race frames copy the arrays their draws read (gx_dl.cpp), which lets the game stop
 +        // waiting for aurora's FIFO processor at its draw-done (et_hooks.cpp).
-+        const bool snapshots = PipelineGxFrames() && std::getenv("WC_ET_DRAWDONE_FULL") == nullptr;
++        static const bool kDrawDoneFull = std::getenv("WC_ET_DRAWDONE_FULL") != nullptr;
++        const bool snapshots = PipelineGxFrames() && !kDrawDoneFull;
 +        g_etFrameSnapshots = snapshots;
 +        GxWorker::Submit([snapshots] {
 +            GxWorkerBeginFrame();
@@ -4869,7 +4870,7 @@ index 27e84ea..e2021ec 100644
          ApplyPendingMkwDynamicAspectSurface();
          return true;
      }
-@@ -167,8 +198,13 @@ inline bool BeginAuroraFrame() {
+@@ -167,8 +199,13 @@ inline bool BeginAuroraFrame() {
  // overlaps guest memory the worker may still read.
  inline void EndAuroraFrame() {
      if (GxWorker::ShouldDefer()) {
@@ -5439,10 +5440,10 @@ index 0000000..fa973b6
 +PPC_NATIVE_OVERRIDE_VOID(8F161D50, ET_MandatoryTutorialChallenges_80161d50, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
-index 0000000..d3b5b4c
+index 0000000..2d33e3b
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_input.cpp
-@@ -0,0 +1,524 @@
+@@ -0,0 +1,533 @@
 +// Excite Truck (REXE01): a virtual Wii Remote driven by an Xbox-style gamepad or the keyboard.
 +//
 +// Excite Truck only takes a sideways Wii Remote. Rather than emulate the remote's Bluetooth
@@ -5541,7 +5542,7 @@ index 0000000..d3b5b4c
 +
 +void AddTap()
 +{
-+    if (g_pendingTaps.load(std::memory_order_relaxed) < 8) {
++    if (g_pendingTaps.load(std::memory_order_relaxed) < 16) {
 +        g_pendingTaps.fetch_add(1, std::memory_order_relaxed);
 +    }
 +}
@@ -5784,7 +5785,14 @@ index 0000000..d3b5b4c
 +        }
 +        if (phase == Phase::Press) {
 +            if (frame != phaseFrame) {
++                // Start the next queued tap right away, so each tap takes two frames, not three.
 +                phase = Phase::Idle;
++                if (g_pendingTaps.load(std::memory_order_relaxed) > 0) {
++                    g_pendingTaps.fetch_sub(1, std::memory_order_relaxed);
++                    phase = Phase::Release;
++                    phaseFrame = frame;
++                    in.hold &= ~kWpad2;
++                }
 +            } else {
 +                in.hold |= kWpad2;
 +            }
@@ -5924,7 +5932,8 @@ index 0000000..d3b5b4c
 +        return;
 +    }
 +    ReportConnected(ctx);
-+    if (std::getenv("WC_TRACE_KPAD")) {
++    static const bool traceKpad = std::getenv("WC_TRACE_KPAD") != nullptr;
++    if (traceKpad) {
 +        static int lastFrame = -1, reads = 0;
 +        ++reads;
 +        if (g_gxFrameCount != lastFrame) {
@@ -5935,7 +5944,8 @@ index 0000000..d3b5b4c
 +
 +    const RemoteInput in = ReadInput();
 +    const uint32_t hold = in.hold;
-+    if (hold != g_previousHold && std::getenv("WC_TRACE_INPUT")) {
++    static const bool traceInput = std::getenv("WC_TRACE_INPUT") != nullptr;
++    if (hold != g_previousHold && traceInput) {
 +        RT_LOGF(RT_TAG_HLE, "ET remote hold=0x%04X steer=%.2f pitch=%.2f racing=%d\n", hold, in.steer,
 +                in.pitch, RaceRunning() ? 1 : 0);
 +    }
