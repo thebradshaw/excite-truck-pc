@@ -305,3 +305,4 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
 
 - Crash recovery: a crash plays in slow motion. The race time step at 0x8055EB14 drops to ~0.005-0.01, against 1/60 or 1/30 normally, with single frames up to ~0.02. `InCrashSlowMotion()` (et_input.cpp) enters below 0.012 and leaves after 15 frames in a row at ≥0.0165. During a crash the gas (R/RT, keyboard X/Enter) is ignored, so 2 follows A alone and every A tap is a clean press. This was Chris's suggestion. In the container, gas holding X drops out only during the crash windows. `WC_TRACE_CLOCK=1` logs the clock and step for every frame.
 - Menu video lines on the Xbox Ally (D3D12): not reproduced. The container (lavapipe) shows evenly spaced horizontal lines on the left blue menu panel. It is unclear whether those are the game's own design.
+- Select/View is the Wii A button in races (reset when reversing). Chris asked for this. In the menus it stays minus.

@@ -5440,10 +5440,10 @@ index 0000000..fa973b6
 +PPC_NATIVE_OVERRIDE_VOID(8F161D50, ET_MandatoryTutorialChallenges_80161d50, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
-index 0000000..5452f7b
+index 0000000..9e09af9
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_input.cpp
-@@ -0,0 +1,577 @@
+@@ -0,0 +1,579 @@
 +// Excite Truck (REXE01): a virtual Wii Remote driven by an Xbox-style gamepad or the keyboard.
 +//
 +// Excite Truck only takes a sideways Wii Remote. Rather than emulate the remote's Bluetooth
@@ -5746,7 +5746,9 @@ index 0000000..5452f7b
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_LEFT)) in.hold |= kSidewaysLeft;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) in.hold |= kSidewaysRight;
 +        if (button(SDL_GAMEPAD_BUTTON_START)) in.hold |= kWpadPlus;
-+        if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= kWpadMinus;
++        // Select/View: in a race it is the Wii A button ("Press A to reset" when reversing),
++        // like Y. In the menus it stays the Wii minus button.
++        if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= racing ? kWpadA : kWpadMinus;
 +        if (racing) {
 +            const bool aDown = button(SDL_GAMEPAD_BUTTON_SOUTH);
 +            if (aDown) {
