@@ -5440,10 +5440,10 @@ index 0000000..fa973b6
 +PPC_NATIVE_OVERRIDE_VOID(8F161D50, ET_MandatoryTutorialChallenges_80161d50, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excite_truck/et_input.cpp b/runtime/src/hle/excite_truck/et_input.cpp
 new file mode 100644
-index 0000000..32296de
+index 0000000..5452f7b
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_input.cpp
-@@ -0,0 +1,541 @@
+@@ -0,0 +1,577 @@
 +// Excite Truck (REXE01): a virtual Wii Remote driven by an Xbox-style gamepad or the keyboard.
 +//
 +// Excite Truck only takes a sideways Wii Remote. Rather than emulate the remote's Bluetooth
@@ -5660,6 +5660,14 @@ index 0000000..32296de
 +    static auto lastChange = std::chrono::steady_clock::now();
 +    const float clock = ReadF32(kRaceClock);
 +    const auto now = std::chrono::steady_clock::now();
++    static const bool traceClock = std::getenv("WC_TRACE_CLOCK") != nullptr;
++    if (traceClock) {
++        static int lastF = -1;
++        if (g_gxFrameCount != lastF) {
++            lastF = g_gxFrameCount;
++            std::fprintf(stderr, "[clk] f%d clock %.4f step %.4f\n", lastF, clock, ReadF32(kRaceTimeStep));
++        }
++    }
 +    if (clock != lastClock) {
 +        lastClock = clock;
 +        lastChange = now;
@@ -5686,6 +5694,33 @@ index 0000000..32296de
 +    return held;
 +}
 +
++// A crash plays in slow motion: the time step drops to ~0.005-0.01 (normally 1/60 or more),
++// with single frames up to ~0.02. Enter below 0.012, leave after 15 frames in a row at normal
++// speed. During it the gas (R/RT, X) is ignored, so 2 follows A alone and every A tap is a
++// clean press (Chris's idea).
++bool InCrashSlowMotion()
++{
++    static bool crash = false;
++    static int normalRun = 0;
++    static int lastFrame = -1;
++    if (g_gxFrameCount == lastFrame) {
++        return crash;
++    }
++    lastFrame = g_gxFrameCount;
++    const float step = ReadF32(kRaceTimeStep);
++    if (!crash) {
++        if (step > 0.0f && step < 0.012f) {
++            crash = true;
++            normalRun = 0;
++        }
++    } else if (step >= 0.0165f || step <= 0.0f) {
++        if (++normalRun >= 15) crash = false;
++    } else {
++        normalRun = 0;
++    }
++    return crash;
++}
++
 +RemoteInput ReadInput()
 +{
 +    static const bool watching = SDL_AddEventWatch(CountBoostTaps, nullptr);
@@ -5693,12 +5728,13 @@ index 0000000..32296de
 +    StartXInputTapThread();
 +    RemoteInput in;
 +    const bool racing = RaceRunning();
++    const bool crashSlowMotion = racing && InCrashSlowMotion();
 +    const bool invertAir = RuntimeConfigFile::InvertAirControl(true);
 +
 +    if (SDL_Gamepad* pad = ActiveGamepad()) {
 +        auto button = [pad](SDL_GamepadButton b) { return SDL_GetGamepadButton(pad, b); };
 +        const bool rightTrigger = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000;
-+        if (rightTrigger || button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) {
++        if (!crashSlowMotion && (rightTrigger || button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER))) {
 +            in.hold |= kWpad2;
 +        }
 +        if (button(SDL_GAMEPAD_BUTTON_NORTH)) in.hold |= kWpadA; // "Press A to reset"
@@ -5740,7 +5776,7 @@ index 0000000..32296de
 +    const bool* keys = SDL_GetKeyboardState(&keyCount);
 +    if (keys != nullptr) {
 +        auto key = [keys, keyCount](SDL_Scancode sc) { return static_cast<int>(sc) < keyCount && keys[sc]; };
-+        if (key(SDL_SCANCODE_X) || key(SDL_SCANCODE_RETURN)) in.hold |= kWpad2;
++        if (!crashSlowMotion && (key(SDL_SCANCODE_X) || key(SDL_SCANCODE_RETURN))) in.hold |= kWpad2;
 +        if (key(SDL_SCANCODE_Z) || key(SDL_SCANCODE_BACKSPACE)) in.hold |= kWpad1;
 +        if (key(SDL_SCANCODE_C)) {
 +            in.hold |= kSidewaysUp;

@@ -300,3 +300,8 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
 - Sound: audio DMA blocks are only delivered when the guest thread reaches a service point (idle loop, VI pacing, aurora waits). Since 0.2.0 the game no longer waits for the graphics side in races, so a busy frame could pass 20+ ms with no service point. The output queue swung between ~0 and ~130 ms (container: min 28 bytes), which sounds like crackle and dropouts. `ServiceDeferredTimingDuringGxWork` (runs at most every 1 ms from GXBegin) now also calls `Audio_HLE_PollDeferred`. Container: steady 333 blocks/s, queue 12-22 KB, never near empty.
 - Crash recovery: a tap presses 2 on the same frame when 2 was released the frame before. A release frame is only inserted when R/RT is holding 2.
 - Chris's 0.2.2 log showed one ~6 s stretch at ~110 ms/frame, with the game thread and the worker both slowed 3-4x and no graphics wait. Not reproduced in the container.
+
+## 0.2.4 (2026-10-30)
+
+- Crash recovery: a crash plays in slow motion. The race time step at 0x8055EB14 drops to ~0.005-0.01, against 1/60 or 1/30 normally, with single frames up to ~0.02. `InCrashSlowMotion()` (et_input.cpp) enters below 0.012 and leaves after 15 frames in a row at ≥0.0165. During a crash the gas (R/RT, keyboard X/Enter) is ignored, so 2 follows A alone and every A tap is a clean press. This was Chris's suggestion. In the container, gas holding X drops out only during the crash windows. `WC_TRACE_CLOCK=1` logs the clock and step for every frame.
+- Menu video lines on the Xbox Ally (D3D12): not reproduced. The container (lavapipe) shows evenly spaced horizontal lines on the left blue menu panel. It is unclear whether those are the game's own design.
