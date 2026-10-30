@@ -101,3 +101,44 @@ index afe6328..67b1f0f 100644
  
  bool sFrameActive = false;
  uint32_t sPendingDraws = 0;
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index e2e481e..269d09a 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1497,11 +1497,17 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+   };
+ 
+   // Texture coordinates in GX's S17.7 texel space.
++  // Indirect texturing works on 1/128-texel fixed-point coordinates. Truncating an interpolated
++  // float lands one unit low on some GPUs when the exact value is a whole number, and sampling
++  // at an exact texel edge can pick either neighbour. Both showed up as thin lines across the
++  // Bink menu video (which shifts pixels through 128x4 / 64x4 indirect tables) on AMD GPUs.
++  // A small bias before truncating, and sampling half a fixed unit inside the texel, give the
++  // texel GX's floor() would pick.
+   std::array<bool, MaxTexCoord> emittedFixedTexCoord{};
+   const auto fixed_texcoord_name = [&](u32 texCoordId) {
+     if (!emittedFixedTexCoord[texCoordId]) {
+       fragmentFnPre += fmt::format(
+-          "\n    let tex{0}_fixed_uv = vec2i(tex{0}_uv * ubuf.texcoord_scale[{0}].xy * 128.0);", texCoordId);
++          "\n    let tex{0}_fixed_uv = vec2i(tex{0}_uv * ubuf.texcoord_scale[{0}].xy * 128.0 + 0.125);", texCoordId);
+       emittedFixedTexCoord[texCoordId] = true;
+     }
+     return fmt::format("tex{}_fixed_uv", texCoordId);
+@@ -1520,7 +1526,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         "\n    // Indirect stage {0}"
+         "\n    let ind{0}_sample_fixed = {2} >> vec2u({3}u, {4}u);"
+         "\n    var t_IndTexCoord{0} = round(255.0 * textureSampleBias(tex{1}, tex{1}_samp, "
+-        "vec2f(ind{0}_sample_fixed) / (ubuf.tex{1}_size_bias.xy * 128.0), ubuf.tex{1}_size_bias.z).abg);",
++        "(vec2f(ind{0}_sample_fixed) + 0.5) / (ubuf.tex{1}_size_bias.xy * 128.0), ubuf.tex{1}_size_bias.z).abg);",
+         i, texMapId, fixedUv, ind_scale_shift(indStage.scaleS), ind_scale_shift(indStage.scaleT));
+   }
+ 
+@@ -1678,7 +1684,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+       fragmentFnPre += "\n    t_TexCoord = (t_TexCoord << vec2u(8u)) >> vec2u(8u);";
+ 
+       if (needsTextureSample && hasBaseTexture) {
+-        fragmentFnPre += fmt::format("\n    var ind{0}_uv = vec2f(t_TexCoord) / (ubuf.tex{1}_size_bias.xy * 128.0);",
++        fragmentFnPre += fmt::format("\n    var ind{0}_uv = (vec2f(t_TexCoord) + 0.5) / (ubuf.tex{1}_size_bias.xy * 128.0);",
+                                      i, underlying(stage.texMapId));
+         uvIn = fmt::format("ind{0}_uv", i);
+       }

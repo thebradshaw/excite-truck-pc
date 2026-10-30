@@ -7098,10 +7098,20 @@ index 0baaa0f..50a4fa3 100644
 -GX_FATAL_STUB(80173df8, "GX__ClearGPMetric_80173df8") PPC_NATIVE_OVERRIDE_VOID(80173df8, gx_stub_80173df8, (CpuContext* ctx), (ctx));
 +GX_NOOP_STUB(80173df8, "GX__ClearGPMetric_80173df8") PPC_NATIVE_OVERRIDE_VOID(80173df8, gx_stub_80173df8, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/gx/gx_fifo.cpp b/runtime/src/hle/gx/gx_fifo.cpp
-index 108e4fd..a587ab2 100644
+index 108e4fd..13ede8e 100644
 --- a/runtime/src/hle/gx/gx_fifo.cpp
 +++ b/runtime/src/hle/gx/gx_fifo.cpp
-@@ -439,6 +439,7 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
+@@ -234,6 +234,9 @@ static bool SubmitAttributeReadsFloatComps(GXAttr attr, const VtxAttrFmt& fmt) {
+ }
+ 
+ void SubmitAttribute(GXAttr attr, float* comps, const VtxAttrFmt& fmt, const u32* rawComps) {
++    if (attr == GX_VA_POS || attr == GX_VA_TEX0) {
++        GXT("[gxt]   attr%d %.3f %.3f %.3f\n", int(attr), comps[0], comps[1], fmt.cnt == GX_POS_XY && attr == GX_VA_POS ? 0.0f : (attr == GX_VA_POS ? comps[2] : 0.0f));
++    }
+     auto r8 = [rawComps](int idx) { return static_cast<u8>(rawComps[idx]); };
+     auto rs8 = [rawComps](int idx) { return static_cast<s8>(rawComps[idx]); };
+     auto r16 = [rawComps](int idx) { return static_cast<u16>(rawComps[idx]); };
+@@ -439,6 +442,7 @@ void HleFifoWrite(u32 val, uint32_t sizeBytes) {
          if (cmd == GX_LOAD_BP_REG_CMD) {
              if (g_hleGxState.fifoByteCount < 5) break;
              const uint32_t bpWord = ReadBE32(data + 1);
@@ -7109,7 +7119,7 @@ index 108e4fd..a587ab2 100644
              GXApplyBPReg(static_cast<uint8_t>(bpWord >> 24), bpWord & 0x00FFFFFFu);
              if (!consumeBytes(5, sink)) break;
              continue;
-@@ -706,6 +707,7 @@ static uint32_t ApplyFifoPacketsDirect(const uint8_t* data, uint32_t sizeBytes)
+@@ -706,6 +710,7 @@ static uint32_t ApplyFifoPacketsDirect(const uint8_t* data, uint32_t sizeBytes)
          if (cmd == GX_LOAD_BP_REG_CMD) {
              if (avail < 5u) break;
              const uint32_t bpWord = ReadBE32(packet + 1);
