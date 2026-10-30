@@ -7540,10 +7540,112 @@ index 57ab64b..379b98e 100644
      if (!TevStageOk(s) || !TevSwapOk(rs) || !TevSwapOk(ts)) return;
      GXSetTevSwapMode((GXTevStageID)s, (GXTevSwapSel)rs, (GXTevSwapSel)ts);
 diff --git a/runtime/src/hle/gx/gx_texture.cpp b/runtime/src/hle/gx/gx_texture.cpp
-index 0f79533..8a1bb3d 100644
+index 0f79533..b644a42 100644
 --- a/runtime/src/hle/gx/gx_texture.cpp
 +++ b/runtime/src/hle/gx/gx_texture.cpp
-@@ -681,6 +681,11 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+@@ -3,6 +3,12 @@
+ #include "runtime_log.h"
+ 
+ #include <algorithm>
++#include <unordered_map>
++#include <cstring>
++#include <vector>
++#include <mutex>
++#include <memory>
++#include <array>
+ #include <cstdlib>
+ 
+ // Helper to write GXTexObj structure to guest memory in SDK format
+@@ -493,6 +499,70 @@ static void BindUnloadableTexturePlaceholder(uint32_t tid) {
+     GXLoadTexObj(&s_placeholder, (GXTexMapID)tid);
+ }
+ 
++// Menu textures the CPU rewrites every frame (the Bink video on the title screen and menus) are
++// read by aurora some time after GXLoadTexObj returns. By then the game may already be decoding the
++// next video frame into the same buffer, which showed up as thin horizontal lines on some PCs. So
++// outside races a texture whose data changed is copied at load time, and the worker hands aurora
++// the copy. Copies live for three frames, longer than aurora takes to read them.
++namespace EtTexSnapshots {
++thread_local uint32_t t_overrideAddr = 0;
++thread_local const void* t_overridePtr = nullptr;
++std::mutex g_mutex;
++// Only buffers rewritten in at least two different frames (video frames) are copied; a texture
++// uploaded once keeps using guest memory as before. Each video buffer gets three host copies used
++// in turn, so a pointer aurora still holds stays valid (and never freed) while newer frames are
++// written to the other two.
++struct Entry {
++    int lastFrame = -1;
++    int frames = 0;
++    uint32_t capacity = 0;
++    unsigned next = 0;
++    std::array<std::unique_ptr<uint8_t[]>, 3> bufs;
++};
++std::unordered_map<uint32_t, Entry> g_entries;
++std::vector<std::unique_ptr<uint8_t[]>> g_retired;
++
++const uint8_t* Copy(uint32_t addr, const void* src, uint32_t bytes) {
++    std::lock_guard<std::mutex> lock(g_mutex);
++    Entry& e = g_entries[addr];
++    if (e.lastFrame == g_gxFrameCount) {
++        // Second load in the same frame: reuse the copy made for this frame.
++        return e.frames >= 2 && e.capacity >= bytes ? e.bufs[(e.next + 2u) % 3u].get() : nullptr;
++    }
++    e.lastFrame = g_gxFrameCount;
++    if (++e.frames < 2) {
++        return nullptr;
++    }
++    if (bytes > e.capacity) {
++        RT_LOGF(RT_TAG_GX, "copying video texture 0x%08X (%u bytes) at each load\n", addr, bytes);
++        for (auto& b : e.bufs) {
++            if (b) g_retired.push_back(std::move(b));
++            b.reset(new uint8_t[bytes]);
++        }
++        e.capacity = bytes;
++    }
++    uint8_t* dst = e.bufs[e.next % 3u].get();
++    e.next = (e.next + 1u) % 3u;
++    std::memcpy(dst, src, bytes);
++    return dst;
++}
++
++struct Scope {
++    Scope(uint32_t addr, const void* ptr) { t_overrideAddr = addr; t_overridePtr = ptr; }
++    ~Scope() { t_overrideAddr = 0; t_overridePtr = nullptr; }
++};
++} // namespace EtTexSnapshots
++
++bool EtRaceRunningForGx();
++extern "C" int g_gxFrameCount;
++
++static void* TexDataHostPtr(uint32_t addr, uint32_t size) {
++    if (EtTexSnapshots::t_overridePtr != nullptr && EtTexSnapshots::t_overrideAddr == addr) {
++        return const_cast<void*>(EtTexSnapshots::t_overridePtr);
++    }
++    return GuestToHostPtr(addr, size);
++}
++
+ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+     static uint32_t s_invalidMetaLogCount = 0;
+     static uint32_t s_invalidTidLogCount = 0;
+@@ -615,7 +685,7 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+             if (!obj) {
+                 obj = CreateHostTexObj(oa);
+             }
+-            void* dp = GuestToHostPtr(meta.dataAddr, size);
++            void* dp = TexDataHostPtr(meta.dataAddr, size);
+             if (dp) {
+                 if (isPalette) {
+                     GXInitTexObjCI(obj, dp, meta.width, meta.height, (GXCITexFmt)meta.format,
+@@ -639,7 +709,7 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+             tlutChanged = true;
+         }
+ 
+-        const void* dp = GuestToHostPtr(meta.dataAddr, size);
++        const void* dp = TexDataHostPtr(meta.dataAddr, size);
+         if (dp && meta.needsUpload) {
+             GXInitTexObjData(obj, dp);
+             meta.needsUpload = false;
+@@ -681,6 +751,11 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
  }
  
  extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
@@ -7555,7 +7657,37 @@ index 0f79533..8a1bb3d 100644
      if (GxWorker::ShouldDefer()) {
          // The CPU-side SDK reads the GXTexObj at call time; the texture data itself is read later.
          std::optional<TexObjBytes> bytes;
-@@ -748,7 +753,7 @@ PPC_NATIVE_OVERRIDE_VOID(80170cbc, GX__GetTexObjLODAll_80170cbc, (uint32_t oa, u
+@@ -688,7 +763,28 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+             bytes = CaptureTexObjBytes(oa);
+         } catch (...) {
+         }
+-        GxWorker::Submit([oa, tid, bytes] {
++        uint32_t snapAddr = 0;
++        const void* snapPtr = nullptr;
++        if (!EtRaceRunningForGx()) {
++            try {
++                std::lock_guard<std::mutex> guard(g_texObjMutex);
++                TexObjMeta m;
++                if (TryGetOrExtractTexObjMeta(oa, m) && m.needsUpload && m.dataAddr != 0 &&
++                    IsReasonableTextureDimensions(m.width, m.height) && IsAuroraLoadableTexFormat(m.format)) {
++                    const uint8_t maxLod = m.mipmap ? static_cast<uint8_t>(ComputeMaxMipLevel(m.width, m.height)) : 0u;
++                    const uint32_t size = GXGetTexBufferSize(m.width, m.height, m.format, (GXBool)m.mipmap, maxLod);
++                    if (size != 0 && size <= (4u << 20) && Memory::Contains(m.dataAddr, size)) {
++                        if (const void* src = GuestToHostPtr(m.dataAddr, size)) {
++                            snapPtr = EtTexSnapshots::Copy(m.dataAddr, src, size);
++                            snapAddr = snapPtr ? m.dataAddr : 0u;
++                        }
++                    }
++                }
++            } catch (...) {
++            }
++        }
++        GxWorker::Submit([oa, tid, bytes, snapAddr, snapPtr] {
++            EtTexSnapshots::Scope texData(snapAddr, snapPtr);
+             if (bytes) {
+                 TexObjSnapshotScope snapshot(oa, *bytes);
+                 LoadTexObjImpl(oa, tid);
+@@ -748,7 +844,7 @@ PPC_NATIVE_OVERRIDE_VOID(80170cbc, GX__GetTexObjLODAll_80170cbc, (uint32_t oa, u
  // TLUT (Texture Lookup Table)
  // ============================================================================
  
@@ -7564,7 +7696,7 @@ index 0f79533..8a1bb3d 100644
      GX_DEFER_CALL(GX__InitTlutObj_80170f80, oa, da, f, e);
      std::lock_guard<std::mutex> guard(g_tlutObjMutex); GXTlutObj* obj = CreateHostTlutObj(oa); TlutObjMeta& meta = GetTlutObjMeta(oa);
      meta.dataAddr=CanonicalizeGxMainRamAddress(da); meta.format=f; meta.entries=(u16)e; meta.dirty=false;
-@@ -762,7 +767,7 @@ PPC_NATIVE_OVERRIDE_VOID(80170f80, GX__InitTlutObj_80170f80, (uint32_t oa, uint3
+@@ -762,7 +858,7 @@ PPC_NATIVE_OVERRIDE_VOID(80170f80, GX__InitTlutObj_80170f80, (uint32_t oa, uint3
  
  static void LoadTlutImpl(uint32_t oa, uint32_t tl) { std::lock_guard<std::mutex> guard(g_tlutObjMutex); if (tl >= kMaxTluts) { RT_LOGF(RT_TAG_GX, "GXLoadTlut: invalid TLUT index %u (oa=0x%08X)\n", tl, oa); return; } auto metaIt = g_TlutObjMeta.find(oa); if (metaIt != g_TlutObjMeta.end() && metaIt->second.dirty) { if (ValidateTlutData(oa, metaIt->second)) { GXTlutObj* rebuild = CreateHostTlutObj(oa); GXInitTlutObj(rebuild, GuestToHostPtr(metaIt->second.dataAddr), (GXTlutFmt)metaIt->second.format, metaIt->second.entries); MarkHostTlutObjConstructed(oa); } metaIt->second.dirty = false; } GXTlutObj* obj = GetHostTlutObj(oa); GXLoadTlut(obj, (GXTlut)tl); }
  
@@ -7573,6 +7705,33 @@ index 0f79533..8a1bb3d 100644
      GxWorker::Run([oa, tl] { LoadTlutImpl(oa, tl); });
      try { uint32_t gd = Memory::Read32(kGXDataPtrAddr); if (gd) Memory::Write16(gd + 2, 0); } catch (...) {}
  }
+diff --git a/runtime/src/hle/gx/gx_transform.cpp b/runtime/src/hle/gx/gx_transform.cpp
+index 54e15fa..e49e998 100644
+--- a/runtime/src/hle/gx/gx_transform.cpp
++++ b/runtime/src/hle/gx/gx_transform.cpp
+@@ -39,12 +39,14 @@ namespace {
+ // exactly once inside gx::map_logical_viewport/map_logical_scissor. A prior VI origin/scale
+ // transform double-transformed menu viewports and broke 640x480 overscan, so it was removed.
+ extern "C" void GX__SetViewportJitter_80173378(float l, float t, float w, float h, float nz, float fz, uint32_t f) {
++    GXT("[gxt] viewportj %.2f %.2f %.2f %.2f %.4f %.4f f%u\n", l, t, w, h, nz, fz, f);
+     g_viewportState[0]=l; g_viewportState[1]=t; g_viewportState[2]=w; g_viewportState[3]=h; g_viewportState[4]=nz; g_viewportState[5]=fz;
+     GxWorker::Run([=] { GXSetViewportJitter(l, t, w, h, nz, fz, f); });
+ }
+ PPC_NATIVE_OVERRIDE_VOID(80173378, GX__SetViewportJitter_80173378, (float l, float t, float w, float h, float nz, float fz, uint32_t f), (l, t, w, h, nz, fz, f));
+ 
+ extern "C" void GX__SetViewport_801733b4(float l, float t, float w, float h, float nz, float fz) {
++    GXT("[gxt] viewport %.2f %.2f %.2f %.2f %.4f %.4f\n", l, t, w, h, nz, fz);
+     g_viewportState[0]=l; g_viewportState[1]=t; g_viewportState[2]=w; g_viewportState[3]=h; g_viewportState[4]=nz; g_viewportState[5]=fz;
+     GxWorker::Run([=] { GXSetViewport(l, t, w, h, nz, fz); });
+ }
+@@ -93,6 +95,7 @@ PPC_NATIVE_OVERRIDE_VOID(801734e0, GX__SetScissorBoxOffset_801734e0, (int32_t xo
+ // ============================================================================
+ 
+ extern "C" void GX__SetScissor_80173430(uint32_t l, uint32_t t, uint32_t w, uint32_t h) {
++    GXT("[gxt] scissor %u %u %u %u\n", l, t, w, h);
+     g_scissorLeft=(int32_t)l; g_scissorTop=(int32_t)t; g_scissorWidth=(int32_t)w; g_scissorHeight=(int32_t)h;
+     try { uint32_t gd=Memory::Read32(kGXDataPtrAddr); if(gd){
+         uint32_t r148=Memory::Read32(gd+0x148), r14c=Memory::Read32(gd+0x14c);
 diff --git a/runtime/src/hle/gx/gx_vertex.cpp b/runtime/src/hle/gx/gx_vertex.cpp
 index 3a8c43b..285f1c5 100644
 --- a/runtime/src/hle/gx/gx_vertex.cpp
