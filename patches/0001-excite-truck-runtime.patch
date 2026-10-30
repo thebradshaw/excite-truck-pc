@@ -4792,16 +4792,17 @@ index 809f22e..97758a7 100644
      # Non-Windows TLS (runtime/src/hle/net/network_ssl.cpp's mbed TLS path) needs a trusted root
      # CA bundle to verify server certificates against - Windows gets this for free from the OS via
 diff --git a/runtime/include/audio_backend.h b/runtime/include/audio_backend.h
-index 6ff3248..0fd04a4 100644
+index 6ff3248..b845d85 100644
 --- a/runtime/include/audio_backend.h
 +++ b/runtime/include/audio_backend.h
-@@ -48,4 +48,11 @@ private:
+@@ -48,4 +48,12 @@ private:
      bool m_silenced = false;
      bool m_reportedDroppedBlock = false;
      std::vector<int16_t> m_convertBuffer;
 +    std::vector<uint8_t> m_silence;
 +    bool m_hadAudio = false;
 +    double m_rate = 1.0;
++    double m_smoothQueued = 0.0;
 +    double m_appliedRate = 1.0;
 +    bool m_fadeInNext = false;
 +    int m_drops = 0;
@@ -5085,7 +5086,7 @@ index e339244..f4bd5bc 100644
      if (RegistryFrozen().load(std::memory_order_acquire)) {
          RT_LOG(RT_TAG_RUNTIME) << "ERROR: Attempted to register function after registry was finalized: 0x"
 diff --git a/runtime/src/audio_backend.cpp b/runtime/src/audio_backend.cpp
-index fcb4fde..9442067 100644
+index fcb4fde..f5df903 100644
 --- a/runtime/src/audio_backend.cpp
 +++ b/runtime/src/audio_backend.cpp
 @@ -6,6 +6,9 @@
@@ -5109,7 +5110,7 @@ index fcb4fde..9442067 100644
  
      const uint64_t bytesPerSecond = static_cast<uint64_t>(m_spec.freq) *
                                      static_cast<uint64_t>(m_spec.channels) *
-@@ -127,12 +132,55 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+@@ -127,12 +132,59 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
          return true;
      }
      const uint32_t maxQueued = QueueLimitBytesLocked();
@@ -5140,12 +5141,16 @@ index fcb4fde..9442067 100644
 +    m_hadAudio = true;
 +    // The game makes audio by the CPU clock and the sound card plays it by its own clock, so the
 +    // queue slowly fills up (and blocks get dropped: clicks) or runs dry (crackle). Nudge the
-+    // playback speed by up to 2% to hold the queue near 70 ms. Not audible as a pitch change.
++    // playback speed by at most 0.5% to keep the queue around 90 ms. The game hands over audio in
++    // bursts, so the queue level is averaged over about a third of a second and small errors are
++    // ignored; reacting to every burst (as the first version did) wobbled the pitch.
 +    {
 +        const double bytesPerMs = static_cast<double>(m_spec.freq) * m_spec.channels * sizeof(int16_t) / 1000.0;
-+        const double error = (static_cast<double>(queued) - 70.0 * bytesPerMs) / (70.0 * bytesPerMs);
-+        const double target = 1.0 + std::clamp(error * 0.02, -0.02, 0.02);
-+        m_rate += (target - m_rate) * 0.05;
++        m_smoothQueued += (static_cast<double>(queued) - m_smoothQueued) * 0.01;
++        const double targetBytes = 90.0 * bytesPerMs;
++        const double error = (m_smoothQueued - targetBytes) / targetBytes;
++        const double target = std::fabs(error) < 0.4 ? 1.0 : 1.0 + std::clamp(error * 0.005, -0.005, 0.005);
++        m_rate += (target - m_rate) * 0.002;
 +        // Only hand SDL a new ratio in 0.1% steps: every change restarts its resampler, and
 +        // changing it on every block (hundreds of times a second) is itself audible as static.
 +        static const bool noRate = std::getenv("WC_AUDIO_NO_RATE") != nullptr;
@@ -5165,7 +5170,7 @@ index fcb4fde..9442067 100644
          if (!m_reportedDroppedBlock) {
              m_reportedDroppedBlock = true;
              RT_LOG(RT_TAG_AUDIO) << "output queue full (" << queued << "/" << maxQueued
-@@ -178,6 +226,17 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
+@@ -178,6 +230,17 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
      if (!QueueHasCapacityLocked(lenBytes)) {
          return true;
      }

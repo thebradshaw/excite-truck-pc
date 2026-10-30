@@ -283,3 +283,8 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
   drained the processor. Textures are still read from guest memory by pointer.
 - Null-GPU container test at the start of Canada: ~18.5 ms per frame vs 22-29 ms with
   `WC_ET_DRAWDONE_FULL=1` (the old behaviour). Screenshots while driving and crashing look right.
+
+## 0.2.1 (2026-10-30)
+
+- Crash fix: 0.2.0 overflowed aurora's 2 MB index buffer ("ByteBuffer overflow"). Vertex and storage buffers are now 16 MB and the index buffer 8 MB. `WC_TRACE_IDX=1` prints the index high-water mark.
+- Sound fix: the audio speed-matching reacted too quickly and made the pitch wobble. It now averages the queue level slowly, ignores small errors (within 40% of the 90 ms target) and changes the rate by at most 0.5%. `WC_AUDIO_NO_RATE=1` turns it off.
