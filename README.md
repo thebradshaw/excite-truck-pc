@@ -28,6 +28,12 @@ it answers the "press 2" boost after a crash, even while R is held. Y (and Selec
 
 In menus and the pause menu: A selects, B goes back, and the left stick or D-pad moves.
 
+The on-screen prompts show Xbox buttons instead of the Wii Remote's: the menus' "1 Back / 2 OK"
+read B and A, "Press 2 to Start" reads A, + is Menu, - is View, and the replay controls match.
+To get the Wii Remote prompts back, untick "Xbox button prompts" in F10 under Controllers (or set
+`xbox_prompts = false` under `[excite_truck]` in `UserData/Config.toml`). The tutorial's photos of a
+Wii Remote are not replaced yet.
+
 New profiles skip the tutorial that the game normally forces; it is still in the main menu.
 
 The game opens borderless full screen at your monitor's resolution (1080p on a 1080p screen).
