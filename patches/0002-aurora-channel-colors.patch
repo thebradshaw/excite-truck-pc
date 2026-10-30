@@ -101,11 +101,74 @@ index afe6328..67b1f0f 100644
  
  bool sFrameActive = false;
  uint32_t sPendingDraws = 0;
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index e373bf0..f69fa1e 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -612,6 +612,23 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+     }
+   }
+   config.shaderConfig.numIndStages = g_gxState.numIndStages;
++  {
++    bool anyIndirect = false;
++    bool allNearest = true;
++    for (u32 i = 0; i < config.shaderConfig.tevStageCount; ++i) {
++      const auto& stage = config.shaderConfig.tevStages[i];
++      if (stage.indTexMtxId == GX_ITM_OFF || stage.indTexStage >= g_gxState.numIndStages) {
++        continue;
++      }
++      anyIndirect = true;
++      const auto map = underlying(stage.texMapId);
++      if (stage.texMapId == GX_TEXMAP_NULL || map >= MaxTextures ||
++          g_gxState.loadedTextures[map].mag_filter() != GX_NEAR) {
++        allNearest = false;
++      }
++    }
++    config.shaderConfig.indNearestBase = anyIndirect && allNearest;
++  }
+   for (u8 i = 0; i < MaxColorChannels; ++i) {
+     const auto& cc = g_gxState.colorChannelConfig[i];
+     if (cc.lightingEnabled) {
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 02be26a..f6e7719 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -521,7 +521,9 @@ struct ShaderConfig {
+   u8 zTextureOp : 2 = GX_ZT_DISABLE;
+   u8 zTextureFormat : 2 = 0;
+   u8 forceAlphaOne : 1 = false;
+-  u8 pad2 : 3 = 0;
++  // Every indirect TEV stage samples a nearest-filtered texture (see shader.cpp).
++  u8 indNearestBase : 1 = false;
++  u8 pad2 : 2 = 0;
+   std::array<AttrConfig, MaxVtxAttr> attrs;
+   std::array<TevSwap, MaxTevSwap> tevSwapTable;
+   std::array<TevStage, MaxTevStages> tevStages;
+diff --git a/lib/gx/regs.cpp b/lib/gx/regs.cpp
+index e709ab6..a516d81 100644
+--- a/lib/gx/regs.cpp
++++ b/lib/gx/regs.cpp
+@@ -504,6 +504,9 @@ void bp_tex(u8 reg, u32 value) noexcept {
+   auto& slot = g_gxState.loadedTextures[texMapId];
+   switch (kind) {
+   case 0: // Mode0
++    if (((slot.mode0 ^ value) >> 4) & 1) {
++      g_gxState.dirty |= DirtyPipeline; // mag filter feeds ShaderConfig::indNearestBase
++    }
+     slot.mode0 = value;
+     break;
+   case 1: // Mode1
 diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
-index e2e481e..269d09a 100644
+index e2e481e..5e4ccb3 100644
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
-@@ -1497,11 +1497,17 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+@@ -1,3 +1,5 @@
++#include <cstdio>
++#include <cstdlib>
+ #include "../gfx/hash.hpp"
+ #include "../gfx/types.hpp"
+ 
+@@ -1497,11 +1499,17 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
    };
  
    // Texture coordinates in GX's S17.7 texel space.
@@ -124,7 +187,47 @@ index e2e481e..269d09a 100644
        emittedFixedTexCoord[texCoordId] = true;
      }
      return fmt::format("tex{}_fixed_uv", texCoordId);
-@@ -1520,7 +1526,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+@@ -1515,12 +1523,46 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+     const auto& indStage = config.indStages[i];
+     const u32 texCoordId = underlying(indStage.texCoordId);
+     const u32 texMapId = underlying(indStage.texMapId);
+-    const auto fixedUv = fixed_texcoord_name(texCoordId);
++    std::string fixedUv = fixed_texcoord_name(texCoordId);
++    // The Bink menu video turns its linearly decoded planes into GX tiles by shifting every
++    // pixel through 128x4 / 64x4 offset tables, indexed by a second texcoord that is the main
++    // one divided by 8. GX evaluates both at the pixel centre in fixed point, so they always
++    // agree. Upscaled, fragments land right on a table edge, the two separately interpolated
++    // coordinates round to different sides, and the pixel fetches a texel from the wrong tile:
++    // thin lines across the video. When the shifted textures are point-sampled, look the table
++    // up at the centre of the texel the main coordinate selects, mapped through the screen-space
++    // derivatives of both coordinates. The main texel is unchanged, and the table entry is then
++    // always the one that texel belongs to.
++    s32 baseCoord = -1;
++    if (config.indNearestBase) {
++      for (u32 t = 0; t < config.tevStageCount; ++t) {
++        const auto& ts = config.tevStages[t];
++        if (ts.indTexMtxId != GX_ITM_OFF && underlying(ts.indTexStage) == static_cast<u32>(i) &&
++            ts.texCoordId != GX_TEXCOORD_NULL) {
++          baseCoord = static_cast<s32>(underlying(ts.texCoordId));
++          break;
++        }
++      }
++    }
++    if (baseCoord >= 0) {
++      fragmentFnPre += fmt::format(
++          "\n    let indlk{0}_p0 = tex{1}_uv * ubuf.texcoord_scale[{1}].xy;"
++          "\n    let indlk{0}_p1 = tex{2}_uv * ubuf.texcoord_scale[{2}].xy;"
++          "\n    let indlk{0}_j0 = mat2x2f(dpdxFine(indlk{0}_p0), dpdyFine(indlk{0}_p0));"
++          "\n    let indlk{0}_j1 = mat2x2f(dpdxFine(indlk{0}_p1), dpdyFine(indlk{0}_p1));"
++          "\n    let indlk{0}_det = determinant(indlk{0}_j0);"
++          "\n    let indlk{0}_inv = mat2x2f(indlk{0}_j0[1][1], -indlk{0}_j0[0][1], -indlk{0}_j0[1][0], indlk{0}_j0[0][0])"
++          " * select(0.0, 1.0 / indlk{0}_det, abs(indlk{0}_det) > 1e-12);"
++          "\n    let indlk{0}_delta = floor(indlk{0}_p0 + 0.125 / 128.0) + 0.5 - indlk{0}_p0;"
++          "\n    let indlk{0}_fixed_uv = vec2i((indlk{0}_p1 + indlk{0}_j1 * (indlk{0}_inv * indlk{0}_delta)) * 128.0 + 0.125);",
++          i, baseCoord, texCoordId);
++      fixedUv = fmt::format("indlk{}_fixed_uv", i);
++    }
+     fragmentFnPre += fmt::format(
          "\n    // Indirect stage {0}"
          "\n    let ind{0}_sample_fixed = {2} >> vec2u({3}u, {4}u);"
          "\n    var t_IndTexCoord{0} = round(255.0 * textureSampleBias(tex{1}, tex{1}_samp, "
@@ -133,7 +236,7 @@ index e2e481e..269d09a 100644
          i, texMapId, fixedUv, ind_scale_shift(indStage.scaleS), ind_scale_shift(indStage.scaleT));
    }
  
-@@ -1678,7 +1684,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+@@ -1678,7 +1720,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
        fragmentFnPre += "\n    t_TexCoord = (t_TexCoord << vec2u(8u)) >> vec2u(8u);";
  
        if (needsTextureSample && hasBaseTexture) {
@@ -142,3 +245,16 @@ index e2e481e..269d09a 100644
                                       i, underlying(stage.texMapId));
          uvIn = fmt::format("ind{0}_uv", i);
        }
+@@ -2364,6 +2406,12 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config, const gfx::RenderTar
+   }
+   const auto shaderSource = build_shader_source(config, dstAlphaMode, normalAttachment);
+   const auto hash = xxh3_hash(dstAlphaMode, xxh3_hash(normalAttachment, xxh3_hash(config)));
++  if (const char* dumpDir = std::getenv("WC_DUMP_SHADERS")) {
++    if (FILE* f = std::fopen(fmt::format("{}/gx_{:x}.wgsl", dumpDir, hash).c_str(), "wb")) {
++      std::fwrite(shaderSource.data(), 1, shaderSource.size(), f);
++      std::fclose(f);
++    }
++  }
+   wgpu::ShaderSourceWGSL wgslDescriptor{};
+   wgslDescriptor.code = shaderSource.c_str();
+   const auto label = fmt::format("GX Shader {:x}", hash);
