@@ -5269,6 +5269,456 @@ index 2646e0f..53f892e 100644
      using namespace MkwDynamicAspect;
      const uint32_t width43 =
          g_widescreenConfigured ? EggRecordWidth(kEggRecordWidth43, surfaceWidth, surfaceHeight)
+diff --git a/runtime/src/hle/excite_truck/et_achievement_list.inc b/runtime/src/hle/excite_truck/et_achievement_list.inc
+new file mode 100644
+index 0000000..769111c
+--- /dev/null
++++ b/runtime/src/hle/excite_truck/et_achievement_list.inc
+@@ -0,0 +1,21 @@
++// Achievement list. Ids are stable: never rename one, the unlock file keys on it.
++constexpr std::array<Definition, 18> kDefinitions{{
++    {"first_finish", "Off the Line", "Finish a race.", 5},
++    {"podium", "Podium Finish", "Finish a race in the top three.", 10},
++    {"first_win", "Checkered Flag", "Win a race.", 10},
++    {"stars_50", "Star Struck", "Collect 50 stars in one race.", 10},
++    {"stars_100", "Star Power", "Collect 100 stars in one race.", 25},
++    {"stars_150", "Constellation", "Collect 150 stars in one race.", 50},
++    {"grade_b", "Making the Grade", "Earn a B or better.", 10},
++    {"grade_a", "Top of the Class", "Earn an A or better.", 25},
++    {"grade_s", "S Class", "Earn an S grade.", 50},
++    {"perfect_race", "Flawless", "Win a race with an S grade.", 50},
++    {"crash", "Wipeout", "Crash your truck.", 5},
++    {"crash_10", "Scrap Metal", "Crash 10 times.", 10},
++    {"races_10", "Road Warrior", "Finish 10 races.", 10},
++    {"races_50", "Veteran Driver", "Finish 50 races.", 25},
++    {"wins_10", "Champion", "Win 10 races.", 25},
++    {"wins_25", "Legend of the Dirt", "Win 25 races.", 50},
++    {"total_stars_1000", "Star Bank", "Collect 1,000 stars in total.", 25},
++    {"total_stars_5000", "Galaxy", "Collect 5,000 stars in total.", 50},
++}};
+diff --git a/runtime/src/hle/excite_truck/et_achievement_rules.inc b/runtime/src/hle/excite_truck/et_achievement_rules.inc
+new file mode 100644
+index 0000000..4b3af01
+--- /dev/null
++++ b/runtime/src/hle/excite_truck/et_achievement_rules.inc
+@@ -0,0 +1,130 @@
++// Game state read by the rules (Excite Truck REXE01).
++// *(0x8055E884) is the race "Awards" object (r13-0x207C). The race end pushes:
++//   +0x2A8 place (1-6, 0 until pushed), +0x2AC score (stars), +0x2B0 grade (0 = S .. 4 = D,
++//   -1 until pushed), +0x2B8 race time (float, -999 until pushed). They reset at race start.
++// 0x8055EB14 is the race time step: > 0 while racing, below 0.012 during the crash slow motion.
++constexpr uint32_t kAwardsPointer = 0x8055E884;
++constexpr uint32_t kRaceStep = 0x8055EB14;
++
++struct Counters {
++    int races = 0;
++    int wins = 0;
++    int stars = 0;
++    int crashes = 0;
++};
++Counters g_counters;
++bool g_countersLoaded = false;
++bool g_raceCounted = false;
++bool g_inCrash = false;
++int g_calmFrames = 0;
++
++std::filesystem::path CountersPath() { return Directory() / "progress.json"; }
++
++void LoadCounters() {
++    g_countersLoaded = true;
++    std::ifstream in(CountersPath(), std::ios::binary);
++    if (!in) {
++        return;
++    }
++    std::stringstream buffer;
++    buffer << in.rdbuf();
++    const std::string text = buffer.str();
++    const auto read = [&](const char* key, int& out) {
++        const std::string quoted = std::string("\"") + key + "\"";
++        const size_t at = text.find(quoted);
++        if (at == std::string::npos) return;
++        const size_t colon = text.find(':', at);
++        if (colon == std::string::npos) return;
++        out = std::atoi(text.c_str() + colon + 1);
++    };
++    read("races_finished", g_counters.races);
++    read("races_won", g_counters.wins);
++    read("stars_collected", g_counters.stars);
++    read("crashes", g_counters.crashes);
++}
++
++void SaveCounters() {
++    std::ostringstream out;
++    out << "{\n  \"races_finished\": " << g_counters.races << ",\n  \"races_won\": " << g_counters.wins
++        << ",\n  \"stars_collected\": " << g_counters.stars << ",\n  \"crashes\": " << g_counters.crashes << "\n}\n";
++    WriteAtomically(CountersPath(), out.str());
++}
++
++bool IsGuestPointer(uint32_t p) {
++    return p >= 0x80000000u && p < 0x81800000u - 0x400u && (p & 3) == 0;
++}
++
++void OnRaceFinished(int place, int score, int grade) {
++    std::fprintf(stderr, "[achievements] race finished: place %d, stars %d, grade %d\n", place, score, grade);
++    Unlock("first_finish");
++    if (place <= 3) Unlock("podium");
++    if (place == 1) Unlock("first_win");
++    if (score >= 50) Unlock("stars_50");
++    if (score >= 100) Unlock("stars_100");
++    if (score >= 150) Unlock("stars_150");
++    if (grade >= 0 && grade <= 2) Unlock("grade_b");
++    if (grade >= 0 && grade <= 1) Unlock("grade_a");
++    if (grade == 0) Unlock("grade_s");
++    if (grade == 0 && place == 1) Unlock("perfect_race");
++
++    g_counters.races += 1;
++    g_counters.wins += place == 1 ? 1 : 0;
++    g_counters.stars += std::max(score, 0);
++    SaveCounters();
++    if (g_counters.races >= 10) Unlock("races_10");
++    if (g_counters.races >= 50) Unlock("races_50");
++    if (g_counters.wins >= 10) Unlock("wins_10");
++    if (g_counters.wins >= 25) Unlock("wins_25");
++    if (g_counters.stars >= 1000) Unlock("total_stars_1000");
++    if (g_counters.stars >= 5000) Unlock("total_stars_5000");
++}
++
++float ReadF32(uint32_t addr) {
++    const uint32_t bits = Memory::Read32(addr);
++    float v;
++    std::memcpy(&v, &bits, sizeof(v));
++    return v;
++}
++
++constexpr uint32_t kRaceClock = 0x8055EB18;
++float g_lastClock = -1.0f;
++
++void EvaluateRules() {
++    if (!g_countersLoaded) {
++        LoadCounters();
++    }
++
++    // Crashes: the race clock drops into slow motion (same test as et_input.cpp).
++    // The step is left as is when a race ends, so also require the race clock to be moving.
++    const float step = ReadF32(kRaceStep);
++    const float clock = ReadF32(kRaceClock);
++    const bool clockMoving = clock != g_lastClock;
++    g_lastClock = clock;
++    if (!g_inCrash && clockMoving && step > 0.0f && step < 0.012f) {
++        g_inCrash = true;
++        g_calmFrames = 0;
++        g_counters.crashes += 1;
++        SaveCounters();
++        Unlock("crash");
++        if (g_counters.crashes >= 10) Unlock("crash_10");
++    } else if (g_inCrash) {
++        g_calmFrames = (step >= 0.0165f || step <= 0.0f) ? g_calmFrames + 1 : 0;
++        if (g_calmFrames >= 15) g_inCrash = false;
++    }
++
++    const uint32_t awards = Memory::Read32(kAwardsPointer);
++    if (!IsGuestPointer(awards)) {
++        return;
++    }
++    const int place = static_cast<int32_t>(Memory::Read32(awards + 0x2A8));
++    const int score = static_cast<int32_t>(Memory::Read32(awards + 0x2AC));
++    const int grade = static_cast<int32_t>(Memory::Read32(awards + 0x2B0));
++    if (place == 0 && grade < 0) {
++        g_raceCounted = false; // a new race has started
++        return;
++    }
++    if (!g_raceCounted && place >= 1 && place <= 6 && grade >= 0 && grade <= 5 && score >= 0 && score < 10000) {
++        g_raceCounted = true;
++        OnRaceFinished(place, score, grade);
++    }
++}
+diff --git a/runtime/src/hle/excite_truck/et_achievements.cpp b/runtime/src/hle/excite_truck/et_achievements.cpp
+new file mode 100644
+index 0000000..e4edc70
+--- /dev/null
++++ b/runtime/src/hle/excite_truck/et_achievements.cpp
+@@ -0,0 +1,256 @@
++#include "hle/excite_truck/et_achievements.h"
++
++#include "guest_abi/guest_region.h"
++#include "hle_stubs.h"
++#include "ppc_runtime.h"
++#include "runtime_config.h"
++
++#include <imgui.h>
++
++#include <algorithm>
++#include <array>
++#include <cstdlib>
++#include <cstring>
++#include <chrono>
++#include <cstdio>
++#include <ctime>
++#include <filesystem>
++#include <fstream>
++#include <map>
++#include <mutex>
++#include <sstream>
++#include <string>
++#include <vector>
++
++namespace EtAchievements {
++namespace {
++
++struct Definition {
++    const char* id;
++    const char* title;
++    const char* description;
++    int points;
++};
++
++#include "et_achievement_list.inc"
++
++struct Toast {
++    const Definition* def;
++    std::chrono::steady_clock::time_point shownAt;
++};
++
++std::mutex g_mutex;
++bool g_initialized = false;
++std::map<std::string, std::string> g_unlocked; // id -> unlocked_at (ISO 8601 UTC)
++std::vector<Toast> g_toasts;
++
++std::filesystem::path Directory() {
++    return RuntimeConfigFile::ApplicationDataDirectory() / "achievements";
++}
++
++std::string JsonEscape(const char* text) {
++    std::string out;
++    for (const char* p = text; *p; ++p) {
++        switch (*p) {
++        case '"': out += "\\\""; break;
++        case '\\': out += "\\\\"; break;
++        case '\n': out += "\\n"; break;
++        default: out += *p; break;
++        }
++    }
++    return out;
++}
++
++void WriteAtomically(const std::filesystem::path& path, const std::string& text) {
++    std::error_code ec;
++    std::filesystem::create_directories(path.parent_path(), ec);
++    const auto temp = path.string() + ".tmp";
++    {
++        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
++        if (!out) {
++            return;
++        }
++        out << text;
++    }
++    std::filesystem::rename(temp, path, ec);
++    if (ec) {
++        std::filesystem::remove(path, ec);
++        std::filesystem::rename(temp, path, ec);
++    }
++}
++
++void WriteDefinitions() {
++    std::ostringstream out;
++    out << "[\n";
++    for (size_t i = 0; i < kDefinitions.size(); ++i) {
++        const auto& d = kDefinitions[i];
++        out << "  {\"id\": \"" << JsonEscape(d.id) << "\", \"title\": \"" << JsonEscape(d.title)
++            << "\", \"description\": \"" << JsonEscape(d.description) << "\", \"points\": " << d.points << "}"
++            << (i + 1 < kDefinitions.size() ? ",\n" : "\n");
++    }
++    out << "]\n";
++    WriteAtomically(Directory() / "definitions.json", out.str());
++}
++
++void WriteUnlocks() {
++    std::ostringstream out;
++    out << "{\n";
++    size_t n = 0;
++    for (const auto& [id, at] : g_unlocked) {
++        out << "  \"" << JsonEscape(id.c_str()) << "\": {\"unlocked_at\": \"" << JsonEscape(at.c_str()) << "\"}"
++            << (++n < g_unlocked.size() ? ",\n" : "\n");
++    }
++    out << "}\n";
++    WriteAtomically(Directory() / "unlocks.json", out.str());
++}
++
++// Reads the flat {"id": {"unlocked_at": "..."}} file this module writes. Ids and
++// timestamps never contain quotes, so a quoted-string scan is enough.
++void ReadUnlocks() {
++    std::ifstream in(Directory() / "unlocks.json", std::ios::binary);
++    if (!in) {
++        return;
++    }
++    std::stringstream buffer;
++    buffer << in.rdbuf();
++    const std::string text = buffer.str();
++    std::vector<std::string> strings;
++    for (size_t i = 0; i < text.size(); ++i) {
++        if (text[i] != '"') {
++            continue;
++        }
++        const size_t end = text.find('"', i + 1);
++        if (end == std::string::npos) {
++            break;
++        }
++        strings.push_back(text.substr(i + 1, end - i - 1));
++        i = end;
++    }
++    // Pattern: id, "unlocked_at", timestamp.
++    for (size_t i = 0; i + 2 < strings.size(); ++i) {
++        if (strings[i + 1] == "unlocked_at") {
++            g_unlocked[strings[i]] = strings[i + 2];
++            i += 2;
++        }
++    }
++}
++
++std::string NowIso8601() {
++    const std::time_t now = std::time(nullptr);
++    std::tm utc{};
++#if defined(_WIN32)
++    gmtime_s(&utc, &now);
++#else
++    gmtime_r(&now, &utc);
++#endif
++    char text[32];
++    std::strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ", &utc);
++    return text;
++}
++
++const Definition* Find(const char* id) {
++    for (const auto& d : kDefinitions) {
++        if (std::string_view(d.id) == id) {
++            return &d;
++        }
++    }
++    return nullptr;
++}
++
++void Unlock(const char* id) {
++    std::lock_guard lock(g_mutex);
++    if (g_unlocked.count(id) != 0) {
++        return;
++    }
++    const Definition* def = Find(id);
++    if (def == nullptr) {
++        return;
++    }
++    g_unlocked[id] = NowIso8601();
++    g_toasts.push_back({def, std::chrono::steady_clock::now()});
++    WriteUnlocks();
++    std::fprintf(stderr, "[achievements] unlocked %s (%s)\n", def->id, def->title);
++}
++
++#include "et_achievement_rules.inc"
++
++} // namespace
++
++void Init() noexcept {
++    std::lock_guard lock(g_mutex);
++    if (g_initialized || ::GuestRegion::Current() != ::GuestRegion::Id::ExciteTruck) {
++        return;
++    }
++    g_initialized = true;
++    ReadUnlocks();
++    WriteDefinitions();
++}
++
++void Tick() noexcept {
++    if (!g_initialized) {
++        Init();
++        if (!g_initialized) {
++            return;
++        }
++    }
++    EvaluateRules();
++}
++
++void DrawToasts() noexcept {
++    std::lock_guard lock(g_mutex);
++    if (g_toasts.empty()) {
++        return;
++    }
++    constexpr auto kShowFor = std::chrono::seconds(5);
++    const auto now = std::chrono::steady_clock::now();
++    // One at a time, oldest first.
++    if (now - g_toasts.front().shownAt > kShowFor) {
++        g_toasts.erase(g_toasts.begin());
++        if (g_toasts.empty()) {
++            return;
++        }
++        g_toasts.front().shownAt = now;
++    }
++    const Definition* def = g_toasts.front().def;
++    const ImGuiIO& io = ImGui::GetIO();
++    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y - 40.0f), ImGuiCond_Always,
++                            ImVec2(0.5f, 1.0f));
++    ImGui::SetNextWindowBgAlpha(0.8f);
++    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration |
++                                        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoInputs |
++                                        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNav |
++                                        ImGuiWindowFlags_NoSavedSettings;
++    if (ImGui::Begin("Achievement unlocked", nullptr, kFlags)) {
++        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Achievement unlocked  (%d pts)", def->points);
++        ImGui::Text("%s", def->title);
++        ImGui::TextDisabled("%s", def->description);
++    }
++    ImGui::End();
++}
++
++void DrawMenu() noexcept {
++    std::lock_guard lock(g_mutex);
++    int points = 0;
++    int total = 0;
++    for (const auto& d : kDefinitions) {
++        total += d.points;
++        if (g_unlocked.count(d.id) != 0) {
++            points += d.points;
++        }
++    }
++    ImGui::Text("%zu of %zu unlocked, %d of %d points", g_unlocked.size(), kDefinitions.size(), points, total);
++    ImGui::Separator();
++    for (const auto& d : kDefinitions) {
++        const auto it = g_unlocked.find(d.id);
++        if (it != g_unlocked.end()) {
++            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", d.title);
++            ImGui::SameLine();
++            ImGui::TextDisabled("(%s)", it->second.c_str());
++        } else {
++            ImGui::TextDisabled("%s", d.title);
++        }
++        ImGui::TextDisabled("    %s  (%d pts)", d.description, d.points);
++    }
++}
++
++} // namespace EtAchievements
+diff --git a/runtime/src/hle/excite_truck/et_achievements.h b/runtime/src/hle/excite_truck/et_achievements.h
+new file mode 100644
+index 0000000..3e0fe9b
+--- /dev/null
++++ b/runtime/src/hle/excite_truck/et_achievements.h
+@@ -0,0 +1,19 @@
++#pragma once
++
++// Local achievements for Excite Truck. Unlocks are kept on this PC only, in
++// <user data>/achievements/unlocks.json; the game also writes the full list to
++// <user data>/achievements/definitions.json so the launcher can show it.
++namespace EtAchievements {
++
++// Loads saved unlocks and writes definitions.json. Safe to call more than once.
++void Init() noexcept;
++
++// Called once per presented game frame on the guest thread. Reads game state
++// and unlocks whatever was earned.
++void Tick() noexcept;
++
++// ImGui: unlock pop-ups (every frame) and the F10 "Achievements" menu.
++void DrawToasts() noexcept;
++void DrawMenu() noexcept;
++
++} // namespace EtAchievements
 diff --git a/runtime/src/hle/excite_truck/et_hooks.cpp b/runtime/src/hle/excite_truck/et_hooks.cpp
 new file mode 100644
 index 0000000..fa973b6
@@ -8556,7 +9006,7 @@ index d91dd89..3e51721 100644
                  if (numIn != 0 || numOut != 1) {
                      return ISFS_EINVAL;
 diff --git a/runtime/src/hle/vi.cpp b/runtime/src/hle/vi.cpp
-index cd236a9..b7165ba 100644
+index cd236a9..f5a91c1 100644
 --- a/runtime/src/hle/vi.cpp
 +++ b/runtime/src/hle/vi.cpp
 @@ -1,3 +1,5 @@
@@ -8565,7 +9015,7 @@ index cd236a9..b7165ba 100644
  #include "hle_stubs.h"
  #include "memory.h"
  #include "abi_bridge.h"
-@@ -9,8 +11,11 @@
+@@ -9,8 +11,15 @@
  #include "platform/host_platform.h"
  #include "runtime_log.h"
  #include "perf_stats.h"
@@ -8573,11 +9023,15 @@ index cd236a9..b7165ba 100644
  
  #include <dolphin/vi.h>
 +#include <aurora/gfx.h>
++#include "system_bridge.h"
++#include "hle/excite_truck/et_achievements.h"
++#include <filesystem>
++#include <sstream>
 +#include <cstdio>
  
  #include <algorithm>
  #include <array>
-@@ -34,6 +39,7 @@
+@@ -34,6 +43,7 @@
  // Forward declaration for OSWakeupThread - used to wake threads on VI retrace queue
  extern "C" void OSWakeupThread_HLE_801aaaa4(CpuContext* ctx);
  
@@ -8585,7 +9039,7 @@ index cd236a9..b7165ba 100644
  // Forward declaration for OSSleepThread - used by VIWaitForRetrace HLE
  extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* cpu);
  extern "C" int g_gxFrameCount;
-@@ -220,21 +226,37 @@ void ViSetR3(CpuContext* ctx, uint32_t value)
+@@ -220,21 +230,37 @@ void ViSetR3(CpuContext* ctx, uint32_t value)
      }
  }
  
@@ -8635,7 +9089,7 @@ index cd236a9..b7165ba 100644
      } catch (const ::Memory::AccessViolation& e) {
          LogMemoryError(RT_TAG_VI, "WriteGuestStateLocked", e);
      }
-@@ -268,9 +290,28 @@ static std::atomic<bool> s_presentSequenceActive{false};
+@@ -268,9 +294,28 @@ static std::atomic<bool> s_presentSequenceActive{false};
  void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool serviceAurora) {
      // Prevent re-entry - this can happen if OSWakeupThread triggers SelectThread
      // which goes idle and calls ProcessTimerEvents again
@@ -8664,7 +9118,7 @@ index cd236a9..b7165ba 100644
      
      uint32_t preCb = 0;
      uint32_t postCb = 0;
-@@ -343,7 +384,8 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
+@@ -343,7 +388,8 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
          if (postCb) {
              // Guard: only invoke callback if sSystem is initialized
              // The callback dereferences sSystem which must be non-null
@@ -8674,7 +9128,7 @@ index cd236a9..b7165ba 100644
              if (sSystemPtr != 0) {
                  InvokeIndirectCpu(postCb, ctx);
              }
-@@ -375,8 +417,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
+@@ -375,8 +421,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
          }
      }
  
@@ -8684,11 +9138,25 @@ index cd236a9..b7165ba 100644
  }
  
  bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
-@@ -556,7 +597,23 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+@@ -556,7 +601,37 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
          // cadence, and zero only happens when production outruns VI. "Kept up" means <=1 retrace
          // elapsed; 2+ means a boundary was missed, so Aurora seals that frame without its interpolated
          // slots (a windowed backstop lowers the slot target only under sustained overload).
 -        aurora_report_producer_paced(retracesElapsed <= 1);
++        if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
++            EtAchievements::Tick();
++        }
++        // WC_MEMDUMP_REQ=<path>: creating <path> dumps MEM1/MEM2 to <path>_<n>.bin (testing only).
++        if (static const char* s_dumpReq = std::getenv("WC_MEMDUMP_REQ"); s_dumpReq) {
++            static uint32_t s_dumpCheck = 0, s_dumpIndex = 0;
++            std::error_code ec;
++            if (++s_dumpCheck % 30 == 0 && std::filesystem::exists(s_dumpReq, ec)) {
++                std::filesystem::remove(s_dumpReq, ec);
++                std::ostringstream discard;
++                SystemBridge::WriteGuestMemorySnapshot(
++                    discard, std::string(s_dumpReq) + "_" + std::to_string(s_dumpIndex++) + ".bin");
++            }
++        }
 +        // WC_INTERP_FORCE=1 keeps every interpolation slot on slow machines (testing only).
 +        static const bool s_forceInterp = std::getenv("WC_INTERP_FORCE") != nullptr;
 +        aurora_report_producer_paced(s_forceInterp || retracesElapsed <= 1);
@@ -8709,7 +9177,7 @@ index cd236a9..b7165ba 100644
          // Stamp the sealed frame's presentation schedule so Aurora paces interpolated slots against
          // this same VI timeline. Anchor to the NEXT retrace boundary, not the period just produced,
          // since slots anchored to the current period would already be expired by seal time. Encoding
-@@ -579,8 +636,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+@@ -579,8 +654,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
          aurora_set_present_schedule(0, 0);
      }
  
@@ -8720,7 +9188,7 @@ index cd236a9..b7165ba 100644
          PaceToRetraceBoundary(paceDeadline);
          std::lock_guard<std::mutex> lock(g_viMutex);
          s_lastPacedRetraceCount = g_vi.retraceCount;
-@@ -596,6 +654,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+@@ -596,6 +672,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
      }
      // Pre-warm the next frame so subsequent GX work has a valid frame context.
      {
@@ -8728,7 +9196,7 @@ index cd236a9..b7165ba 100644
          UpdateAuroraAndProcessEvents();
          if (BeginAuroraFrame()) {
              g_auroraFrameActive.store(true, std::memory_order_release);
-@@ -796,6 +855,10 @@ extern "C" void VIFlush_HLE_801ba9a4(CpuContext* ctx)
+@@ -796,6 +873,10 @@ extern "C" void VIFlush_HLE_801ba9a4(CpuContext* ctx)
      // GXCopyDisp (which sets hasValidXfb = true), as that's when the EFB->XFB
      // copy is complete and we have a valid frame to present.
  
@@ -8877,7 +9345,7 @@ index ad031c1..338cf09 100644
      const uint32_t soundPlayerArray = ResolveSoundPlayerArray();
      if (soundPlayerArray == 0) {
 diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
-index ed1a1b8..d980b91 100644
+index ed1a1b8..bfdf3e4 100644
 --- a/runtime/src/settings_overlay.cpp
 +++ b/runtime/src/settings_overlay.cpp
 @@ -1,4 +1,5 @@
@@ -8886,10 +9354,12 @@ index ed1a1b8..d980b91 100644
  #include "gx_worker.h"
  #include "audio_backend.h"
  #include "aurora_events.h"
-@@ -51,6 +52,10 @@ extern "C" int g_gxFrameCount;
+@@ -51,6 +52,12 @@ extern "C" int g_gxFrameCount;
  
  // Defined in runtime/src/hle/audio/ax_mix.cpp. That header is private to the HLE
  // directory and is not on this target's include path.
++#include "hle/excite_truck/et_achievements.h"
++
 +// Excite Truck draw distance (hle/gx/gx_pixel.cpp).
 +extern std::atomic<float> g_etDrawDistance;
 +float EtDrawDistanceScale();
@@ -8897,7 +9367,7 @@ index ed1a1b8..d980b91 100644
  namespace AxDspHle {
  void SetMixWorkerEnabled(bool enabled);
  }
-@@ -956,6 +961,15 @@ void DrawPlayerRow(uint32_t port) {
+@@ -956,6 +963,15 @@ void DrawPlayerRow(uint32_t port) {
  
  void DrawControllerSettings() {
      ImGui::Dummy(ImVec2(kControllerMenuWidth, 0.0f));
@@ -8913,7 +9383,7 @@ index ed1a1b8..d980b91 100644
      for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
          DrawPlayerRow(port);
      }
-@@ -1128,13 +1142,50 @@ void DrawGraphicsSettings() {
+@@ -1128,13 +1144,50 @@ void DrawGraphicsSettings() {
              "Requests the closest native-resolution display mode to the output frame "
              "rate (60 Hz, or the frame interpolation target).");
      }
@@ -8965,7 +9435,22 @@ index ed1a1b8..d980b91 100644
          for (int mode = 0; mode < static_cast<int>(kFrameInterpolationModes.size()); ++mode) {
              const bool selected = g_frameInterpolationMode == mode;
              if (ImGui::Selectable(kFrameInterpolationModes[static_cast<size_t>(mode)], selected)) {
-@@ -1541,9 +1592,16 @@ void InitializeRuntimeSettings() noexcept {
+@@ -1443,6 +1496,14 @@ void DrawTopBar() {
+         ImGui::EndMenu();
+     }
+ 
++    if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
++        ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f), ImVec2(FLT_MAX, viewport->Size.y * 0.75f));
++        if (ImGui::BeginMenu("Achievements")) {
++            EtAchievements::DrawMenu();
++            ImGui::EndMenu();
++        }
++    }
++
+     const std::string audioLabel = g_audioMuted
+         ? "Audio: Muted"
+         : "Audio: " + std::to_string(g_audioVolumePercent) + "%";
+@@ -1541,9 +1602,16 @@ void InitializeRuntimeSettings() noexcept {
  #if defined(__APPLE__)
      aurora_set_metalfx_spatial(g_metalFxSpatialUpscaling);
  #endif
@@ -8982,7 +9467,17 @@ index ed1a1b8..d980b91 100644
      aurora_set_display_mode(static_cast<AuroraDisplayMode>(g_displayMode));
      g_displayMode = static_cast<int>(aurora_get_display_mode());
      aurora_set_disable_copy_filter(g_disableCopyFilter);
-@@ -1656,5 +1714,13 @@ void NotifyStrapInputAccepted() noexcept {
+@@ -1634,6 +1702,9 @@ void Draw() noexcept {
+         DrawShaderCompilationStatus();
+     }
+     DrawFpsOverlay();
++    if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
++        EtAchievements::DrawToasts();
++    }
+     DrawTopBar();
+     DrawExitPrompt();
+     DrawRestartPrompt();
+@@ -1656,5 +1727,13 @@ void NotifyStrapInputAccepted() noexcept {
      }
  }
  

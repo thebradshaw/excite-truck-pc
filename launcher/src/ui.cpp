@@ -870,8 +870,8 @@ void AchievementsPage() {
         ImGui::Indent(S(8));
         Paragraph("Play the game once and its achievements show up here.", kText);
         ImGui::Dummy(ImVec2(0, S(6)));
-        Paragraph("Achievements are saved on this PC, next to your settings. Online RetroAchievements sign-in is "
-                  "planned for a later update.");
+        Paragraph("Achievements are saved on this PC, next to your settings. Unlock them in the game and they "
+                  "show up here, with the date you earned each one.");
         ImGui::Unindent(S(8));
         return;
     }
@@ -908,7 +908,7 @@ void AchievementsPage() {
     }
     ImGui::Dummy(ImVec2(0, S(8)));
     ImGui::Indent(S(8));
-    Paragraph("Saved on this PC. Online RetroAchievements sign-in is planned for a later update.");
+    Paragraph("Saved on this PC. In the game, F10 > Achievements shows the same list.");
     ImGui::Unindent(S(8));
 }
 

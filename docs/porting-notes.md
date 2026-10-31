@@ -312,6 +312,13 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
 - Menu video lines (Chris's Xbox Ally recording, D3D12): thin dashed lines at fixed screen rows in the title and menu background, underneath the UI. The background is a Bink video (uisingle.bik), uploaded as I8 textures: Y 640x448 and U/V 320x224, double-buffered at 0x10B61F00 and 0x10BCAF00. Aurora reads texture data lazily, well after GXLoadTexObj, so a buffer the decoder is already rewriting can be read half-updated. Fix (gx_texture.cpp, `EtTexSnapshots`): outside races, a texture whose data was marked changed in at least two different frames is copied at GXLoadTexObj time on the game thread. The worker hands aurora the copy. Each buffer has three persistent host copies used in turn. They are never freed while in use, since aurora keeps the pointer. A first version freed the copies and garbled every menu texture. The log line "copying video texture ..." shows it is active. Not reproduced in the container, so this fix is a best guess.
 - GX frame trace (`WC_TRACE_GX_FRAME`) now also logs viewport and scissor calls.
 
+## 0.3.1 (2026-10-31): local achievements
+
+- Chris asked for achievements saved locally instead of RetroAchievements. `et_achievements.cpp` keeps 18 achievements; the list is `et_achievement_list.inc` and the rules are `et_achievement_rules.inc`. Files (agreed with the launcher, PR #2): `<user data>/achievements/definitions.json` (array of {id, title, description, points}, written at startup), `unlocks.json` ({"id": {"unlocked_at": ISO 8601 UTC}}, temp file + rename) and `progress.json` (races_finished, races_won, stars_collected, crashes).
+- Race result: `*(0x8055E884)` (r13-0x207C) is the "Awards" object. The race end pushes place (+0x2A8, 1-6, 0 before), stars (+0x2AC), grade (+0x2B0, 0 = S to 4 = D, -1 before) and race time (+0x2B8, -999 before); the push functions are at 0x801CD4xx-0x801CD7xx (they log "Awards: ... was pushed to me twice"). Found by memory snapshots during a full race (`WC_MEMDUMP_REQ=<path>`: touching <path> writes MEM1/MEM2 snapshots).
+- Crashes are counted from the slow-motion time step (as in et_input.cpp) while the race clock moves. This can't trigger in the slow container, where the step is ~0.1.
+- Tested in the container: one Mexico race (6th, 20 stars, D) unlocked "Off the Line" and wrote all three files.
+
 ## 0.3.0 (2026-10-31): step 3, first part
 
 - 120 fps: aurora's frame interpolation (already in the runtime, F10) works for Excite Truck with no game hooks. With `WC_INTERP_FORCE=1` (keeps the slots on a slow machine) and `WC_INTERP_DIAG=1` (prints matcher stats every 60 frames), races matched 99% of perspective draws between frames. The F10 label no longer says "Race".

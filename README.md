@@ -61,11 +61,19 @@ current page on the right.
 - **Music**: where your MP3s go, the songs found there, buttons to open the folder or pick another
   one, and you can drop MP3s on the window to copy them in.
 - **Mods**: Dolphin-format texture packs on or off, and their folder.
-- **Achievements**: the achievements you have unlocked, with points and dates. The game saves them on your PC in `UserData/achievements/` (`definitions.json` lists them, `unlocks.json` records what you have earned). Online RetroAchievements sign-in is planned for later.
+- **Achievements**: every achievement with its points, a progress bar, and the date you unlocked
+  each one (see [Achievements](#achievements)).
 
 Everything is saved straight to the game's `Config.toml`, so the F10 bar in the game shows the
 same values. Mouse, keyboard (arrows, Enter, Esc) and controllers (D-pad or left stick, A, B) all
 work. The launcher's code is in `launcher/`; the build scripts compile it next to the game.
+
+## Achievements
+
+The game has 18 achievements of its own, kept on your PC only (no account needed). An unlock
+pops up at the bottom of the screen, and F10 > Achievements lists them all. They are saved in
+`UserData/achievements/`: `definitions.json` (the list), `unlocks.json` (what you earned and when)
+and `progress.json` (running totals for races, wins, stars and crashes).
 
 ## Your own music
 
