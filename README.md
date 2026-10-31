@@ -61,7 +61,7 @@ current page on the right.
 - **Music**: where your MP3s go, the songs found there, buttons to open the folder or pick another
   one, and you can drop MP3s on the window to copy them in.
 - **Mods**: Dolphin-format texture packs on or off, and their folder.
-- **Achievements**: RetroAchievements, coming in a later update.
+- **Achievements**: the achievements you have unlocked, with points and dates. The game saves them on your PC in `UserData/achievements/` (`definitions.json` lists them, `unlocks.json` records what you have earned). Online RetroAchievements sign-in is planned for later.
 
 Everything is saved straight to the game's `Config.toml`, so the F10 bar in the game shows the
 same values. Mouse, keyboard (arrows, Enter, Esc) and controllers (D-pad or left stick, A, B) all

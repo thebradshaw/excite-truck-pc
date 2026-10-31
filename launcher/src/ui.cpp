@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -14,6 +15,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 
+#include "achievements.h"
 #include "launcher_config.h"
 #include "scene.h"
 
@@ -281,19 +283,26 @@ void FocusFrame(ImDrawList* draw, ImVec2 min, ImVec2 max) {
     draw->AddRect(min, max, kAmber, S(5), 0, S(1.5f));
 }
 
+// One UTF-8 character starting at c.
+const char* NextChar(const char* c) {
+    ++c;
+    while ((static_cast<unsigned char>(*c) & 0xC0) == 0x80) ++c;
+    return c;
+}
+
 ImVec2 SpacedTextSize(ImFont* font, float size, const char* text, float spacing) {
     float width = 0.0f;
     int count = 0;
-    for (const char* c = text; *c; ++c, ++count) {
-        width += font->CalcTextSizeA(size, FLT_MAX, 0.0f, c, c + 1).x;
+    for (const char* c = text; *c; c = NextChar(c), ++count) {
+        width += font->CalcTextSizeA(size, FLT_MAX, 0.0f, c, NextChar(c)).x;
     }
     return ImVec2(width + spacing * float(std::max(0, count - 1)), size);
 }
 
 void SpacedText(ImDrawList* draw, ImFont* font, float size, ImVec2 pos, ImU32 color, const char* text, float spacing) {
-    for (const char* c = text; *c; ++c) {
-        draw->AddText(font, size, pos, color, c, c + 1);
-        pos.x += font->CalcTextSizeA(size, FLT_MAX, 0.0f, c, c + 1).x + spacing;
+    for (const char* c = text; *c; c = NextChar(c)) {
+        draw->AddText(font, size, pos, color, c, NextChar(c));
+        pos.x += font->CalcTextSizeA(size, FLT_MAX, 0.0f, c, NextChar(c)).x + spacing;
     }
 }
 
@@ -761,13 +770,145 @@ void ModsPage() {
     ImGui::Unindent(S(8));
 }
 
+// --- Achievements -------------------------------------------------------------------------------
+
+std::vector<Achievement> g_achievements;
+double g_lastAchievementScan = -100.0;
+
+void ScanAchievements(bool force = false) {
+    const double now = SDL_GetTicks() / 1000.0;
+    if (!force && now - g_lastAchievementScan < 3.0) {
+        return;
+    }
+    g_lastAchievementScan = now;
+    g_achievements = LoadAchievements();
+}
+
+// "2026-10-31T09:41:07Z" -> "31 Oct 2026"
+std::string FormatUnlockDate(const std::string& iso) {
+    int year = 0, month = 0, day = 0;
+    if (std::sscanf(iso.c_str(), "%d-%d-%d", &year, &month, &day) != 3 || month < 1 || month > 12) {
+        return {};
+    }
+    static const char* kMonths[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    char text[32];
+    std::snprintf(text, sizeof text, "%d %s %d", day, kMonths[month - 1], year);
+    return text;
+}
+
+// One achievement: a gold medal when unlocked, an empty ring while locked. Each row takes the
+// cursor so a controller can scroll the list, and the help box shows the whole description.
+void AchievementRow(const Achievement& a, float width) {
+    ImGui::PushID(a.id.c_str());
+    NavRow();
+    const float rowH = S(58);
+    const bool clicked = ImGui::InvisibleButton("##row", ImVec2(width, rowH));
+    std::string help = a.description;
+    if (a.unlocked) {
+        const std::string date = FormatUnlockDate(a.unlockedAt);
+        help += date.empty() ? "\n\nUnlocked." : "\n\nUnlocked on " + date + ".";
+    } else {
+        help += "\n\nNot unlocked yet.";
+    }
+    NavItemDone(clicked, a.title.c_str(), help.c_str());
+    const bool hot = ItemHasFocus();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+    if (hot) {
+        draw->AddRectFilled(min, max, IM_COL32(255, 182, 56, 34), S(6));
+        draw->AddRect(min, max, kAmber, S(6), 0, S(1.5f));
+    }
+
+    const ImVec2 centre(min.x + S(26), min.y + rowH * 0.5f);
+    const float r = S(13);
+    if (a.unlocked) {
+        draw->AddCircleFilled(centre, r, kAmber, 32);
+        draw->AddCircle(centre, r, IM_COL32(255, 230, 160, 255), 32, S(1.5f));
+        // A tick.
+        const ImVec2 p[3] = {ImVec2(centre.x - r * 0.45f, centre.y + r * 0.02f),
+                             ImVec2(centre.x - r * 0.10f, centre.y + r * 0.38f),
+                             ImVec2(centre.x + r * 0.48f, centre.y - r * 0.34f)};
+        draw->AddPolyline(p, 3, IM_COL32(40, 28, 10, 255), 0, S(2.5f));
+    } else {
+        draw->AddCircle(centre, r, IM_COL32(150, 154, 176, 200), 32, S(2));
+    }
+
+    // Points (and the date) on the right, title and description on the left.
+    char points[16];
+    std::snprintf(points, sizeof points, "%d", a.points);
+    const float pointsW = F.label->CalcTextSizeA(F.label->FontSize, FLT_MAX, 0.0f, points).x;
+    const float ptsLabelW = F.small->CalcTextSizeA(F.small->FontSize, FLT_MAX, 0.0f, " PTS").x;
+    const float right = max.x - S(12);
+    const float titleY = min.y + S(9);
+    draw->AddText(F.label, F.label->FontSize, ImVec2(right - ptsLabelW - pointsW, titleY),
+                  a.unlocked ? kAmber : kTextDim, points);
+    draw->AddText(F.small, F.small->FontSize,
+                  ImVec2(right - ptsLabelW, titleY + F.label->FontSize - F.small->FontSize - S(1)), kTextDim, " PTS");
+    float rightColumn = pointsW + ptsLabelW;
+    const std::string date = a.unlocked ? FormatUnlockDate(a.unlockedAt) : std::string();
+    if (!date.empty()) {
+        const float dateW = F.small->CalcTextSizeA(F.small->FontSize, FLT_MAX, 0.0f, date.c_str()).x;
+        draw->AddText(F.small, F.small->FontSize, ImVec2(right - dateW, titleY + F.label->FontSize + S(4)), kTextDim,
+                      date.c_str());
+        rightColumn = std::max(rightColumn, dateW);
+    }
+
+    const float textX = min.x + S(52);
+    const ImVec4 clip(textX, min.y, right - rightColumn - S(16), max.y);
+    draw->AddText(F.label, F.label->FontSize, ImVec2(textX, titleY), a.unlocked ? kText : IM_COL32(205, 205, 218, 255),
+                  a.title.c_str(), nullptr, 0.0f, &clip);
+    draw->AddText(F.small, F.small->FontSize, ImVec2(textX, titleY + F.label->FontSize + S(4)), kTextDim,
+                  a.description.c_str(), nullptr, 0.0f, &clip);
+    ImGui::PopID();
+}
+
 void AchievementsPage() {
-    Heading("RETROACHIEVEMENTS");
+    ScanAchievements();
+    if (g_achievements.empty()) {
+        Heading("ACHIEVEMENTS");
+        ImGui::Indent(S(8));
+        Paragraph("Play the game once and its achievements show up here.", kText);
+        ImGui::Dummy(ImVec2(0, S(6)));
+        Paragraph("Achievements are saved on this PC, next to your settings. Online RetroAchievements sign-in is "
+                  "planned for a later update.");
+        ImGui::Unindent(S(8));
+        return;
+    }
+
+    int unlocked = 0, points = 0, totalPoints = 0;
+    for (const Achievement& a : g_achievements) {
+        totalPoints += a.points;
+        if (a.unlocked) {
+            ++unlocked;
+            points += a.points;
+        }
+    }
+    char heading[96];
+    std::snprintf(heading, sizeof heading, "%d OF %zu UNLOCKED  \xC2\xB7  %d OF %d POINTS", unlocked,
+                  g_achievements.size(), points, totalPoints);
+    Heading(heading);
+
+    // Progress bar.
+    {
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        const float w = ImGui::GetContentRegionAvail().x, h = S(6);
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h), IM_COL32(255, 255, 255, 30), h * 0.5f);
+        const float t = g_achievements.empty() ? 0.0f : float(unlocked) / float(g_achievements.size());
+        if (t > 0.0f) {
+            draw->AddRectFilled(pos, ImVec2(pos.x + std::max(h, w * t), pos.y + h), kAmber, h * 0.5f);
+        }
+        ImGui::Dummy(ImVec2(0, h + S(8)));
+    }
+
+    const float width = ImGui::GetContentRegionAvail().x;
+    for (const Achievement& a : g_achievements) {
+        AchievementRow(a, width);
+    }
+    ImGui::Dummy(ImVec2(0, S(8)));
     ImGui::Indent(S(8));
-    Paragraph("Coming in a later update.", kText);
-    ImGui::Dummy(ImVec2(0, S(6)));
-    Paragraph("You'll sign in here with your RetroAchievements account, see the Excite Truck achievement set "
-              "and earn achievements as you race.");
+    Paragraph("Saved on this PC. Online RetroAchievements sign-in is planned for a later update.");
     ImGui::Unindent(S(8));
 }
 
@@ -822,7 +963,7 @@ struct MenuItem {
 
 const MenuItem kMenu[] = {
     {"Start Game", "Start racing. Your settings are already saved.", Page::Settings, UiAction::Launch},
-    {"Achievements", "RetroAchievements: coming in a later update.", Page::Achievements, UiAction::None},
+    {"Achievements", "The achievements you have unlocked in the game, and the ones still to get.", Page::Achievements, UiAction::None},
     {"Controls", "The Xbox controller layout, air control and vibration.", Page::Controls, UiAction::None},
     {"Settings", "Window, resolution, frame rate and sound.", Page::Settings, UiAction::None},
     {"Music", "Race to your own MP3s.", Page::Music, UiAction::None},
@@ -1118,7 +1259,10 @@ void UiDropFile(const char* path) {
     ScanMusic(true);
 }
 
-void UiRefresh() { ScanMusic(true); }
+void UiRefresh() {
+    ScanMusic(true);
+    ScanAchievements(true);
+}
 
 void UiShowError(const char* title, const char* text) {
     SetHelp(title, text, true);
