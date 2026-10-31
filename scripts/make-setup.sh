@@ -25,6 +25,8 @@ git -C "$WS/aurora-main" clean -fdqx
 git -C "$WS" apply --whitespace=nowarn "$REPO/patches/0001-excite-truck-runtime.patch"
 git -C "$WS/aurora-main" apply --whitespace=nowarn "$REPO/patches/0002-aurora-channel-colors.patch"
 cat "$REPO/tools/sdk_map/et_versions.inc" >> "$WS/runtime/include/guest_abi/guest_versions.inc"
+cp -r "$REPO/launcher" "$WS/runtime/et_launcher"
+printf '\nadd_subdirectory(et_launcher)\n' >> "$WS/runtime/CMakeLists.txt"
 
 echo "==> Collecting the payload"
 rm -rf "$STAGE"

@@ -33,10 +33,33 @@ New profiles skip the tutorial that the game normally forces; it is still in the
 The game opens borderless full screen at your monitor's resolution (1080p on a 1080p screen).
 Alt+Enter switches to a window; F10 has the display and resolution settings.
 
+## Launcher
+
+`ExciteTruckLauncher` opens first (the desktop shortcut points at it). It has the same layout as
+the [1080° Snowboarding launcher](https://github.com/thebradshaw/1080-Snowboarding-decomp): the
+main menu at the bottom left, a help box that explains whatever is under the cursor, and the
+current page on the right.
+
+![The launcher: main menu and help on the left, settings on the right](docs/screenshots/launcher.png)
+
+- **Start Game** starts `ExciteTruck` and closes the launcher.
+- **Settings**: window mode, resolution, aspect ratio, graphics API (Windows), frame rate (60 or
+  120), VSync, the FPS counter and volume. Draw distance shows as coming soon until it lands.
+- **Controls**: the Xbox layout, air control (flight style or direct) and vibration.
+- **Music**: where your MP3s go, the songs found there, buttons to open the folder or pick another
+  one, and you can drop MP3s on the window to copy them in.
+- **Mods**: Dolphin-format texture packs on or off, and their folder.
+- **Achievements**: RetroAchievements, coming in a later update.
+
+Everything is saved straight to the game's `Config.toml`, so the F10 bar in the game shows the
+same values. Mouse, keyboard (arrows, Enter, Esc) and controllers (D-pad or left stick, A, B) all
+work. The launcher's code is in `launcher/`; the build scripts compile it next to the game.
+
 ## Your own music
 
-Drop MP3s into `ExciteTruck/UserData/Music` (the build scripts create it). Subfolders are fine, up to 100 songs. In the game, set Options > Race Music to
-All Random and your songs play during races, as with an SD card on the Wii.
+Drop MP3s into `ExciteTruck/UserData/Music` (the build scripts create it), or choose another
+folder on the launcher's Music page. Subfolders are fine, up to 100 songs. In the game, set
+Options > Race Music to All Random and your songs play during races, as with an SD card on the Wii.
 
 ## Layout
 
@@ -47,6 +70,7 @@ All Random and your songs play during races, as with an SD card on the Wii.
 | `projects/excite-truck/MAP.txt` | Function start addresses that seed the translator |
 | `tools/` | Small Python helpers for reading the game's `main.dol` |
 | `scripts/translate.sh` | Runs the translation |
+| `launcher/` | The launcher (SDL3 + Dear ImGui, Barlow fonts under the SIL Open Font License) |
 
 ## Building and playing
 
@@ -70,14 +94,14 @@ cd excite-truck-pc
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 "D:\Games\Excite Truck (USA).wbfs"
 ```
 
-Then run `ExciteTruck\ExciteTruck.exe`. Build files go to `C:\ETBuild` (about 20 GB, safe to
+Then run `ExciteTruck\ExciteTruckLauncher.exe` (or `ExciteTruck.exe` to skip the launcher). Build files go to `C:\ETBuild` (about 20 GB, safe to
 delete afterwards; `-Work` picks another folder).
 
 **Linux** (Debian/Ubuntu: `sudo apt install git cmake ninja-build clang python3 curl dotnet-sdk-8.0`):
 
 ```sh
 scripts/build-linux.sh "/path/to/Excite Truck (USA).wbfs"
-./ExciteTruck/ExciteTruck
+./ExciteTruck/ExciteTruckLauncher
 ```
 
 The game folder is portable: settings, saves and caches live in `ExciteTruck/UserData`, and your
