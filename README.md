@@ -33,6 +33,18 @@ New profiles skip the tutorial that the game normally forces; it is still in the
 The game opens borderless full screen at your monitor's resolution (1080p on a 1080p screen).
 Alt+Enter switches to a window; F10 has the display and resolution settings.
 
+## Graphics options (F10, Graphics)
+
+- **Frame interpolation**: 120 or 180 FPS. The game still runs at 60; an in-between frame is drawn
+  from the last two. Turn VSync on and use a 120 Hz (or faster) screen. Config key:
+  `[video] frame_interpolation_fps` (0, 120, 180).
+- **Draw distance**: Original, 1.5x, 2x or 3x. Pushes the race fog and the far clip out so you see
+  further. Config key: `[excite_truck] draw_distance` (1.0 to 4.0).
+- **Sharper textures at angles**: 16x anisotropic filtering, on by default. Config key:
+  `[video] anisotropic_filtering` (true/false). Applies after a restart.
+- **Anti-aliasing (MSAA)**: Off, 2x, 4x, 8x. Off by default since it costs GPU time. Config key:
+  `[video] msaa` (1, 2, 4, 8). Applies after a restart.
+
 ## Launcher
 
 `ExciteTruckLauncher` opens first (the desktop shortcut points at it). It has the same layout as
@@ -43,8 +55,8 @@ current page on the right.
 ![The launcher: main menu and help on the left, settings on the right](docs/screenshots/launcher.png)
 
 - **Start Game** starts `ExciteTruck` and closes the launcher.
-- **Settings**: window mode, resolution, aspect ratio, graphics API (Windows), frame rate (60 or
-  120), VSync, the FPS counter and volume. Draw distance shows as coming soon until it lands.
+- **Settings**: window mode, resolution, aspect ratio, graphics API (Windows), anti-aliasing,
+  sharper textures, frame rate (60, 120 or 180), VSync, the FPS counter, draw distance and volume.
 - **Controls**: the Xbox layout, air control (flight style or direct) and vibration.
 - **Music**: where your MP3s go, the songs found there, buttons to open the folder or pick another
   one, and you can drop MP3s on the window to copy them in.

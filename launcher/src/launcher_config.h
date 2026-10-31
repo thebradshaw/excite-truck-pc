@@ -10,7 +10,10 @@ struct LauncherSettings {
     float resolution = 0.0f;                  // 0 = follow the window, else a multiple of 480p
     bool widescreen = true;
     bool vsync = false;
-    unsigned frameRate = 0;                   // [video] frame_interpolation_fps: 0 (60 fps) or 120
+    unsigned frameRate = 0;                   // [video] frame_interpolation_fps: 0 (60 fps), 120, 180
+    unsigned msaa = 1;                        // [video] msaa: 1, 2, 4, 8
+    bool anisotropic = true;                  // [video] anisotropic_filtering
+    float drawDistance = 1.0f;                // [excite_truck] draw_distance: 1.0 to 4.0
     bool showFps = true;
     std::string graphicsApi = "auto";         // auto, d3d12, vulkan (Windows only)
     int volumePercent = 100;
@@ -32,6 +35,9 @@ void SetResolution(float multiplier);
 void SetWidescreen(bool on);
 void SetVsync(bool on);
 void SetFrameRate(unsigned fps);
+void SetMsaa(unsigned samples);
+void SetAnisotropic(bool on);
+void SetDrawDistance(float multiplier);
 void SetShowFps(bool on);
 void SetGraphicsApi(const std::string& api);
 void SetVolumePercent(int percent);

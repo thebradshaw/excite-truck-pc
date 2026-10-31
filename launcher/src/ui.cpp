@@ -539,15 +539,36 @@ void SettingsPage() {
         }
     }
 #endif
+    {
+        static const unsigned values[] = {1, 2, 4, 8};
+        int index = 0;
+        for (int i = 0; i < 4; ++i) {
+            if (values[i] == g_settings.msaa) index = i;
+        }
+        if (ChoiceRow("Anti-Aliasing",
+                "Smooths jagged edges (MSAA). Higher settings cost more graphics card time. Applies the next time "
+                "the game starts.",
+                {"OFF", "2X", "4X", "8X"}, index)) {
+            g_settings.msaa = values[index];
+            cfg::SetMsaa(g_settings.msaa);
+        }
+    }
+    if (ToggleRow("Sharper Textures",
+            "Keeps the track and ground sharp when seen at an angle (16x anisotropic filtering). Applies the "
+            "next time the game starts.",
+            g_settings.anisotropic)) {
+        cfg::SetAnisotropic(g_settings.anisotropic);
+    }
 
     Heading("MOTION");
     {
-        int index = g_settings.frameRate >= 120 ? 1 : 0;
+        int index = g_settings.frameRate >= 180 ? 2 : g_settings.frameRate >= 120 ? 1 : 0;
         if (ChoiceRow("Frame Rate",
-                "60 is the game's own speed. 120 adds smooth in-between frames in races (experimental). Use it "
-                "with a 120 Hz or faster screen and VSync on; the game itself still runs at its normal speed.",
-                {"60", "120"}, index)) {
-            g_settings.frameRate = index == 1 ? 120 : 0;
+                "60 is the game's own speed. 120 and 180 draw smooth in-between frames; the game itself still "
+                "runs at its normal speed. Use them with a 120 Hz or faster screen and VSync on.",
+                {"60", "120", "180"}, index)) {
+            static const unsigned rates[] = {0, 120, 180};
+            g_settings.frameRate = rates[index];
             cfg::SetFrameRate(g_settings.frameRate);
         }
     }
@@ -562,11 +583,18 @@ void SettingsPage() {
 
     Heading("VIEW");
     {
+        static const float values[] = {1.0f, 1.5f, 2.0f, 3.0f};
         int index = 0;
-        ChoiceRow("Draw Distance",
-            "See further down the track: Extended and Maximum draw scenery the Wii left out in the distance. "
-            "This option arrives in a coming update.",
-            {"ORIGINAL", "EXTENDED", "MAXIMUM"}, index, false, "COMING SOON");
+        for (int i = 0; i < 4; ++i) {
+            if (std::fabs(values[i] - g_settings.drawDistance) < 0.01f) index = i;
+        }
+        if (ChoiceRow("Draw Distance",
+                "How far down the track you can see. Pushes the fog and the far edge of the scenery out: "
+                "Original is the Wii's view, 3X shows the most.",
+                {"ORIGINAL", "1.5X", "2X", "3X"}, index)) {
+            g_settings.drawDistance = values[index];
+            cfg::SetDrawDistance(g_settings.drawDistance);
+        }
     }
 
     Heading("AUDIO");

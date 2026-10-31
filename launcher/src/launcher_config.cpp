@@ -61,6 +61,9 @@ LauncherSettings Load() {
     s.widescreen = RuntimeConfigFile::WidescreenEnabled(true);
     s.vsync = RuntimeConfigFile::Vsync();
     s.frameRate = RuntimeConfigFile::FrameInterpolationFps(0);
+    s.msaa = RuntimeConfigFile::Msaa(1);
+    s.anisotropic = RuntimeConfigFile::AnisotropicFiltering(true);
+    s.drawDistance = RuntimeConfigFile::EtDrawDistance();
     s.showFps = RuntimeConfigFile::ShowFps();
     s.graphicsApi = RuntimeConfigFile::GraphicsApi("auto");
     s.volumePercent = static_cast<int>(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f + 0.5f);
@@ -76,6 +79,9 @@ void SetResolution(float multiplier) { RuntimeConfigFile::SetResolutionMultiplie
 void SetWidescreen(bool on) { Write("video", "widescreen", Bool(on)); }
 void SetVsync(bool on) { RuntimeConfigFile::SetVsync(on); }
 void SetFrameRate(unsigned fps) { RuntimeConfigFile::SetFrameInterpolationFps(fps); }
+void SetMsaa(unsigned samples) { RuntimeConfigFile::SetMsaa(samples); }
+void SetAnisotropic(bool on) { RuntimeConfigFile::SetAnisotropicFiltering(on); }
+void SetDrawDistance(float multiplier) { RuntimeConfigFile::SetEtDrawDistance(multiplier); }
 void SetShowFps(bool on) { RuntimeConfigFile::SetShowFps(on); }
 void SetGraphicsApi(const std::string& api) { Write("video", "graphics_api", RuntimeConfigFile::FormatString(api)); }
 void SetVolumePercent(int percent) { RuntimeConfigFile::SetAudioVolume(std::clamp(percent, 0, 100) / 100.0f); }
