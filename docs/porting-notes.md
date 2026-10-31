@@ -312,6 +312,10 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
 - Menu video lines (Chris's Xbox Ally recording, D3D12): thin dashed lines at fixed screen rows in the title and menu background, underneath the UI. The background is a Bink video (uisingle.bik), uploaded as I8 textures: Y 640x448 and U/V 320x224, double-buffered at 0x10B61F00 and 0x10BCAF00. Aurora reads texture data lazily, well after GXLoadTexObj, so a buffer the decoder is already rewriting can be read half-updated. Fix (gx_texture.cpp, `EtTexSnapshots`): outside races, a texture whose data was marked changed in at least two different frames is copied at GXLoadTexObj time on the game thread. The worker hands aurora the copy. Each buffer has three persistent host copies used in turn. They are never freed while in use, since aurora keeps the pointer. A first version freed the copies and garbled every menu texture. The log line "copying video texture ..." shows it is active. Not reproduced in the container, so this fix is a best guess.
 - GX frame trace (`WC_TRACE_GX_FRAME`) now also logs viewport and scissor calls.
 
+## 0.3.2 (2026-10-31): one setup with everything
+
+- Merged the Xbox button prompts (PR #1) and the launcher (PR #2) into step2-runtime-port so one setup has 0.3.1, the prompts and the launcher. Patch 0003 (prompts) was regenerated on top of the current 0001: only `runtime_config.h` and `settings_overlay.cpp` needed their hunks re-placed. Checked in the container: title screen shows "Press (A) to Start" with the Xbox pack.
+
 ## 0.3.1 (2026-10-31): local achievements
 
 - Chris asked for achievements saved locally instead of RetroAchievements. `et_achievements.cpp` keeps 18 achievements; the list is `et_achievement_list.inc` and the rules are `et_achievement_rules.inc`. Files (agreed with the launcher, PR #2): `<user data>/achievements/definitions.json` (array of {id, title, description, points}, written at startup), `unlocks.json` ({"id": {"unlocked_at": ISO 8601 UTC}}, temp file + rename) and `progress.json` (races_finished, races_won, stars_collected, crashes).

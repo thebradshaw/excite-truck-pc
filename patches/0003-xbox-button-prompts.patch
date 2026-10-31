@@ -1,23 +1,25 @@
+diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
+index ceaf408..baed2d3 100644
 --- a/runtime/include/runtime_config.h
 +++ b/runtime/include/runtime_config.h
-@@ -73,6 +73,7 @@
+@@ -75,6 +75,7 @@ struct RuntimeUserConfig {
      std::optional<bool> invertAirControl;
      // Excite Truck: which one-time default changes have been applied to this config (see main.cpp).
      std::optional<int64_t> etDefaultsVersion;
 +    std::optional<bool> etXboxPrompts;
+     // Excite Truck: multiplier on the race fog and far clip distances (1 = original).
+     std::optional<float> etDrawDistance;
      std::optional<bool> networkEnabled;
-     std::optional<bool> discordPresenceEnabled;
-     // The application ID of the WiiCompiled Discord application. This is only
-@@ -479,6 +480,7 @@
+@@ -487,6 +488,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
      config.wiiRumble = FindConfigValue<bool>(document, "controller", "wii_rumble");
      config.invertAirControl = FindConfigValue<bool>(document, "controller", "invert_air_control");
      config.etDefaultsVersion = FindConfigValue<int64_t>(document, "excite_truck", "defaults_version");
 +    config.etXboxPrompts = FindConfigValue<bool>(document, "excite_truck", "xbox_prompts");
-     config.networkEnabled = FindConfigValue<bool>(document, "network", "enabled");
-     config.discordPresenceEnabled = FindConfigValue<bool>(document, "discord", "enabled");
-     config.discordClientId = FindConfigValue<std::string>(document, "discord", "client_id");
-@@ -905,6 +907,16 @@
-     return WriteSetting("controller", "invert_air_control", value ? "true" : "false");
+     if (auto value = FindConfigFloat(document, "excite_truck", "draw_distance"); value && *value >= 1.0f && *value <= 4.0f) {
+         config.etDrawDistance = *value;
+     }
+@@ -927,6 +929,16 @@ inline bool SetEtDrawDistance(float value) {
+     return WriteSetting("excite_truck", "draw_distance", formatted.str());
  }
  
 +// Excite Truck: show Xbox buttons in place of the Wii Remote's on-screen prompts.
@@ -33,53 +35,9 @@
  inline int64_t EtDefaultsVersion() {
      return Get().etDefaultsVersion.value_or(0);
  }
---- a/runtime/src/settings_overlay.cpp
-+++ b/runtime/src/settings_overlay.cpp
-@@ -52,6 +52,10 @@
- 
- // Defined in runtime/src/hle/audio/ax_mix.cpp. That header is private to the HLE
- // directory and is not on this target's include path.
-+namespace EtPrompts {
-+void Apply(bool enabled);
-+}
-+
- namespace AxDspHle {
- void SetMixWorkerEnabled(bool enabled);
- }
-@@ -962,6 +966,11 @@
-         if (ImGui::Checkbox("Invert air control (push up to dip the nose)", &invertAir)) {
-             RuntimeConfigFile::SetInvertAirControl(invertAir);
-         }
-+        static bool xboxPrompts = RuntimeConfigFile::EtXboxPrompts(true);
-+        if (ImGui::Checkbox("Xbox button prompts (off: the original Wii Remote buttons)", &xboxPrompts)) {
-+            RuntimeConfigFile::SetEtXboxPrompts(xboxPrompts);
-+            EtPrompts::Apply(xboxPrompts);
-+        }
-         ImGui::TextDisabled("Gamepad: RT/R drive, X brake, A turbo, left stick steers and tilts in the air.");
-         ImGui::TextDisabled("Menus: A select, B back, left stick or D-pad move.");
-         ImGui::Separator();
---- a/runtime/src/main.cpp
-+++ b/runtime/src/main.cpp
-@@ -70,6 +70,9 @@
- #include "discord_presence.h"
- #include <iterator>
- static bool LoadExciteTruckWindowIcon(std::vector<uint8_t>& rgba);
-+namespace EtPrompts {
-+void Apply(bool enabled);
-+}
- #include "fiber_manager.h"
- #include "gx_worker.h"
- #include "hle_stubs.h"
-@@ -1506,6 +1509,9 @@
-         UpdateMkwDynamicAspectSurface(auroraInfo.windowSize.native_fb_width,
-                                       auroraInfo.windowSize.native_fb_height);
-         settings_overlay::InitializeRuntimeSettings();
-+        if (GuestRegion::Current() == GuestRegion::Id::ExciteTruck) {
-+            EtPrompts::Apply(RuntimeConfigFile::EtXboxPrompts(true));
-+        }
-         if (BootRace::Requested()) {
-             aurora_set_skip_unready_pipelines(false);
-         }
+diff --git a/runtime/src/hle/excite_truck/et_prompts.cpp b/runtime/src/hle/excite_truck/et_prompts.cpp
+new file mode 100644
+index 0000000..c35cfa6
 --- /dev/null
 +++ b/runtime/src/hle/excite_truck/et_prompts.cpp
 @@ -0,0 +1,54 @@
@@ -137,3 +95,54 @@
 +    RT_LOG(RT_TAG_RUNTIME) << "Xbox button prompts: " << g_group->registrations.size() << " textures" << std::endl;
 +}
 +} // namespace EtPrompts
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index 59571d5..739db18 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -70,6 +70,9 @@
+ #include "discord_presence.h"
+ #include <iterator>
+ static bool LoadExciteTruckWindowIcon(std::vector<uint8_t>& rgba);
++namespace EtPrompts {
++void Apply(bool enabled);
++}
+ #include "fiber_manager.h"
+ #include "gx_worker.h"
+ #include "hle_stubs.h"
+@@ -1508,6 +1511,9 @@ int RuntimeMain(int argc, char** argv) {
+         UpdateMkwDynamicAspectSurface(auroraInfo.windowSize.native_fb_width,
+                                       auroraInfo.windowSize.native_fb_height);
+         settings_overlay::InitializeRuntimeSettings();
++        if (GuestRegion::Current() == GuestRegion::Id::ExciteTruck) {
++            EtPrompts::Apply(RuntimeConfigFile::EtXboxPrompts(true));
++        }
+         if (BootRace::Requested()) {
+             aurora_set_skip_unready_pipelines(false);
+         }
+diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
+index bfdf3e4..6cbd761 100644
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -58,6 +58,10 @@ extern "C" int g_gxFrameCount;
+ extern std::atomic<float> g_etDrawDistance;
+ float EtDrawDistanceScale();
+ 
++namespace EtPrompts {
++void Apply(bool enabled);
++}
++
+ namespace AxDspHle {
+ void SetMixWorkerEnabled(bool enabled);
+ }
+@@ -968,6 +972,11 @@ void DrawControllerSettings() {
+         if (ImGui::Checkbox("Invert air control (push up to dip the nose)", &invertAir)) {
+             RuntimeConfigFile::SetInvertAirControl(invertAir);
+         }
++        static bool xboxPrompts = RuntimeConfigFile::EtXboxPrompts(true);
++        if (ImGui::Checkbox("Xbox button prompts (off: the original Wii Remote buttons)", &xboxPrompts)) {
++            RuntimeConfigFile::SetEtXboxPrompts(xboxPrompts);
++            EtPrompts::Apply(xboxPrompts);
++        }
+         ImGui::TextDisabled("Gamepad: RT/R drive, X brake, A turbo, left stick steers and tilts in the air.");
+         ImGui::TextDisabled("Menus: A select, B back, left stick or D-pad move.");
+         ImGui::Separator();
