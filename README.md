@@ -45,6 +45,13 @@ Alt+Enter switches to a window; F10 has the display and resolution settings.
 - **Anti-aliasing (MSAA)**: Off, 2x, 4x, 8x. Off by default since it costs GPU time. Config key:
   `[video] msaa` (1, 2, 4, 8). Applies after a restart.
 
+## Achievements
+
+The game has 18 achievements of its own, kept on your PC only (no account needed). An unlock
+pops up at the bottom of the screen, and F10 > Achievements lists them all. They are saved in
+`UserData/achievements/`: `definitions.json` (the list), `unlocks.json` (what you earned and when)
+and `progress.json` (running totals for races, wins, stars and crashes).
+
 ## Your own music
 
 Drop MP3s into `ExciteTruck/UserData/Music` (the build scripts create it). Subfolders are fine, up to 100 songs. In the game, set Options > Race Music to
