@@ -106,6 +106,7 @@ if [ "$(cat "$WS/.et-patched" 2>/dev/null)" != "$PATCH_STAMP" ]; then
     step "Applying the Excite Truck patches"
     git -C "$WS" apply --whitespace=nowarn "$REPO/patches/0001-excite-truck-runtime.patch"
     git -C "$WS/aurora-main" apply --whitespace=nowarn "$REPO/patches/0002-aurora-channel-colors.patch"
+    git -C "$WS" apply --whitespace=nowarn "$REPO/patches/0003-xbox-button-prompts.patch"
     cat "$REPO/tools/sdk_map/et_versions.inc" >> "$WS/runtime/include/guest_abi/guest_versions.inc"
     mkdir -p "$WS/projects/excite-truck"
     cp "$REPO"/projects/excite-truck/* "$WS/projects/excite-truck/"
@@ -147,6 +148,8 @@ B="$WS/build-linux"
 install -m 755 "$B/WiiCompiled" "$OUT/ExciteTruck"
 for f in "$B"/*.bin "$B"/*.pem "$B"/*.db "$B"/*.so*; do [ -e "$f" ] && cp -f "$f" "$OUT/"; done
 for d in fonts wii_bootstrap; do [ -d "$B/$d" ] && rm -rf "${OUT:?}/$d" && cp -r "$B/$d" "$OUT/"; done
+# Xbox button prompts (our own art, see tools/prompts/make_pack.py).
+rm -rf "${OUT:?}/prompts" && cp -r "$REPO/assets/prompts" "$OUT/prompts"
 # portable.txt keeps settings, saves and caches in UserData next to the game.
 touch "$OUT/portable.txt"
 mkdir -p "$OUT/UserData/Music"

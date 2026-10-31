@@ -337,3 +337,26 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
 
 - The menu video lines were still there in 0.2.5 (Chris's Ally screenshot), at the same rows, so they are not caused by a race between the game and the renderer. The Bink video is one quad with 4 TEV stages: Y 640x448, U and V 320x224. It also uses 128x4 and 64x4 IA8 tables of small signed offsets as indirect textures. Aurora's indirect path truncates `uv*scale*128` to fixed point, then samples the table at exactly `fixed/(size*128)`, which is a texel edge. On AMD GPUs a few rows come out one unit low or pick the neighbouring texel, so the whole row gets the wrong sideways shift. The fix (aurora shader.cpp, patch 0002) adds 0.125 before truncating and samples half a fixed unit inside the texel. Container output looks unchanged. The fix is unconfirmed on AMD.
 - `WC_TRACE_GX_FRAME` also logs POS/TEX0 attribute values that go through the FIFO path.
+
+## Xbox button prompts
+
+- **Where the prompts come from.** The round 1, 2, A, B, +, - and D-pad icons are textures in
+  `files/common.res` (`but_*.tex`); the larger 1/2 buttons and a small dark pair are in
+  `uiaction.res` (`1_button.img`, `2_button.img`, `controlwii.art`); the replay controls are one
+  128x128 atlas (`race.res/replayrvl.art`, next to unused GameCube and original Xbox versions);
+  `race.res/tapbut.tex` is the crash "tap 2" sign and `overlays.res/press2.tex` a baked-in
+  "Press 2 to Start". Each icon is a CMPR colour texture plus a separate I4 alpha mask (stored right
+  after the colour mips); one circle mask is shared by 1, 2, + and -.
+- **Res/toc layout.** `.toc` entries are 0x44 bytes, little endian: name[32], type (reversed fourcc,
+  `TEX `), ?, size, offset into the `.res`, CRC. For a texture entry at offset X, width/height are
+  u16 at X+0x80, the format byte at X+0x85 (0x44 = CMPR with an I4 mask), and the data offsets are
+  relative to X+0x98: colour at +[X+0x9C], mask at +[X+0xA0] (0x68 and 0x868 for a 64x64 icon).
+- **How they are swapped.** Aurora already does Dolphin-style replacement (`tex1_<w>x<h>_<xxh64 of
+  the base level>_<fmt>`). `et_prompts.cpp` (patch 0003) registers `prompts/xbox` next to the exe at
+  priority -100, below anything in `UserData/texture_replacements`, and the F10 checkbox
+  unregisters it. The pack is drawn by `tools/prompts/make_pack.py` (shapes plus the Inter font, no
+  copied artwork) at 4x size, and the hashes were checked against `texture_dumps` from a real run.
+- **Mapping.** Follows the pad layout: Wii 2 = A, 1 = B, A = Y, + = Menu, - = View, D-pad stays a
+  D-pad. Wii B has no pad button (only the keyboard's B); its replay cell is a blank button.
+- **Not done yet:** the tutorial photos of hands holding a Wii Remote (`overlays.res/tu_*.art`) and
+  the Wii strap and remote screens (`uiaction.res/WiiStrap*.img`, `rev_rem*.img`).

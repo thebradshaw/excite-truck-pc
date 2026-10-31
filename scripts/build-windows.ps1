@@ -299,6 +299,7 @@ if ($current -ne $stamp) {
     Step 'Applying the Excite Truck patches'
     Run $git.Source @('-C', $ws, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0001-excite-truck-runtime.patch'))
     Run $git.Source @('-C', $aurora, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0002-aurora-channel-colors.patch'))
+    Run $git.Source @('-C', $ws, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0003-xbox-button-prompts.patch'))
     $versions = Join-Path $ws 'runtime\include\guest_abi\guest_versions.inc'
     [IO.File]::AppendAllText($versions, [IO.File]::ReadAllText((Join-Path $Repo 'tools\sdk_map\et_versions.inc')))
     $project = Join-Path $ws 'projects\excite-truck'
@@ -429,6 +430,11 @@ if (Test-Path -LiteralPath $iconFile -PathType Leaf) { Copy-Item -LiteralPath $i
 # Runs the game with frame timing logged to perf-log.txt (for tracking down slow spots).
 [IO.File]::WriteAllText((Join-Path $Out 'ExciteTruck-perf-log.bat'),
     "@echo off`r`ncd /d `"%~dp0`"`r`nset WC_ET_PERF=1`r`nExciteTruck.exe > perf-log.txt 2>&1`r`n")
+# Xbox button prompts (our own art, see tools/prompts/make_pack.py).
+$prompts = if ($SetupMode) { Join-Path $Payload 'prompts' } else { Join-Path $Repo 'assets\prompts' }
+$promptsTarget = Join-Path $Out 'prompts'
+if (Test-Path -LiteralPath $promptsTarget) { Remove-Item -LiteralPath $promptsTarget -Recurse -Force }
+if (Test-Path -LiteralPath $prompts -PathType Container) { Copy-Item -LiteralPath $prompts -Destination $promptsTarget -Recurse }
 # portable.txt keeps settings, saves and caches in UserData next to the game.
 New-Item -ItemType File -Force -Path (Join-Path $Out 'portable.txt') | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $Out 'UserData\Music')) | Out-Null

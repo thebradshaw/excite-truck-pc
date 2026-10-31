@@ -1,0 +1,139 @@
+--- a/runtime/include/runtime_config.h
++++ b/runtime/include/runtime_config.h
+@@ -73,6 +73,7 @@
+     std::optional<bool> invertAirControl;
+     // Excite Truck: which one-time default changes have been applied to this config (see main.cpp).
+     std::optional<int64_t> etDefaultsVersion;
++    std::optional<bool> etXboxPrompts;
+     std::optional<bool> networkEnabled;
+     std::optional<bool> discordPresenceEnabled;
+     // The application ID of the WiiCompiled Discord application. This is only
+@@ -479,6 +480,7 @@
+     config.wiiRumble = FindConfigValue<bool>(document, "controller", "wii_rumble");
+     config.invertAirControl = FindConfigValue<bool>(document, "controller", "invert_air_control");
+     config.etDefaultsVersion = FindConfigValue<int64_t>(document, "excite_truck", "defaults_version");
++    config.etXboxPrompts = FindConfigValue<bool>(document, "excite_truck", "xbox_prompts");
+     config.networkEnabled = FindConfigValue<bool>(document, "network", "enabled");
+     config.discordPresenceEnabled = FindConfigValue<bool>(document, "discord", "enabled");
+     config.discordClientId = FindConfigValue<std::string>(document, "discord", "client_id");
+@@ -905,6 +907,16 @@
+     return WriteSetting("controller", "invert_air_control", value ? "true" : "false");
+ }
+ 
++// Excite Truck: show Xbox buttons in place of the Wii Remote's on-screen prompts.
++inline bool EtXboxPrompts(bool fallback = true) {
++    return Get().etXboxPrompts.value_or(fallback);
++}
++
++inline bool SetEtXboxPrompts(bool value) {
++    Mutable().etXboxPrompts = value;
++    return WriteSetting("excite_truck", "xbox_prompts", value ? "true" : "false");
++}
++
+ inline int64_t EtDefaultsVersion() {
+     return Get().etDefaultsVersion.value_or(0);
+ }
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -52,6 +52,10 @@
+ 
+ // Defined in runtime/src/hle/audio/ax_mix.cpp. That header is private to the HLE
+ // directory and is not on this target's include path.
++namespace EtPrompts {
++void Apply(bool enabled);
++}
++
+ namespace AxDspHle {
+ void SetMixWorkerEnabled(bool enabled);
+ }
+@@ -962,6 +966,11 @@
+         if (ImGui::Checkbox("Invert air control (push up to dip the nose)", &invertAir)) {
+             RuntimeConfigFile::SetInvertAirControl(invertAir);
+         }
++        static bool xboxPrompts = RuntimeConfigFile::EtXboxPrompts(true);
++        if (ImGui::Checkbox("Xbox button prompts (off: the original Wii Remote buttons)", &xboxPrompts)) {
++            RuntimeConfigFile::SetEtXboxPrompts(xboxPrompts);
++            EtPrompts::Apply(xboxPrompts);
++        }
+         ImGui::TextDisabled("Gamepad: RT/R drive, X brake, A turbo, left stick steers and tilts in the air.");
+         ImGui::TextDisabled("Menus: A select, B back, left stick or D-pad move.");
+         ImGui::Separator();
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -70,6 +70,9 @@
+ #include "discord_presence.h"
+ #include <iterator>
+ static bool LoadExciteTruckWindowIcon(std::vector<uint8_t>& rgba);
++namespace EtPrompts {
++void Apply(bool enabled);
++}
+ #include "fiber_manager.h"
+ #include "gx_worker.h"
+ #include "hle_stubs.h"
+@@ -1506,6 +1509,9 @@
+         UpdateMkwDynamicAspectSurface(auroraInfo.windowSize.native_fb_width,
+                                       auroraInfo.windowSize.native_fb_height);
+         settings_overlay::InitializeRuntimeSettings();
++        if (GuestRegion::Current() == GuestRegion::Id::ExciteTruck) {
++            EtPrompts::Apply(RuntimeConfigFile::EtXboxPrompts(true));
++        }
+         if (BootRace::Requested()) {
+             aurora_set_skip_unready_pipelines(false);
+         }
+--- /dev/null
++++ b/runtime/src/hle/excite_truck/et_prompts.cpp
+@@ -0,0 +1,54 @@
++// Excite Truck (REXE01): Xbox button prompts.
++//
++// The game draws its button prompts (the round 1, 2, A, B, +, - and D-pad icons, the replay
++// controls and so on) from ordinary textures. The port ships replacements for them as a texture
++// pack in prompts/xbox next to the executable, named the way aurora's Dolphin-style texture
++// replacement expects (tex1_<w>x<h>_<hash>_<format>.png). They are registered at a lower priority
++// than anything in UserData/texture_replacements, so a player's own pack still wins.
++//
++// "[excite_truck] xbox_prompts = false" (or the F10 Controllers checkbox) brings the Wii Remote
++// prompts back; the switch takes effect immediately.
++#include "runtime_config.h"
++#include "runtime_log.h"
++
++#include <dolphin/gx/GXStruct.h>
++#include <aurora/texture.hpp>
++
++#include <filesystem>
++#include <mutex>
++#include <optional>
++
++namespace EtPrompts {
++namespace {
++std::mutex g_mutex;
++std::optional<aurora::texture::ReplacementGroup> g_group;
++} // namespace
++
++void Apply(bool enabled) {
++    std::lock_guard<std::mutex> lock(g_mutex);
++    if (!enabled) {
++        if (g_group) {
++            aurora::texture::unregister_replacements(*g_group);
++            g_group.reset();
++            RT_LOG(RT_TAG_RUNTIME) << "Xbox button prompts off" << std::endl;
++        }
++        return;
++    }
++    if (g_group) {
++        return;
++    }
++    const auto exeDir = RuntimeConfigFile::ExecutableDirectory();
++    if (!exeDir) {
++        return;
++    }
++    const std::filesystem::path root = *exeDir / "prompts" / "xbox";
++    std::error_code ec;
++    if (!std::filesystem::is_directory(root, ec)) {
++        RT_LOG(RT_TAG_RUNTIME) << "Xbox button prompts: " << root.string() << " is missing, keeping the Wii prompts"
++                               << std::endl;
++        return;
++    }
++    g_group = aurora::texture::load_replacement_directory(root, {.priority = -100});
++    RT_LOG(RT_TAG_RUNTIME) << "Xbox button prompts: " << g_group->registrations.size() << " textures" << std::endl;
++}
++} // namespace EtPrompts

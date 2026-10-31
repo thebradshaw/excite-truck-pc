@@ -24,6 +24,7 @@ git -C "$WS/aurora-main" checkout --quiet --force "$AURORA_COMMIT"
 git -C "$WS/aurora-main" clean -fdqx
 git -C "$WS" apply --whitespace=nowarn "$REPO/patches/0001-excite-truck-runtime.patch"
 git -C "$WS/aurora-main" apply --whitespace=nowarn "$REPO/patches/0002-aurora-channel-colors.patch"
+git -C "$WS" apply --whitespace=nowarn "$REPO/patches/0003-xbox-button-prompts.patch"
 cat "$REPO/tools/sdk_map/et_versions.inc" >> "$WS/runtime/include/guest_abi/guest_versions.inc"
 
 echo "==> Collecting the payload"
@@ -42,8 +43,9 @@ find "$STAGE/payload/overlay" -type d -empty -delete
 mkdir -p "$STAGE/payload/overlay/projects/excite-truck"
 cp "$REPO"/projects/excite-truck/* "$STAGE/payload/overlay/projects/excite-truck/"
 cp "$REPO/assets/shaders/initial_pipeline_cache.db" "$STAGE/payload/"
+cp -r "$REPO/assets/prompts" "$STAGE/payload/prompts"
 cp "$REPO/scripts/build-windows.ps1" "$STAGE/"
-( cd "$STAGE/payload" && find overlay initial_pipeline_cache.db -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16 ) > "$STAGE/payload/stamp.txt"
+( cd "$STAGE/payload" && find overlay initial_pipeline_cache.db prompts -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16 ) > "$STAGE/payload/stamp.txt"
 echo "    $(find "$STAGE/payload/overlay" -type f | wc -l) changed WiiCompiled files, stamp $(cat "$STAGE/payload/stamp.txt")"
 rm -f "$REPO/setup/payload.zip"
 python3 - "$STAGE" "$REPO/setup/payload.zip" <<'PY'
