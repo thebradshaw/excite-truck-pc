@@ -1,3 +1,16 @@
+diff --git a/include/aurora/aurora.h b/include/aurora/aurora.h
+index 0f2a02a..0e83d17 100644
+--- a/include/aurora/aurora.h
++++ b/include/aurora/aurora.h
+@@ -131,6 +131,8 @@ typedef struct {
+ 
+   // Keeps the window hidden for the whole run without pausing rendering.
+   bool startHidden;
++  // Applies maxTextureAnisotropy to every mipmapped texture, not only those the game asks for.
++  bool forceTextureAnisotropy;
+ } AuroraConfig;
+ 
+ typedef enum {
 diff --git a/lib/dolphin/gx/GXLighting.cpp b/lib/dolphin/gx/GXLighting.cpp
 index 4a88255..6b465d3 100644
 --- a/lib/dolphin/gx/GXLighting.cpp
@@ -88,6 +101,20 @@ index 3fdc0ee..9190f92 100644
  inline constexpr uint64_t StorageBufferSize = 8388608;  // 8 MiB
  inline constexpr uint64_t TextureUploadSize = 25165824; // 24 MiB
  
+diff --git a/lib/gfx/texture.cpp b/lib/gfx/texture.cpp
+index 029a3d0..f5c090a 100644
+--- a/lib/gfx/texture.cpp
++++ b/lib/gfx/texture.cpp
+@@ -310,6 +310,9 @@ wgpu::SamplerDescriptor TextureBind::get_descriptor() const noexcept {
+   float minLod = texObj.min_lod();
+   float maxLod = texObj.max_lod();
+   u16 maxAnisotropy = wgpu_aniso(texObj.max_aniso());
++  if (webgpu::g_graphicsConfig.forceTextureAnisotropy) {
++    maxAnisotropy = std::max<u16>(webgpu::g_graphicsConfig.textureAnisotropy, 1);
++  }
+   if (ref && ref->isReplacement) {
+     minLod = 0.f;
+     maxLod = 1000.f;
 diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
 index afe6328..67b1f0f 100644
 --- a/lib/gx/fifo.cpp
@@ -258,3 +285,27 @@ index e2e481e..5e4ccb3 100644
    wgpu::ShaderSourceWGSL wgslDescriptor{};
    wgslDescriptor.code = shaderSource.c_str();
    const auto label = fmt::format("GX Shader {:x}", hash);
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+index 6f4caab..9fe6994 100644
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -1143,6 +1143,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+       .depthFormat = wgpu::TextureFormat::Depth32Float,
+       .msaaSamples = g_config.msaa,
+       .textureAnisotropy = g_config.maxTextureAnisotropy,
++      .forceTextureAnisotropy = g_config.forceTextureAnisotropy,
+   };
+   create_copy_pipeline();
+   create_resample_pipeline();
+diff --git a/lib/webgpu/gpu.hpp b/lib/webgpu/gpu.hpp
+index f3992d2..945cf45 100644
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -18,6 +18,7 @@ struct GraphicsConfig {
+   wgpu::TextureFormat depthFormat;
+   uint32_t msaaSamples;
+   uint16_t textureAnisotropy;
++  bool forceTextureAnisotropy = false;
+   bool normalBuffer = false;
+ };
+ struct TextureWithSampler {

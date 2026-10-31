@@ -33,6 +33,18 @@ New profiles skip the tutorial that the game normally forces; it is still in the
 The game opens borderless full screen at your monitor's resolution (1080p on a 1080p screen).
 Alt+Enter switches to a window; F10 has the display and resolution settings.
 
+## Graphics options (F10, Graphics)
+
+- **Frame interpolation**: 120 or 180 FPS. The game still runs at 60; an in-between frame is drawn
+  from the last two. Turn VSync on and use a 120 Hz (or faster) screen. Config key:
+  `[video] frame_interpolation_fps` (0, 120, 180).
+- **Draw distance**: Original, 1.5x, 2x or 3x. Pushes the race fog and the far clip out so you see
+  further. Config key: `[excite_truck] draw_distance` (1.0 to 4.0).
+- **Sharper textures at angles**: 16x anisotropic filtering, on by default. Config key:
+  `[video] anisotropic_filtering` (true/false). Applies after a restart.
+- **Anti-aliasing (MSAA)**: Off, 2x, 4x, 8x. Off by default since it costs GPU time. Config key:
+  `[video] msaa` (1, 2, 4, 8). Applies after a restart.
+
 ## Your own music
 
 Drop MP3s into `ExciteTruck/UserData/Music` (the build scripts create it). Subfolders are fine, up to 100 songs. In the game, set Options > Race Music to
