@@ -89,7 +89,8 @@ echo "$DOL_SHA256  $DATA/sys/main.dol" | sha256sum -c --quiet ||
 
 # --- WiiCompiled, patched for Excite Truck ------------------------------------------------
 WS="$WORK/wiicompiled"
-PATCH_STAMP="$(cat "$REPO"/patches/*.patch "$REPO/tools/sdk_map/et_versions.inc" "$REPO"/projects/excite-truck/* | sha256sum | cut -c1-16)"
+PATCH_STAMP="$( (cat "$REPO"/patches/*.patch "$REPO/tools/sdk_map/et_versions.inc" "$REPO"/projects/excite-truck/*
+    find "$REPO/launcher" -type f | LC_ALL=C sort | xargs cat) | sha256sum | cut -c1-16)"
 if [ "$(cat "$WS/.et-patched" 2>/dev/null)" != "$PATCH_STAMP" ]; then
     step "Fetching WiiCompiled (the recompiler and runtime this port is built on)"
     if [ ! -d "$WS/.git" ]; then
@@ -109,6 +110,9 @@ if [ "$(cat "$WS/.et-patched" 2>/dev/null)" != "$PATCH_STAMP" ]; then
     cat "$REPO/tools/sdk_map/et_versions.inc" >> "$WS/runtime/include/guest_abi/guest_versions.inc"
     mkdir -p "$WS/projects/excite-truck"
     cp "$REPO"/projects/excite-truck/* "$WS/projects/excite-truck/"
+    # The launcher builds inside the runtime tree, next to the game (see launcher/CMakeLists.txt).
+    cp -r "$REPO/launcher" "$WS/runtime/et_launcher"
+    printf '\nadd_subdirectory(et_launcher)\n' >> "$WS/runtime/CMakeLists.txt"
     echo "$PATCH_STAMP" > "$WS/.et-patched"
 fi
 
@@ -139,12 +143,13 @@ cmake -S runtime -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DMKW_INITIAL_PIPELINE_CACHE="$REPO/assets/shaders/initial_pipeline_cache.db" \
     -DMKW_TRANSLATED_COMPILE_JOBS="$JOBS" ${ET_CMAKE_ARGS:-} >/dev/null
 step "Compiling (this is the long part: 20 to 60 minutes)"
-cmake --build build-linux --target WiiCompiled --parallel "$JOBS"
+cmake --build build-linux --target WiiCompiled ExciteTruckLauncher --parallel "$JOBS"
 
 # --- Package ------------------------------------------------------------------------------
 step "Installing to $OUT"
 B="$WS/build-linux"
 install -m 755 "$B/WiiCompiled" "$OUT/ExciteTruck"
+install -m 755 "$B/ExciteTruckLauncher" "$OUT/ExciteTruckLauncher"
 for f in "$B"/*.bin "$B"/*.pem "$B"/*.db "$B"/*.so*; do [ -e "$f" ] && cp -f "$f" "$OUT/"; done
 for d in fonts wii_bootstrap; do [ -d "$B/$d" ] && rm -rf "${OUT:?}/$d" && cp -r "$B/$d" "$OUT/"; done
 # portable.txt keeps settings, saves and caches in UserData next to the game.
@@ -158,9 +163,12 @@ fi
 
 cat <<EOF
 
-Done. Run the game with:
+Done. Start the launcher (settings, music, then Start Game) with:
+  "$OUT/ExciteTruckLauncher"
+or go straight into the game with:
   "$OUT/ExciteTruck"
 
-Your own songs go in $OUT/UserData/Music (MP3, up to 100). In the game set
-Options > Race Music to All Random. F10 opens the settings bar.
+Your own songs go in $OUT/UserData/Music (MP3, up to 100), or pick another folder in the
+launcher's Music page. In the game set Options > Race Music to All Random. F10 opens the
+settings bar.
 EOF
