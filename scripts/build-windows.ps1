@@ -10,7 +10,7 @@ Run from PowerShell in the repository folder:
 Accepts a .wbfs/.iso/.rvz/.ciso/.wia disc image, a .zip holding one (or the first part,
 .zip.001, of a zip split by 7-Zip), or a folder already
 extracted with nodtool (the one holding sys\ and files\). The result is a self-contained folder,
-ExciteTruck\ in the repository, with ExciteTruck.exe, its settings (ExciteTruck\UserData) and your
+ExciteTruck\ in the repository, with ExciteTruckLauncher.exe and ExciteTruck.exe, its settings (ExciteTruck\UserData) and your
 Music folder.
 
 From a repository checkout this needs Git for Windows (winget install Git.Git). The setup exe
@@ -277,7 +277,8 @@ if ($SetupMode) {
 } else {
 $stampInputs = @(Get-ChildItem -LiteralPath (Join-Path $Repo 'patches') -Filter '*.patch' -File) +
     @(Get-Item -LiteralPath (Join-Path $Repo 'tools\sdk_map\et_versions.inc')) +
-    @(Get-ChildItem -LiteralPath (Join-Path $Repo 'projects\excite-truck') -File)
+    @(Get-ChildItem -LiteralPath (Join-Path $Repo 'projects\excite-truck') -File) +
+    @(Get-ChildItem -LiteralPath (Join-Path $Repo 'launcher') -File -Recurse)
 $stamp = ($stampInputs | Sort-Object FullName | ForEach-Object { Sha256 $_.FullName }) -join ','
 if ($current -ne $stamp) {
     Step 'Fetching WiiCompiled (the recompiler and runtime this port is built on)'
@@ -305,6 +306,11 @@ if ($current -ne $stamp) {
     $project = Join-Path $ws 'projects\excite-truck'
     [IO.Directory]::CreateDirectory($project) | Out-Null
     Copy-Item -Path (Join-Path $Repo 'projects\excite-truck\*') -Destination $project -Force
+    # The launcher builds inside the runtime tree, next to the game (see launcher\CMakeLists.txt).
+    $launcherDir = Join-Path $ws 'runtime\et_launcher'
+    if (Test-Path -LiteralPath $launcherDir) { Remove-Item -LiteralPath $launcherDir -Recurse -Force }
+    Copy-Item -LiteralPath (Join-Path $Repo 'launcher') -Destination $launcherDir -Recurse -Force
+    [IO.File]::AppendAllText((Join-Path $ws 'runtime\CMakeLists.txt'), "`nadd_subdirectory(et_launcher)`n")
     [IO.File]::WriteAllText($stampFile, $stamp)
 }
 }
@@ -405,7 +411,7 @@ try {
             "-DMKW_TRANSLATED_COMPILE_JOBS=$Jobs", "-DMKW_X86_CPU_PROFILE=$cpuProfile")
     Run $cmake $configure
     Step "Compiling with $Jobs jobs (this is the long part: 20 to 60 minutes)"
-    Run $cmake @('--build', $build, '--target', 'WiiCompiled', '--parallel', "$Jobs")
+    Run $cmake @('--build', $build, '--target', 'WiiCompiled', 'ExciteTruckLauncher', '--parallel', "$Jobs")
 } finally {
     $env:PATH = $oldPath
     Pop-Location
@@ -414,6 +420,7 @@ try {
 # --- Package -----------------------------------------------------------------------------
 Step "Installing to $Out"
 Copy-Item -LiteralPath (Join-Path $build 'WiiCompiled.exe') -Destination (Join-Path $Out 'ExciteTruck.exe') -Force
+Copy-Item -LiteralPath (Join-Path $build 'ExciteTruckLauncher.exe') -Destination (Join-Path $Out 'ExciteTruckLauncher.exe') -Force
 Get-ChildItem -LiteralPath $build -File |
     Where-Object { $_.Extension -in '.dll', '.bin', '.pem', '.db', '.zip' } |
     Copy-Item -Destination $Out -Force
@@ -448,7 +455,8 @@ if ($Shortcut) {
     $shell = New-Object -ComObject WScript.Shell
     $desktop = [Environment]::GetFolderPath('Desktop')
     $link = $shell.CreateShortcut((Join-Path $desktop 'Excite Truck.lnk'))
-    $link.TargetPath = Join-Path $Out 'ExciteTruck.exe'
+    # The shortcut opens the launcher (settings, music, then Start Game).
+    $link.TargetPath = Join-Path $Out 'ExciteTruckLauncher.exe'
     $link.WorkingDirectory = $Out
     $gameIcon = Join-Path $Out 'ExciteTruck.ico'
     if (Test-Path -LiteralPath $gameIcon -PathType Leaf) { $link.IconLocation = "$gameIcon,0" }
@@ -460,8 +468,9 @@ if ($Shortcut) {
 }
 
 Write-Host ''
-Write-Host 'Done. Start the game with:' -ForegroundColor Green
-Write-Host "  $(Join-Path $Out 'ExciteTruck.exe')"
+Write-Host 'Done. Start the launcher (settings, music, then Start Game) with:' -ForegroundColor Green
+Write-Host "  $(Join-Path $Out 'ExciteTruckLauncher.exe')"
+Write-Host "or go straight into the game with $(Join-Path $Out 'ExciteTruck.exe')."
 Write-Host ''
 Write-Host "Your own songs go in $(Join-Path $Out 'UserData\Music') (MP3, up to 100)."
 Write-Host 'In the game set Options > Race Music to All Random. F10 opens the settings bar.'
