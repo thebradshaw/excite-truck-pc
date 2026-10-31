@@ -54,6 +54,8 @@ float g_scale = 1.0f;
 float S(float v) { return v * g_scale; }
 
 SDL_Window* g_window = nullptr;
+ImTextureID g_logo = 0;
+ImVec2 g_logoSize;
 LauncherSettings g_settings;
 
 enum class Page { Settings, Controls, Music, Mods, Achievements };
@@ -914,9 +916,30 @@ void AchievementsPage() {
 
 // --- Left column --------------------------------------------------------------------------------
 
+// A small red "PC" tag; (right, top) is its top-right corner.
+void PcTag(ImDrawList* draw, float right, float top, float height) {
+    const ImVec2 text = F.label->CalcTextSizeA(height, FLT_MAX, 0.0f, "PC");
+    const ImVec2 t1(right, top + height * 1.1f);
+    const ImVec2 t0(t1.x - text.x - height * 0.7f, top);
+    draw->AddRectFilled(ImVec2(t0.x + height * 0.08f, t0.y + height * 0.1f), ImVec2(t1.x + height * 0.08f, t1.y + height * 0.1f),
+                        IM_COL32(20, 8, 4, 120), height * 0.25f);
+    draw->AddRectFilled(t0, t1, IM_COL32(220, 40, 30, 255), height * 0.25f);
+    draw->AddText(F.label, height, ImVec2(t0.x + height * 0.35f, t0.y + height * 0.05f), IM_COL32_WHITE, "PC");
+}
+
 void DrawLogo(ImDrawList* draw, ImVec2 min, ImVec2 max) {
-    ImFont* font = F.logo;
     const float boxW = max.x - min.x, boxH = max.y - min.y;
+    if (g_logo) {
+        // The logo from the disc's channel banner, as big as fits, centred.
+        const float scale = std::min(boxW * 0.92f / g_logoSize.x, boxH / g_logoSize.y);
+        const ImVec2 size(g_logoSize.x * scale, g_logoSize.y * scale);
+        const ImVec2 at(min.x + (boxW - size.x) * 0.5f, min.y + (boxH - size.y) * 0.5f);
+        draw->AddImage(g_logo, at, ImVec2(at.x + size.x, at.y + size.y));
+        // "PC" under the end of TRUCK.
+        PcTag(draw, at.x + size.x * 0.735f, at.y + size.y * 0.80f, size.y * 0.10f);
+        return;
+    }
+    ImFont* font = F.logo;
     // EXCITE across most of the column, TRUCK smaller under it to the right.
     const float base = font->FontSize;
     const float wideW = font->CalcTextSizeA(base, FLT_MAX, 0.0f, "EXCITE").x;
@@ -946,12 +969,7 @@ void DrawLogo(ImDrawList* draw, ImVec2 min, ImVec2 max) {
     outlined(truckPos, truckSizePx, "TRUCK", IM_COL32(255, 255, 255, 255), IM_COL32(190, 200, 222, 255), size * 0.035f);
 
     // A small "PC" tag before TRUCK.
-    const float tagH = truckSize.y * 0.42f;
-    const ImVec2 tagText = F.label->CalcTextSizeA(tagH, FLT_MAX, 0.0f, "PC");
-    const ImVec2 t1(truckPos.x - size * 0.10f, truckPos.y + truckSize.y * 0.30f + tagH * 1.1f);
-    const ImVec2 t0(t1.x - tagText.x - tagH * 0.7f, t1.y - tagH * 1.1f);
-    draw->AddRectFilled(t0, t1, IM_COL32(220, 40, 30, 255), tagH * 0.25f);
-    draw->AddText(F.label, tagH, ImVec2(t0.x + tagH * 0.35f, t0.y + tagH * 0.05f), IM_COL32_WHITE, "PC");
+    PcTag(draw, truckPos.x - size * 0.10f, truckPos.y + truckSize.y * 0.30f, truckSize.y * 0.42f);
 }
 
 struct MenuItem {
@@ -1053,6 +1071,11 @@ void ControllerHints(ImDrawList* draw, ImVec2 rightBottom) {
 } // namespace
 
 // --- Public -------------------------------------------------------------------------------------
+
+void UiSetLogo(void* texture, int width, int height) {
+    g_logo = reinterpret_cast<ImTextureID>(texture);
+    g_logoSize = ImVec2(float(width), float(height));
+}
 
 void UiInit(SDL_Window* window) {
     g_window = window;

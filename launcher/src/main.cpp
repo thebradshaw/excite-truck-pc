@@ -12,6 +12,7 @@
 #include "imgui_impl_sdlrenderer3.h"
 
 #include "launcher_config.h"
+#include "banner.h"
 #include "ui.h"
 
 namespace cfg = launcher_config;
@@ -27,6 +28,24 @@ void SetGameIcon(SDL_Window* window) {
         SDL_SetWindowIcon(window, icon);
         SDL_DestroySurface(icon);
     }
+}
+
+// The Excite Truck logo from the player's disc (files/opening.bnr), or nullptr.
+SDL_Texture* LoadLogo(SDL_Renderer* renderer) {
+    Image image;
+    if (!LoadBannerTexture(cfg::DiscFolder() / "files" / "opening.bnr", "ex_logo.tpl", image)) {
+        return nullptr;
+    }
+    SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC,
+                                             image.width, image.height);
+    if (texture == nullptr) {
+        return nullptr;
+    }
+    SDL_UpdateTexture(texture, nullptr, image.rgba.data(), image.width * 4);
+    SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR);
+    UiSetLogo(texture, image.width, image.height);
+    return texture;
 }
 
 // Starts the game in the background. Returns an empty string, or what went wrong.
@@ -106,6 +125,7 @@ int main(int, char**) {
     ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
     UiInit(window);
+    SDL_Texture* logo = LoadLogo(renderer);
 
     bool running = true;
     bool shown = false;
@@ -192,6 +212,9 @@ int main(int, char**) {
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
+    if (logo) {
+        SDL_DestroyTexture(logo);
+    }
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();

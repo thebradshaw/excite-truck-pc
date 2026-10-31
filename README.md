@@ -50,7 +50,8 @@ Alt+Enter switches to a window; F10 has the display and resolution settings.
 `ExciteTruckLauncher` opens first (the desktop shortcut points at it). It has the same layout as
 the [1080° Snowboarding launcher](https://github.com/thebradshaw/1080-Snowboarding-decomp): the
 main menu at the bottom left, a help box that explains whatever is under the cursor, and the
-current page on the right.
+current page on the right. The Excite Truck logo is read from your own disc files
+(`files/opening.bnr`, the Wii channel banner) when the launcher starts; no game art is in this repo.
 
 ![The launcher: main menu and help on the left, settings on the right](docs/screenshots/launcher.png)
 

@@ -7,6 +7,8 @@ struct SDL_Window;
 enum class UiAction { None, Launch, Quit };
 
 void UiInit(SDL_Window* window);
+// The game's own logo (an SDL texture), drawn in place of the text logo. nullptr = text logo.
+void UiSetLogo(void* texture, int width, int height);
 // Loads the fonts for a window of the given size. Returns true when the font atlas changed
 // (the renderer's font texture must then be rebuilt).
 bool UiUpdateFonts(float windowWidth, float windowHeight);

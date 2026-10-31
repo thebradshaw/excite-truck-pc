@@ -70,6 +70,7 @@ add_custom_command(
 add_executable(ExciteTruckLauncher
     src/main.cpp
     src/achievements.cpp
+    src/banner.cpp
     src/launcher_config.cpp
     src/scene.cpp
     src/ui.cpp
