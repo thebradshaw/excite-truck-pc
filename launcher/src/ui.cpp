@@ -1484,7 +1484,9 @@ void DrawGameColumn(int slot, float cx, float colW, float top, float logoH, doub
         }
     }
     // A grey silhouette of the game's vehicle behind its logo, facing the middle of the screen.
-    DrawSilhouette(draw, id, centre, ImVec2(logoW * 1.02f, logoH * 1.3f), IM_COL32(58, 60, 72, int(135 + 40 * hot)));
+    const float vehicleScale = id == GameId::Truck ? 0.8f : 1.0f;   // the truck reads big next to its logo
+    DrawSilhouette(draw, id, centre, ImVec2(logoW * 1.02f * vehicleScale, logoH * 1.3f * vehicleScale),
+                   IM_COL32(58, 60, 72, int(135 + 40 * hot)));
     const float scale = 1.0f + 0.06f * hot;
     const ImVec2 half(logoW * 0.5f * scale, logoH * 0.5f * scale);
     const float lift = S(6) * hot;
