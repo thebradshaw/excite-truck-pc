@@ -1619,6 +1619,25 @@ void DrawHome(float W, float H, float margin, float footer, double now) {
     // Logos centred a little above the middle of the window, with room for the lines under them.
     const float groupH = logoH + S(140);
     const float logoTop = std::max(areaTop, std::min(H * 0.42f - logoH * 0.5f, areaBottom - groupH));
+    {
+        // A thin line between the two games that fades out at both ends, with a small diamond at its middle.
+        const float x = std::round(W * 0.5f), top = logoTop - S(10), bottom = logoTop + groupH - S(10);
+        const float mid = (top + bottom) * 0.5f, w = S(1.5f);
+        const ImU32 clear = IM_COL32(255, 240, 220, 0), solid = IM_COL32(255, 240, 220, 230);
+        const ImU32 shadowClear = IM_COL32(10, 6, 4, 0), shadow = IM_COL32(10, 6, 4, 120);
+        draw->AddRectFilledMultiColor(ImVec2(x - w + S(1.5f), top + S(2)), ImVec2(x + w + S(1.5f), mid + S(2)), shadowClear,
+                                      shadowClear, shadow, shadow);
+        draw->AddRectFilledMultiColor(ImVec2(x - w + S(1.5f), mid + S(2)), ImVec2(x + w + S(1.5f), bottom + S(2)), shadow, shadow,
+                                      shadowClear, shadowClear);
+        draw->AddRectFilledMultiColor(ImVec2(x - w, top), ImVec2(x + w, mid), clear, clear, solid, solid);
+        draw->AddRectFilledMultiColor(ImVec2(x - w, mid), ImVec2(x + w, bottom), solid, solid, clear, clear);
+        const float d = S(8), o = S(2.5f);
+        draw->AddQuadFilled(ImVec2(x + S(1.5f), mid - d - o + S(2)), ImVec2(x + d + o + S(1.5f), mid + S(2)),
+                            ImVec2(x + S(1.5f), mid + d + o + S(2)), ImVec2(x - d - o + S(1.5f), mid + S(2)), shadow);
+        draw->AddQuadFilled(ImVec2(x, mid - d - o), ImVec2(x + d + o, mid), ImVec2(x, mid + d + o), ImVec2(x - d - o, mid),
+                            IM_COL32(255, 240, 220, 230));
+        draw->AddQuadFilled(ImVec2(x, mid - d), ImVec2(x + d, mid), ImVec2(x, mid + d), ImVec2(x - d, mid), kAmber);
+    }
     for (int i = 0; i < kGameCount; ++i) {
         DrawGameColumn(i, margin + colW * (i + 0.5f), colW, logoTop, logoH, now);
     }
