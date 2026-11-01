@@ -1,0 +1,1681 @@
+diff --git a/runtime/include/aurora_events.h b/runtime/include/aurora_events.h
+index c7f071d..fa0ba9b 100644
+--- a/runtime/include/aurora_events.h
++++ b/runtime/include/aurora_events.h
+@@ -157,7 +157,7 @@ inline bool g_etFrameSnapshots = false;
+ inline uint64_t g_etCopyDispPos = 0;
+ inline bool g_etCopyDispSnapshots = false;
+ inline bool PipelineGxFrames() {
+-    static const bool pipeline = !::GuestRegion::IsMarioKart() && std::getenv("WC_GX_FRAME_SYNC") == nullptr;
++    static const bool pipeline = ::GuestRegion::IsExciteTruck() && std::getenv("WC_GX_FRAME_SYNC") == nullptr;
+     return pipeline && EtRaceRunningForGx();
+ }
+ 
+diff --git a/runtime/include/guest_abi/guest_region.h b/runtime/include/guest_abi/guest_region.h
+index f4daa52..c1de418 100644
+--- a/runtime/include/guest_abi/guest_region.h
++++ b/runtime/include/guest_abi/guest_region.h
+@@ -22,8 +22,11 @@ enum class Id : uint8_t {
+     // Excite Truck (REXE01): another game on the same Wii SDK. Addresses with no counterpart
+     // there are 0, and registrations at 0 are skipped.
+     ExciteTruck = 3,
++    // Excitebots: Trick Racing (RX3E01), same rules as Excite Truck. Its game-only hooks use
++    // the 0x8E000000 alias (0x8F000000 is Excite Truck's).
++    Excitebots = 4,
+ };
+-inline constexpr size_t kCount = 4;
++inline constexpr size_t kCount = 5;
+ 
+ struct Row {
+     uint32_t address[kCount];
+@@ -96,7 +99,9 @@ constexpr Row RowOf(uint32_t pal) {
+     const Mapping ntscU = Map(pal, Id::NtscU);
+     const Mapping ntscJ = Map(pal, Id::NtscJ);
+     const Mapping excite = Map(pal, Id::ExciteTruck);
+-    return ntscU.found && ntscJ.found ? Row{{pal, ntscU.address, ntscJ.address, excite.found ? excite.address : 0u}}
++    const Mapping bots = Map(pal, Id::Excitebots);
++    return ntscU.found && ntscJ.found ? Row{{pal, ntscU.address, ntscJ.address, excite.found ? excite.address : 0u,
++                                             bots.found ? bots.address : 0u}}
+                                       : throw "PAL address outside guest_abi/guest_versions.inc";
+ }
+ 
+@@ -112,7 +117,8 @@ inline Id Current() noexcept { return static_cast<Id>(kMkwGuestRegion); }
+ template <uint32_t Pal>
+ inline uint32_t Address() noexcept {
+     constexpr Row row = RowOf(Pal);
+-    if constexpr (row.address[1] == Pal && row.address[2] == Pal && row.address[3] == Pal) {
++    if constexpr (row.address[1] == Pal && row.address[2] == Pal && row.address[3] == Pal &&
++                  row.address[4] == Pal) {
+         return Pal;
+     } else {
+         return row.In(Current());
+@@ -124,7 +130,8 @@ template <uint32_t Pal>
+ inline bool Is(uint32_t target) noexcept {
+     constexpr Row row = RowOf(Pal);
+     return (target == row.address[0] || target == row.address[1] || target == row.address[2] ||
+-            (row.address[3] != 0 && target == row.address[3])) &&
++            (row.address[3] != 0 && target == row.address[3]) ||
++            (row.address[4] != 0 && target == row.address[4])) &&
+            target == row.In(Current());
+ }
+ 
+@@ -134,7 +141,7 @@ inline bool Is(uint32_t target) noexcept {
+ inline uint32_t Translate(uint32_t pal) noexcept {
+     const Mapping mapping = Map(pal, Current());
+     if (!mapping.found) {
+-        if (Current() == Id::ExciteTruck) {
++        if (Current() == Id::ExciteTruck || Current() == Id::Excitebots) {
+             return 0; // not in this game; the registration is skipped
+         }
+         FatalUnknownAddress(pal);
+@@ -161,11 +168,14 @@ inline constexpr Facts kFacts[kCount] = {
+     {"RMCE01", 'E', 0x524D4345u, 0u, 0x80394E00u, "USA", "RVL-001(USA)", "LU", "NTSC", "US"},
+     {"RMCJ01", 'J', 0x524D434Au, 0u, 0x80398B00u, "JPN", "RVL-001(JPN)", "LJ", "NTSC", "JP"},
+     {"REXE01", 'E', 0x52455845u, 0u, 0x80575240u, "USA", "RVL-001(USA)", "LU", "NTSC", "US"},
++    {"RX3E01", 'E', 0x52583345u, 0u, 0x805BBD28u, "USA", "RVL-001(USA)", "LU", "NTSC", "US"},
+ };
+ 
+ // True for Mario Kart Wii builds; false when the runtime hosts another game (Excite Truck).
+ // Guards Mario Kart-only subsystems (EGG, races, online, Kamek).
+-inline bool IsMarioKart() noexcept { return Current() != Id::ExciteTruck; }
++inline bool IsMarioKart() noexcept { return Current() != Id::ExciteTruck && Current() != Id::Excitebots; }
++inline bool IsExciteTruck() noexcept { return Current() == Id::ExciteTruck; }
++inline bool IsExcitebots() noexcept { return Current() == Id::Excitebots; }
+ 
+ inline const Facts& CurrentFacts() noexcept { return kFacts[static_cast<size_t>(Current())]; }
+ 
+diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
+index baed2d3..d5eaefd 100644
+--- a/runtime/include/runtime_config.h
++++ b/runtime/include/runtime_config.h
+@@ -76,6 +76,7 @@ struct RuntimeUserConfig {
+     // Excite Truck: which one-time default changes have been applied to this config (see main.cpp).
+     std::optional<int64_t> etDefaultsVersion;
+     std::optional<bool> etXboxPrompts;
++    std::optional<bool> ebXboxPrompts;
+     // Excite Truck: multiplier on the race fog and far clip distances (1 = original).
+     std::optional<float> etDrawDistance;
+     std::optional<bool> networkEnabled;
+@@ -489,6 +490,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
+     config.invertAirControl = FindConfigValue<bool>(document, "controller", "invert_air_control");
+     config.etDefaultsVersion = FindConfigValue<int64_t>(document, "excite_truck", "defaults_version");
+     config.etXboxPrompts = FindConfigValue<bool>(document, "excite_truck", "xbox_prompts");
++    config.ebXboxPrompts = FindConfigValue<bool>(document, "excitebots", "xbox_prompts");
+     if (auto value = FindConfigFloat(document, "excite_truck", "draw_distance"); value && *value >= 1.0f && *value <= 4.0f) {
+         config.etDrawDistance = *value;
+     }
+@@ -939,6 +941,16 @@ inline bool SetEtXboxPrompts(bool value) {
+     return WriteSetting("excite_truck", "xbox_prompts", value ? "true" : "false");
+ }
+ 
++// Excitebots: the same switch, kept in its own [excitebots] section.
++inline bool EbXboxPrompts(bool fallback = true) {
++    return Get().ebXboxPrompts.value_or(fallback);
++}
++
++inline bool SetEbXboxPrompts(bool value) {
++    Mutable().ebXboxPrompts = value;
++    return WriteSetting("excitebots", "xbox_prompts", value ? "true" : "false");
++}
++
+ inline int64_t EtDefaultsVersion() {
+     return Get().etDefaultsVersion.value_or(0);
+ }
+diff --git a/runtime/src/hle/excite_truck/et_achievements.cpp b/runtime/src/hle/excite_truck/et_achievements.cpp
+index e4edc70..0f5450e 100644
+--- a/runtime/src/hle/excite_truck/et_achievements.cpp
++++ b/runtime/src/hle/excite_truck/et_achievements.cpp
+@@ -18,6 +18,7 @@
+ #include <fstream>
+ #include <map>
+ #include <mutex>
++#include <span>
+ #include <sstream>
+ #include <string>
+ #include <vector>
+@@ -33,6 +34,15 @@ struct Definition {
+ };
+ 
+ #include "et_achievement_list.inc"
++#include "../excitebots/eb_achievement_list.inc"
++
++// The list for the running game.
++std::span<const Definition> Defs() {
++    if (::GuestRegion::IsExcitebots()) {
++        return kEbDefinitions;
++    }
++    return kDefinitions;
++}
+ 
+ struct Toast {
+     const Definition* def;
+@@ -82,11 +92,12 @@ void WriteAtomically(const std::filesystem::path& path, const std::string& text)
+ void WriteDefinitions() {
+     std::ostringstream out;
+     out << "[\n";
+-    for (size_t i = 0; i < kDefinitions.size(); ++i) {
+-        const auto& d = kDefinitions[i];
++    const auto defs = Defs();
++    for (size_t i = 0; i < defs.size(); ++i) {
++        const auto& d = defs[i];
+         out << "  {\"id\": \"" << JsonEscape(d.id) << "\", \"title\": \"" << JsonEscape(d.title)
+             << "\", \"description\": \"" << JsonEscape(d.description) << "\", \"points\": " << d.points << "}"
+-            << (i + 1 < kDefinitions.size() ? ",\n" : "\n");
++            << (i + 1 < defs.size() ? ",\n" : "\n");
+     }
+     out << "]\n";
+     WriteAtomically(Directory() / "definitions.json", out.str());
+@@ -149,7 +160,7 @@ std::string NowIso8601() {
+ }
+ 
+ const Definition* Find(const char* id) {
+-    for (const auto& d : kDefinitions) {
++    for (const auto& d : Defs()) {
+         if (std::string_view(d.id) == id) {
+             return &d;
+         }
+@@ -173,12 +184,13 @@ void Unlock(const char* id) {
+ }
+ 
+ #include "et_achievement_rules.inc"
++#include "../excitebots/eb_achievement_rules.inc"
+ 
+ } // namespace
+ 
+ void Init() noexcept {
+     std::lock_guard lock(g_mutex);
+-    if (g_initialized || ::GuestRegion::Current() != ::GuestRegion::Id::ExciteTruck) {
++    if (g_initialized || !(::GuestRegion::IsExciteTruck() || ::GuestRegion::IsExcitebots())) {
+         return;
+     }
+     g_initialized = true;
+@@ -193,7 +205,11 @@ void Tick() noexcept {
+             return;
+         }
+     }
+-    EvaluateRules();
++    if (::GuestRegion::IsExcitebots()) {
++        eb::EvaluateRules();
++    } else {
++        EvaluateRules();
++    }
+ }
+ 
+ void DrawToasts() noexcept {
+@@ -232,15 +248,15 @@ void DrawMenu() noexcept {
+     std::lock_guard lock(g_mutex);
+     int points = 0;
+     int total = 0;
+-    for (const auto& d : kDefinitions) {
++    for (const auto& d : Defs()) {
+         total += d.points;
+         if (g_unlocked.count(d.id) != 0) {
+             points += d.points;
+         }
+     }
+-    ImGui::Text("%zu of %zu unlocked, %d of %d points", g_unlocked.size(), kDefinitions.size(), points, total);
++    ImGui::Text("%zu of %zu unlocked, %d of %d points", g_unlocked.size(), Defs().size(), points, total);
+     ImGui::Separator();
+-    for (const auto& d : kDefinitions) {
++    for (const auto& d : Defs()) {
+         const auto it = g_unlocked.find(d.id);
+         if (it != g_unlocked.end()) {
+             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", d.title);
+diff --git a/runtime/src/hle/excite_truck/et_achievements.h b/runtime/src/hle/excite_truck/et_achievements.h
+index 3e0fe9b..744957b 100644
+--- a/runtime/src/hle/excite_truck/et_achievements.h
++++ b/runtime/src/hle/excite_truck/et_achievements.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-// Local achievements for Excite Truck. Unlocks are kept on this PC only, in
++// Local achievements for Excite Truck and Excitebots (each game has its own list). Unlocks are kept on this PC only, in
+ // <user data>/achievements/unlocks.json; the game also writes the full list to
+ // <user data>/achievements/definitions.json so the launcher can show it.
+ namespace EtAchievements {
+diff --git a/runtime/src/hle/excite_truck/et_prompts.cpp b/runtime/src/hle/excite_truck/et_prompts.cpp
+index c35cfa6..7c3c52d 100644
+--- a/runtime/src/hle/excite_truck/et_prompts.cpp
++++ b/runtime/src/hle/excite_truck/et_prompts.cpp
+@@ -8,6 +8,7 @@
+ //
+ // "[excite_truck] xbox_prompts = false" (or the F10 Controllers checkbox) brings the Wii Remote
+ // prompts back; the switch takes effect immediately.
++#include "guest_abi/guest_region.h"
+ #include "runtime_config.h"
+ #include "runtime_log.h"
+ 
+@@ -41,7 +42,9 @@ void Apply(bool enabled) {
+     if (!exeDir) {
+         return;
+     }
+-    const std::filesystem::path root = *exeDir / "prompts" / "xbox";
++    // Excite Truck's pack is prompts/xbox; Excitebots has its own, prompts/excitebots.
++    const std::filesystem::path root =
++        *exeDir / "prompts" / (::GuestRegion::IsExcitebots() ? "excitebots" : "xbox");
+     std::error_code ec;
+     if (!std::filesystem::is_directory(root, ec)) {
+         RT_LOG(RT_TAG_RUNTIME) << "Xbox button prompts: " << root.string() << " is missing, keeping the Wii prompts"
+diff --git a/runtime/src/hle/excitebots/eb_achievement_list.inc b/runtime/src/hle/excitebots/eb_achievement_list.inc
+new file mode 100644
+index 0000000..76c6331
+--- /dev/null
++++ b/runtime/src/hle/excitebots/eb_achievement_list.inc
+@@ -0,0 +1,26 @@
++// Excitebots achievement list. Ids are stable: never rename one, the unlock file keys on it.
++constexpr std::array<Definition, 23> kEbDefinitions{{
++    {"air", "Hang Time", "Pull off an air stunt.", 5},
++    {"air_100", "Frequent Flyer", "Pull off 100 air stunts.", 25},
++    {"drift", "Sideways", "Drift through a corner.", 5},
++    {"drift_100", "Drift King", "Drift 100 times.", 25},
++    {"tree_run", "Tree Runner", "Weave through a row of trees.", 10},
++    {"spin_360", "Spin Cycle", "Land a 360.", 10},
++    {"car_throw", "Heave-Ho", "Throw a rival bot.", 10},
++    {"jump_combo", "Hop Scotch", "Chain jumps into a combo.", 10},
++    {"car_smash", "Demolition Derby", "Smash a rival bot.", 10},
++    {"tokens_100", "Token Hoarder", "Collect 100 tokens.", 15},
++    {"hammer", "Hammer Time", "Flatten a rival with the hammer.", 10},
++    {"bomb", "Bombs Away", "Hit a rival with a bomb.", 10},
++    {"chomp", "Chomp", "Take a bite out of a rival.", 10},
++    {"walk_smash", "Stomper", "Stomp a rival on foot.", 10},
++    {"lumberjack", "Lumberjack", "Knock down a tree.", 10},
++    {"rings", "Ring Leader", "Fly through a ring.", 10},
++    {"yellow_bar", "Monkey Bars", "Swing around a yellow bar.", 10},
++    {"red_bar", "Red Alert", "Swing around a red bar.", 15},
++    {"back_flip", "Head Over Heels", "Land a backflip.", 10},
++    {"sandwich", "Bot Sandwich", "Squash a rival between two bots.", 15},
++    {"victory", "Victory Lap", "Win a race.", 10},
++    {"victory_10", "Champion", "Win 10 races.", 25},
++    {"trick_master", "Trick Master", "Earn every stunt achievement from Hang Time to Bot Sandwich.", 50},
++}};
+diff --git a/runtime/src/hle/excitebots/eb_achievement_rules.inc b/runtime/src/hle/excitebots/eb_achievement_rules.inc
+new file mode 100644
+index 0000000..1411313
+--- /dev/null
++++ b/runtime/src/hle/excitebots/eb_achievement_rules.inc
+@@ -0,0 +1,68 @@
++// Game state read by the rules (Excitebots RX3E01).
++// The game keeps its own stunt tallies for its in-game Achievements screen (achievements.val):
++// *(0x805A1A0C) (r13-0x65D4) points at a block holding, for each of its 19 categories, the
++// count saved on the Wii (+0x1C + 4*c) and the count earned since boot (+0x68 + 4*c). The
++// category order is fixed by the table at 0x804A0BC8 (air, drift, tree_run, 360, car_throw,
++// jump_combo, car_smash, token, hammer, bomb, chomp, walk_smash, lumberjack, rings, yellow_bar,
++// red_bar, back_flip, sandwich, victory1). The function that adds to them is 0x8001C810; its
++// callers (0x80193xxx) also require the player state at +0x1F0 to be 0x50, which the
++// -direct_to_track developer races never reach (they sit at 0x51), so test in a normal race.
++namespace eb {
++constexpr uint32_t kTallyPointer = 0x805A1A0C;
++constexpr int kCategories = 19;
++
++struct Rule {
++    const char* id;
++    int category;
++    int count;
++};
++constexpr Rule kRules[] = {
++    {"air", 0, 1},         {"air_100", 0, 100},  {"drift", 1, 1},       {"drift_100", 1, 100},
++    {"tree_run", 2, 1},    {"spin_360", 3, 1},   {"car_throw", 4, 1},   {"jump_combo", 5, 1},
++    {"car_smash", 6, 1},   {"tokens_100", 7, 100}, {"hammer", 8, 1},    {"bomb", 9, 1},
++    {"chomp", 10, 1},      {"walk_smash", 11, 1}, {"lumberjack", 12, 1}, {"rings", 13, 1},
++    {"yellow_bar", 14, 1}, {"red_bar", 15, 1},   {"back_flip", 16, 1},  {"sandwich", 17, 1},
++    {"victory", 18, 1},    {"victory_10", 18, 10},
++};
++
++int g_frames = 0;
++int g_last[kCategories] = {};
++
++void EvaluateRules() {
++    if (++g_frames % 15 != 0) {
++        return;
++    }
++    const uint32_t block = Memory::Read32(kTallyPointer);
++    if (block < 0x80000000u || block >= 0x817FFF00u || (block & 3) != 0) {
++        return;
++    }
++    int totals[kCategories];
++    for (int c = 0; c < kCategories; ++c) {
++        const int saved = static_cast<int32_t>(Memory::Read32(block + 0x1C + 4 * c));
++        const int session = static_cast<int32_t>(Memory::Read32(block + 0x68 + 4 * c));
++        if (saved < 0 || session < 0 || saved > 10000000 || session > 10000000) {
++            return; // not the tally block (yet)
++        }
++        totals[c] = saved + session;
++    }
++    static const bool trace = std::getenv("WC_EB_TRACE_ACH") != nullptr;
++    for (int c = 0; c < kCategories; ++c) {
++        if (trace && totals[c] != g_last[c]) {
++            std::fprintf(stderr, "[achievements] category %d: %d\n", c, totals[c]);
++        }
++        g_last[c] = totals[c];
++    }
++    for (const Rule& r : kRules) {
++        if (totals[r.category] >= r.count) {
++            Unlock(r.id);
++        }
++    }
++    bool every = true;
++    for (int c = 0; c <= 17; ++c) {
++        every = every && totals[c] >= 1;
++    }
++    if (every) {
++        Unlock("trick_master");
++    }
++}
++} // namespace eb
+diff --git a/runtime/src/hle/excitebots/eb_hooks.cpp b/runtime/src/hle/excitebots/eb_hooks.cpp
+new file mode 100644
+index 0000000..2aa8ac2
+--- /dev/null
++++ b/runtime/src/hle/excitebots/eb_hooks.cpp
+@@ -0,0 +1,147 @@
++// Excitebots: Trick Racing (RX3E01) specific hooks.
++//
++// Addresses here use the 0x8E000000 alias: guest_versions.inc maps 0x8E000000 + (EB address
++// - 0x80000000) to the Excitebots address, so 8E046A08 below is EB 0x80046A08. Other games never
++// register these (the alias only has an Excitebots counterpart).
++
++#include <algorithm>
++#include <cstdint>
++#include <chrono>
++#include <cstring>
++#include <thread>
++#include <cstdlib>
++
++#include "abi_bridge.h"
++#include "hle_stubs.h"
++#include "ppc_runtime.h"
++#include "runtime_log.h"
++
++extern "C" void GX__DrawDone_8016eab0();
++extern "C" void OS__Report_801a25d0(CpuContext* ctx);
++
++namespace {
++constexpr uint32_t kGxDrawDoneFlag = 0x805A1E28u;     // -0x61b8(r13)
++constexpr uint32_t kGxDrawDoneCallback = 0x805A1E2Cu; // -0x61b4(r13)
++} // namespace
++
++// GXSetDrawDone (0x80046A08): writes a draw-done token to the FIFO and returns; the PE finish
++// interrupt then sets the flag and calls the draw-done callback. The runtime has no PE interrupt,
++// so finish the queued draws and do both here.
++extern "C" void EB_GXSetDrawDone_80046a08(CpuContext* ctx)
++{
++    GX__DrawDone_8016eab0();
++    Memory::Write8(kGxDrawDoneFlag, 1);
++    const uint32_t callback = Memory::Read32(kGxDrawDoneCallback);
++    if (callback != 0) {
++        InvokeIndirectCpu(callback, ctx);
++    }
++}
++PPC_NATIVE_OVERRIDE_VOID(8E046A08, EB_GXSetDrawDone_80046a08, (CpuContext* ctx), (ctx));
++
++// The game parses a command line at boot (wrapper 0x80004940 -> parser 0x80022360), but retail
++// builds pass an empty string. WC_EB_ARGS supplies one, which unlocks the developer options in the
++// table at 0x804A0EE8 (-direct_to_track:<track>, -force_chassis:<bot>, -widescreen, -players:<n>,
++// -no_music, ...). The wrapper's own check for one more option has no side effects.
++extern "C" void EB_ParseCommandLine_80004940(CpuContext* ctx)
++{
++    const uint32_t buf = ctx->gpr[3];
++    if (buf != 0) {
++        if (const char* args = std::getenv("WC_EB_ARGS"); args && *args) {
++            const size_t n = std::min<size_t>(std::strlen(args), 0xFF);
++            for (size_t i = 0; i < n; ++i) Memory::Write8(buf + uint32_t(i), uint8_t(args[i]));
++            Memory::Write8(buf + uint32_t(n), 0);
++            RT_LOGF(RT_TAG_HLE, "[eb] command line: %s\n", args);
++        }
++        InvokeDirectCpu<0x80022360u>(ctx);
++    }
++    ctx->gpr[3] = 1;
++}
++PPC_NATIVE_OVERRIDE_VOID(8E004940, EB_ParseCommandLine_80004940, (CpuContext* ctx), (ctx));
++
++// The game's debug printf (0x803EC320, varargs, ~870 callers) was stubbed out in the release
++// build. WC_GAME_LOG=1 routes it to OSReport.
++extern "C" void EB_DebugPrintf_803ec320(CpuContext* ctx)
++{
++    static const bool enabled = std::getenv("WC_GAME_LOG") != nullptr;
++    if (enabled) {
++        OS__Report_801a25d0(ctx);
++    }
++}
++PPC_NATIVE_OVERRIDE_VOID(8E3EC320, EB_DebugPrintf_803ec320, (CpuContext* ctx), (ctx));
++
++// Boot waits for the Wii Remote library with a tight loop (0x803F127C):
++//   do { } while (WPADGetStatus() != WPAD_STATE_SETUP);
++// On hardware, alarms and IPC replies arrive as interrupts while it spins. Here they only run when
++// something services them, so service them on each poll, then read the real status
++// (WPADGetStatus 0x80067010 is a thunk to WUDGetStatus 0x800750B8).
++extern "C" void OS_HLE_ProcessAlarms(int maxToProcess);
++
++extern "C" void EB_WPADGetStatus_80067010(CpuContext* ctx)
++{
++    OS_HLE_ProcessAlarms(8);
++    std::this_thread::sleep_for(std::chrono::microseconds(200));
++    InvokeIndirectCpu(0x800750B8u, ctx);
++}
++PPC_NATIVE_OVERRIDE_VOID(8E067010, EB_WPADGetStatus_80067010, (CpuContext* ctx), (ctx));
++
++// AIStopDMA (0x800342c0). Mario Kart Wii never links it, so the runtime has no hook; on hardware it
++// clears the AI DMA enable bit (0xCC005036 bit 15), which the runtime does not map. The runtime's
++// audio output keeps running; the game restarts DMA with AIStartDMA when it wants sound again.
++extern "C" void EB_AIStopDMA_800342c0(CpuContext*) {}
++PPC_NATIVE_OVERRIDE_VOID(8E0342C0, EB_AIStopDMA_800342c0, (CpuContext* ctx), (ctx));
++
++// OSGetFontEncode (0x800570D4). The first call picks a default from the VI DTV status register
++// (0xCC00206E) on NTSC consoles, which the runtime does not emulate. A USA console with no
++// Japanese font reports ANSI (0); the rest is the SDK's own logic.
++namespace {
++constexpr uint32_t kFontEncodeAddr = 0x805A0218u;  // u16, -0x7dc8(r13); 0xFFFF until first use
++constexpr uint32_t kFontParseFnAddr = 0x805A1EE8u; // -0x60f8(r13)
++constexpr uint32_t kParseStringAnsi = 0x800575D0u;
++} // namespace
++
++extern "C" void EB_OSGetFontEncode_800570d4(CpuContext* ctx)
++{
++    uint16_t encode = Memory::Read16(kFontEncodeAddr);
++    if (encode == 0xFFFFu) {
++        encode = 0;
++        Memory::Write16(kFontEncodeAddr, encode);
++        Memory::Write32(kFontParseFnAddr, kParseStringAnsi);
++    }
++    ctx->gpr[3] = encode;
++}
++PPC_NATIVE_OVERRIDE_VOID(8E0570D4, EB_OSGetFontEncode_800570d4, (CpuContext* ctx), (ctx));
++
++// __OSReadROM (0x8005A708): the system fonts from the IPL ROM, served from the bundled
++// replacement fonts by the Excite Truck hook (et_hooks.cpp), which is game-independent.
++extern "C" void ET_OSReadROM_80052f8c(CpuContext* ctx);
++
++extern "C" void EB_OSReadROM_8005a708(CpuContext* ctx)
++{
++    ET_OSReadROM_80052f8c(ctx);
++}
++PPC_NATIVE_OVERRIDE_VOID(8E05A708, EB_OSReadROM_8005a708, (CpuContext* ctx), (ctx));
++
++// NANDCreateAsync (0x800AF158) and NANDCreateDirAsync (0x800AF900): the public async calls, which
++// Mario Kart never links. Same arguments as the private ones the runtime implements.
++extern "C" int32_t NANDPrivateCreateAsync_HLE(uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr,
++                                              uint32_t commandBlockPtr);
++extern "C" int32_t NANDPrivateCreateDirAsync_HLE(uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr,
++                                                 uint32_t commandBlockPtr);
++
++extern "C" int32_t EB_NANDCreateAsync_800af158(uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr,
++                                               uint32_t commandBlockPtr)
++{
++    return NANDPrivateCreateAsync_HLE(pathPtr, perm, attr, callbackPtr, commandBlockPtr);
++}
++PPC_NATIVE_OVERRIDE(8E0AF158, EB_NANDCreateAsync_800af158, int32_t,
++    (uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr, uint32_t commandBlockPtr),
++    (pathPtr, perm, attr, callbackPtr, commandBlockPtr));
++
++extern "C" int32_t EB_NANDCreateDirAsync_800af900(uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr,
++                                                  uint32_t commandBlockPtr)
++{
++    return NANDPrivateCreateDirAsync_HLE(pathPtr, perm, attr, callbackPtr, commandBlockPtr);
++}
++PPC_NATIVE_OVERRIDE(8E0AF900, EB_NANDCreateDirAsync_800af900, int32_t,
++    (uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr, uint32_t commandBlockPtr),
++    (pathPtr, perm, attr, callbackPtr, commandBlockPtr));
+diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
+new file mode 100644
+index 0000000..e40bac7
+--- /dev/null
++++ b/runtime/src/hle/excitebots/eb_input.cpp
+@@ -0,0 +1,493 @@
++// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
++// keyboard, answered at the KPAD level like Excite Truck (see et_input.cpp).
++//   - KPADSetConnectCallback (0x8004E984) is recorded; the first KPADRead reports channel 0 as
++//     connected through it, which is how the game's input layer (0x803F10E0) marks a remote.
++//   - KPADReadEx (0x8004DABC; KPADRead 0x8004DAB0 jumps to it) fills one KPADStatus.
++//   - WPADProbe (0x8006830C) reports a core remote on channel 0.
++// The game reads one KPADStatus per channel per frame (0x803F1C54) into 0x8059BAB8 + chan*0xCB0.
++//
++// Layout in a race: RT/RB gas (2), X and LT/LB brake (1), A turbo (D-pad), B the Wii A button
++// (weapons), left stick steers and tilts in the air (inverted by default), Y or View also the Wii
++// A button ("Press A to reset"), Start pauses (+). While the game shows a remote-motion prompt
++// (SHAKE!!! after a crash, Push on a bar) A plays a remote swing instead of only turbo.
++// Menus and the pause menu: A OK (2), B/X back (1), left stick or D-pad move, View is minus.
++// Keyboard: X/Enter gas, Z/Backspace brake, C or Space turbo and swing, arrows steer, W/S tilt,
++// A = Wii A, P pause.
++//
++// Addresses use the 0x8E000000 alias (see eb_hooks.cpp).
++
++#include <SDL3/SDL_gamepad.h>
++#include <SDL3/SDL_keyboard.h>
++
++#include <algorithm>
++#include <chrono>
++#include <array>
++#include <cctype>
++#include <cmath>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++#include "abi_bridge.h"
++#include "hle_stubs.h"
++#include "ppc_runtime.h"
++#include "runtime_config.h"
++#include "runtime_log.h"
++#include "input_bindings.h"
++
++bool EbShakePromptShown(); // gx_texture.cpp: the shaking remote (crash, bar spin, dentures)
++bool EbPushPromptShown();  // gx_texture.cpp: the pushed remote (let go of a bar)
++bool EbCrashMeterShown();  // gx_texture.cpp: the crash recovery meter
++bool EbMenuButtonsShown(); // gx_texture.cpp: a menu's Back / OK icons are on screen
++int EbControllerTypeScreenFrames(); // gx_texture.cpp: the Wii Remote / Wii Wheel choice, -1 if not shown
++
++namespace {
++
++constexpr uint32_t kWpadLeft = 0x0001;
++constexpr uint32_t kWpadRight = 0x0002;
++constexpr uint32_t kWpadDown = 0x0004;
++constexpr uint32_t kWpadUp = 0x0008;
++constexpr uint32_t kWpadPlus = 0x0010;
++constexpr uint32_t kWpad2 = 0x0100;
++constexpr uint32_t kWpad1 = 0x0200;
++constexpr uint32_t kWpadB = 0x0400;
++constexpr uint32_t kWpadA = 0x0800;
++constexpr uint32_t kWpadMinus = 0x1000;
++constexpr uint32_t kWpadHome = 0x8000;
++
++// Held sideways (D-pad on the left).
++constexpr uint32_t kSidewaysUp = kWpadRight;
++constexpr uint32_t kSidewaysDown = kWpadLeft;
++constexpr uint32_t kSidewaysLeft = kWpadUp;
++constexpr uint32_t kSidewaysRight = kWpadDown;
++
++constexpr uint32_t kKpadStatusSize = 0x84; // 2008 KPADStatus
++constexpr int kChannels = 4;
++constexpr int kEmulatedChannel = 0;
++
++constexpr float kMaxSteerAccZ = 0.5f;
++constexpr float kMaxPitchRadians = 0.785398f;
++constexpr float kStickDeadzone = 0.15f;
++
++std::array<uint32_t, kChannels> g_connectCallbacks{};
++bool g_connectReported = false;
++uint32_t g_previousHold = 0;
++SDL_Gamepad* g_gamepad = nullptr;
++
++SDL_Gamepad* ActiveGamepad()
++{
++    if (g_gamepad != nullptr && SDL_GamepadConnected(g_gamepad)) {
++        return g_gamepad;
++    }
++    g_gamepad = nullptr;
++    int count = 0;
++    SDL_JoystickID* ids = SDL_GetGamepads(&count);
++    if (ids != nullptr) {
++        if (count > 0) {
++            g_gamepad = SDL_OpenGamepad(ids[0]);
++        }
++        SDL_free(ids);
++    }
++    return g_gamepad;
++}
++
++float StickAxis(SDL_Gamepad* pad, SDL_GamepadAxis axis)
++{
++    const float v = static_cast<float>(SDL_GetGamepadAxis(pad, axis)) / 32767.0f;
++    if (std::fabs(v) < kStickDeadzone) {
++        return 0.0f;
++    }
++    const float sign = v < 0.0f ? -1.0f : 1.0f;
++    return sign * std::min(1.0f, (std::fabs(v) - kStickDeadzone) / (1.0f - kStickDeadzone));
++}
++
++struct RemoteInput {
++    uint32_t hold = 0;
++    float steer = 0.0f; // -1 left .. +1 right
++    float pitch = 0.0f; // -1 nose down .. +1 nose up
++    int swing = -1; // which read of a swing this is, or -1
++};
++
++uint32_t StickAsDpad(SDL_Gamepad* pad)
++{
++    static uint32_t held = 0;
++    const float x = static_cast<float>(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX)) / 32767.0f;
++    const float y = static_cast<float>(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY)) / 32767.0f;
++    auto axis = [](float v, bool wasNeg, bool wasPos, bool& neg, bool& pos) {
++        const float on = 0.5f, off = 0.35f;
++        neg = v < -(wasNeg ? off : on);
++        pos = v > (wasPos ? off : on);
++    };
++    bool left, right, up, down;
++    axis(x, held & kSidewaysLeft, held & kSidewaysRight, left, right);
++    axis(y, held & kSidewaysUp, held & kSidewaysDown, up, down);
++    held = (left ? kSidewaysLeft : 0) | (right ? kSidewaysRight : 0) | (up ? kSidewaysUp : 0) |
++           (down ? kSidewaysDown : 0);
++    return held;
++}
++
++// Race state, found by watching the small-data area in menus, races and the pause menu:
++//   0x805A2CE4 (r13-0x52FC, float): the race simulation's time step. Zero in the menus, non-zero
++//                                   from the start of a race (it keeps its value while paused).
++//   0x805A2AC4 (r13-0x551C, float): the race clock in seconds. It stops while paused.
++// As for Excite Truck, a race counts as running while the step is set and the clock has moved in
++// the last 1.5 s, so the menus and the pause menu get the menu layout.
++constexpr uint32_t kRaceTimeStep = 0x805A2CE4u;
++constexpr uint32_t kRaceClock = 0x805A2AC4u;
++
++float ReadF32(uint32_t addr)
++{
++    const uint32_t bits = Memory::Read32(addr);
++    float v;
++    std::memcpy(&v, &bits, sizeof(v));
++    return v;
++}
++
++bool RaceRunning()
++{
++    if (!(ReadF32(kRaceTimeStep) > 0.0f)) {
++        return false;
++    }
++    static float lastClock = -1.0f;
++    static auto lastChange = std::chrono::steady_clock::now();
++    const float clock = ReadF32(kRaceClock);
++    const auto now = std::chrono::steady_clock::now();
++    if (clock != lastClock) {
++        lastClock = clock;
++        lastChange = now;
++    }
++    return now - lastChange < std::chrono::milliseconds(1500);
++}
++
++// Swings. Excitebots reads remote motion through its own detector (0x801E3D50): it keeps a slow
++// average of the gravity vector and reports a "flick" when the measured acceleration points
++// against that average, and a "shake" strength from how fast it changes. Crash recovery
++// ("SHAKE!!!") and letting go of a bar ("Push") are driven by these; grabbing a bar is
++// automatic. A virtual remote never moves, so each press of the swing button plays a short swing
++// instead: a few reads with the acceleration thrown hard against gravity, then back to rest.
++constexpr int kSwingReads = 3;
++int g_swingReadsLeft = 0;
++
++RemoteInput ReadInput()
++{
++    RemoteInput in;
++    // A menu over a race (pause, Training's lesson cards, results) takes the menu layout.
++    const bool racing = RaceRunning() && !EbMenuButtonsShown();
++    static int lastRacing = -1;
++    if (int(racing) != lastRacing && std::getenv("WC_TRACE_INPUT")) {
++        RT_LOGF(RT_TAG_HLE, "EB layout %s (step %.4f clock %.3f)\n", racing ? "race" : "menu",
++                ReadF32(kRaceTimeStep), ReadF32(kRaceClock));
++    }
++    lastRacing = racing;
++    const bool invertAir = RuntimeConfigFile::InvertAirControl(true);
++    bool swingButton = false;
++    bool actionButton = false; // A on the pad, C or Space: turbo, or the motion a prompt asks for
++    // The exit prompt or the F10 bar has the controls.
++    if (InputBindings::InputBlocked()) {
++        return in;
++    }
++    if (SDL_Gamepad* pad = ActiveGamepad()) {
++        auto button = [pad](SDL_GamepadButton b) { return SDL_GetGamepadButton(pad, b); };
++        const bool rightTrigger = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000;
++        const bool leftTrigger = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000;
++        // Y is always the Wii A button ("Press A to reset"). B is too in a race (weapons), and
++        // back (1) in the menus.
++        if (button(SDL_GAMEPAD_BUTTON_NORTH)) in.hold |= kWpadA;
++        if (button(SDL_GAMEPAD_BUTTON_WEST)) in.hold |= kWpad1;
++        if (button(SDL_GAMEPAD_BUTTON_EAST)) in.hold |= racing ? kWpadA : kWpad1;
++        if (button(SDL_GAMEPAD_BUTTON_DPAD_UP)) in.hold |= kSidewaysUp;
++        if (button(SDL_GAMEPAD_BUTTON_DPAD_DOWN)) in.hold |= kSidewaysDown;
++        if (button(SDL_GAMEPAD_BUTTON_DPAD_LEFT)) in.hold |= kSidewaysLeft;
++        if (button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) in.hold |= kSidewaysRight;
++        if (button(SDL_GAMEPAD_BUTTON_START)) in.hold |= kWpadPlus;
++        // Guide opens the runtime's exit prompt (settings_overlay.cpp), not the Wii HOME menu.
++        if (racing) {
++            // Drive: RT/RB gas (2), X and LT/LB brake (1), A turbo (any D-pad direction), B the Wii
++            // A button (weapons), left stick steers and tilts in the air. While the game asks for a
++            // remote motion (SHAKE!!! after a crash, Push on a bar) A plays a swing instead.
++            if (rightTrigger || button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) in.hold |= kWpad2;
++            if (leftTrigger || button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) in.hold |= kWpad1;
++            if (button(SDL_GAMEPAD_BUTTON_SOUTH)) {
++                in.hold |= kSidewaysUp;
++                actionButton = true;
++            }
++            if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= kWpadA;
++            in.steer = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
++            const float stickY = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
++            in.pitch = invertAir ? stickY : -stickY;
++        } else {
++            // Menus: A is OK (2), B/X back (1), the stick moves the cursor and the remote stays
++            // level. RT/R also confirm.
++            if (button(SDL_GAMEPAD_BUTTON_SOUTH) || rightTrigger || button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) {
++                in.hold |= kWpad2;
++            }
++            if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= kWpadMinus;
++            in.hold |= StickAsDpad(pad);
++        }
++    }
++    int keyCount = 0;
++    const bool* keys = SDL_GetKeyboardState(&keyCount);
++    if (keys != nullptr) {
++        auto key = [keys, keyCount](SDL_Scancode sc) { return static_cast<int>(sc) < keyCount && keys[sc]; };
++        if (key(SDL_SCANCODE_X) || key(SDL_SCANCODE_RETURN)) in.hold |= kWpad2;
++        if (key(SDL_SCANCODE_Z) || key(SDL_SCANCODE_BACKSPACE)) in.hold |= kWpad1;
++        if (key(SDL_SCANCODE_C) || key(SDL_SCANCODE_SPACE)) {
++            in.hold |= kSidewaysUp;
++            if (racing) actionButton = true;
++        }
++        if (key(SDL_SCANCODE_P)) in.hold |= kWpadPlus;
++        if (key(SDL_SCANCODE_A)) in.hold |= kWpadA;
++        if (key(SDL_SCANCODE_B)) in.hold |= kWpadB;
++        const bool gasHeld = (in.hold & kWpad2) != 0;
++        if (key(SDL_SCANCODE_LEFT)) { if (!racing || !gasHeld) in.hold |= kSidewaysLeft; in.steer = -1.0f; }
++        if (key(SDL_SCANCODE_RIGHT)) { if (!racing || !gasHeld) in.hold |= kSidewaysRight; in.steer = 1.0f; }
++        if (key(SDL_SCANCODE_UP)) in.hold |= kSidewaysUp;
++        if (key(SDL_SCANCODE_DOWN)) in.hold |= kSidewaysDown;
++        if (key(SDL_SCANCODE_W)) in.pitch = invertAir ? -1.0f : 1.0f;
++        if (key(SDL_SCANCODE_S)) in.pitch = invertAir ? 1.0f : -1.0f;
++    }
++    // The Wii Remote / Wii Wheel choice (new profile, Options) means nothing on a pad: both play
++    // the same. Once it has settled on screen, confirm the highlighted Wii Remote for the player.
++    // Tapped every few frames from the first one, since the menu ignores input while it fades in.
++    if (const int frames = EbControllerTypeScreenFrames(); !racing && frames >= 0) {
++        if (frames % 6 < 3) in.hold |= kWpad2;
++    }
++    if (!racing) {
++        in.steer = 0.0f; // keep the remote level in the menus
++        in.pitch = 0.0f;
++    }
++    // The motion prompts. Push (let go of a bar) and the crash recovery's shake take one swing per
++    // press. The shake prompt on a bar spin or in the dentures wants a real shake: holding A
++    // rocks the remote left and right, like shaking the stick.
++    if (racing && actionButton) {
++        const bool shake = EbShakePromptShown();
++        if (EbPushPromptShown() || (shake && EbCrashMeterShown())) {
++            swingButton = true;
++        } else if (shake) {
++            static int rock = 0;
++            in.steer = ((++rock / 3) % 2) != 0 ? 1.0f : -1.0f;
++        }
++    }
++    // Developer aid for testing swings without a pad: WC_EB_AUTOSWING=N swings every N reads.
++    static const int autoSwing = std::getenv("WC_EB_AUTOSWING") ? std::atoi(std::getenv("WC_EB_AUTOSWING")) : 0;
++    if (autoSwing > 0 && racing) {
++        static int reads = 0;
++        swingButton = (++reads % autoSwing) < 2;
++    }
++    static bool swingWasDown = false;
++    if (swingButton && !swingWasDown) {
++        g_swingReadsLeft = kSwingReads;
++        if (std::getenv("WC_TRACE_INPUT")) RT_LOGF(RT_TAG_HLE, "EB remote swing\n");
++    }
++    swingWasDown = swingButton;
++    if (g_swingReadsLeft > 0) {
++        in.swing = kSwingReads - g_swingReadsLeft;
++        --g_swingReadsLeft;
++    }
++    return in;
++}
++
++void AccelFor(const RemoteInput& in, float& x, float& y, float& z)
++{
++    z = -in.steer * kMaxSteerAccZ;
++    const float planar = std::sqrt(std::max(0.0f, 1.0f - z * z));
++    const float pitch = in.pitch * kMaxPitchRadians;
++    x = planar * std::sin(pitch);
++    y = -planar * std::cos(pitch);
++}
++
++void WriteF32(uint32_t addr, float v)
++{
++    uint32_t bits;
++    std::memcpy(&bits, &v, sizeof(bits));
++    Memory::Write32(addr, bits);
++}
++
++void ReportConnected(CpuContext* ctx)
++{
++    if (g_connectReported) {
++        return;
++    }
++    // The hook may not see the game's call (a tiny leaf), so fall back to KPAD's own copy:
++    // 0x804F9E28 + chan * 0x5C0 + 0x550.
++    uint32_t callback = g_connectCallbacks[kEmulatedChannel];
++    if (callback == 0) callback = Memory::Read32(0x804F9E28u + kEmulatedChannel * 0x5C0u + 0x550u);
++    if (callback == 0) {
++        return; // not registered yet: try again on the next read
++    }
++    g_connectReported = true;
++    RT_LOGF(RT_TAG_HLE, "EB virtual Wii Remote connected on channel 0 (callback 0x%08X)\n", callback);
++    {
++        const uint32_t r3 = ctx->gpr[3], r4 = ctx->gpr[4], r5 = ctx->gpr[5], r6 = ctx->gpr[6];
++        ctx->gpr[3] = kEmulatedChannel;
++        ctx->gpr[4] = 0; // WPAD_ERR_NONE: connected
++        InvokeIndirectCpu(callback, ctx);
++        ctx->gpr[3] = r3; ctx->gpr[4] = r4; ctx->gpr[5] = r5; ctx->gpr[6] = r6;
++    }
++}
++
++} // namespace
++
++// void KPADSetConnectCallback(s32 chan, KPADConnectCallback cb)
++extern "C" void EB_KPADSetConnectCallback_8004e984(CpuContext* ctx)
++{
++    const int32_t chan = static_cast<int32_t>(ctx->gpr[3]);
++    if (chan >= 0 && chan < kChannels) {
++        g_connectCallbacks[chan] = ctx->gpr[4];
++    }
++}
++PPC_NATIVE_OVERRIDE_VOID(8E04E984, EB_KPADSetConnectCallback_8004e984, (CpuContext* ctx), (ctx));
++
++// s32 WPADProbe(s32 chan, u32* type)
++extern "C" void EB_WPADProbe_8006830c(CpuContext* ctx)
++{
++    const int32_t chan = static_cast<int32_t>(ctx->gpr[3]);
++    const uint32_t typePtr = ctx->gpr[4];
++    const bool present = chan == kEmulatedChannel;
++    if (typePtr != 0) {
++        Memory::Write32(typePtr, present ? 0u : 0xFDu); // WPAD_DEV_CORE / NOT_FOUND
++    }
++    ctx->gpr[3] = present ? 0u : static_cast<uint32_t>(-1);
++}
++PPC_NATIVE_OVERRIDE_VOID(8E06830C, EB_WPADProbe_8006830c, (CpuContext* ctx), (ctx));
++
++// s32 KPADReadEx(s32 chan, KPADStatus samplingBufs[], u32 length, s32* result)
++extern "C" void EB_KPADReadEx_8004dabc(CpuContext* ctx)
++{
++    const int32_t chan = static_cast<int32_t>(ctx->gpr[3]);
++    const uint32_t buf = ctx->gpr[4];
++    const uint32_t length = ctx->gpr[5];
++    const uint32_t resultPtr = ctx->gpr[6];
++    if (chan != kEmulatedChannel || buf == 0 || length == 0) {
++        if (resultPtr != 0) Memory::Write32(resultPtr, static_cast<uint32_t>(-1)); // no controller
++        ctx->gpr[3] = 0;
++        return;
++    }
++    ReportConnected(ctx);
++    if (static const char* scan = std::getenv("WC_EB_SCAN"); scan && *scan) {
++        // Debug: dump the small-data area every 30 reads to find game state globals.
++        static int reads = 0;
++        if (reads++ % 30 == 0) {
++            char name[512];
++            std::snprintf(name, sizeof name, "%s/sda_%05d.bin", scan, reads / 30);
++            if (FILE* f = std::fopen(name, "wb")) {
++                for (uint32_t a = 0x805A0000u; a < 0x805B0000u; a += 4) {
++                    const uint32_t v = Memory::Read32(a);
++                    const uint8_t b[4] = {uint8_t(v >> 24), uint8_t(v >> 16), uint8_t(v >> 8), uint8_t(v)};
++                    std::fwrite(b, 1, 4, f);
++                }
++                std::fclose(f);
++            }
++        }
++    }
++    const RemoteInput in = ReadInput();
++    const uint32_t hold = in.hold;
++    static const bool traceInput = std::getenv("WC_TRACE_INPUT") != nullptr;
++    if (hold != g_previousHold && traceInput) {
++        RT_LOGF(RT_TAG_HLE, "EB remote hold=0x%04X steer=%.2f pitch=%.2f\n", hold, in.steer, in.pitch);
++    }
++    const uint32_t trig = hold & ~g_previousHold;
++    const uint32_t release = g_previousHold & ~hold;
++    g_previousHold = hold;
++
++    float ax = 0.0f, ay = -1.0f, az = 0.0f;
++    AccelFor(in, ax, ay, az);
++    if (in.swing >= 0) {
++        // Thrown against gravity, about twice as hard as gravity itself.
++        ax *= -2.0f;
++        ay *= -2.0f;
++        az *= -2.0f;
++    }
++    for (uint32_t i = 0; i < kKpadStatusSize; i += 4) {
++        Memory::Write32(buf + i, 0);
++    }
++    Memory::Write32(buf + 0x00, hold);
++    Memory::Write32(buf + 0x04, trig);
++    Memory::Write32(buf + 0x08, release);
++    WriteF32(buf + 0x0C, ax);
++    WriteF32(buf + 0x10, ay);
++    WriteF32(buf + 0x14, az);
++    WriteF32(buf + 0x18, std::sqrt(ax * ax + ay * ay + az * az)); // acc_value
++    WriteF32(buf + 0x34, 1.0f);                                    // horizon (level)
++    WriteF32(buf + 0x48, 2.0f);                                    // dist from the sensor bar
++    WriteF32(buf + 0x54, 1.0f);                                    // acc_vertical
++    // 0x5C dev_type = 0 (core), 0x5D wpad_err = 0, 0x5E dpd_valid_fg = 0, 0x5F data_format = 0.
++    if (resultPtr != 0) Memory::Write32(resultPtr, 0);
++    ctx->gpr[3] = 1;
++}
++PPC_NATIVE_OVERRIDE_VOID(8E04DABC, EB_KPADReadEx_8004dabc, (CpuContext* ctx), (ctx));
++
++// Called once per presented frame. Skips the three boot screens (wrist strap, "Online Interactions
++// Not Rated" and the Wii Remote / Wii Wheel "Press 2 to Start" picture), which are about the Wii
++// hardware. They are steps 0 to 10 of the boot sequence that 0x803E6CD0 runs while the main
++// thread waits (0x803E6EA0) for step 11; the step number is at 0x805A47F0 (r13-0x37F0).
++void EbRepairBrokenSave(); // hle/storage/nand_fs.cpp
++
++namespace {
++// Crash recovery shows "SHAKE!!!" over the meter, which reads as an instruction to shake the pad.
++// The text comes from the race's message table; once a race has loaded, find it in guest memory
++// (ASCII or UTF-16) and cut it to an empty string. A word must start right there and continue
++// with '!', which leaves keys such as "Popup:SHAKE" alone.
++void HideShakeText()
++{
++    struct Range { uint32_t begin, end; };
++    static const Range kRanges[] = {{0x80000000u, 0x81800000u}, {0x90000000u, 0x94000000u}};
++    int hidden = 0;
++    for (const Range& r : kRanges) {
++        const uint8_t* base = Memory::GetPointer(r.begin, r.end - r.begin);
++        if (base == nullptr) continue;
++        const size_t size = r.end - r.begin;
++        static const uint8_t kAscii[] = {'S', 'H', 'A', 'K', 'E', '!'};
++        static const uint8_t kWide[] = {0, 'S', 0, 'H', 0, 'A', 0, 'K', 0, 'E', 0, '!'};
++        for (size_t i = 1; i + sizeof(kWide) < size; ++i) {
++            if (base[i] != 'S' && base[i] != 0) continue;
++            if (std::memcmp(base + i, kAscii, sizeof(kAscii)) == 0 && !std::isalpha(base[i - 1])) {
++                Memory::Write8(r.begin + uint32_t(i), 0);
++                ++hidden;
++            } else if ((i % 2) == 0 && std::memcmp(base + i, kWide, sizeof(kWide)) == 0 &&
++                       !(base[i - 2] == 0 && std::isalpha(base[i - 1]))) {
++                Memory::Write8(r.begin + uint32_t(i) + 1, 0);
++                ++hidden;
++            }
++        }
++    }
++    if (std::getenv("WC_TRACE_INPUT")) RT_LOGF(RT_TAG_HLE, "EB hid %d SHAKE!!! text(s)\n", hidden);
++}
++} // namespace
++
++void EbFrameTick()
++{
++    constexpr uint32_t kBootStep = 0x805A47F0u;
++    constexpr uint32_t kBootDone = 11;
++    static bool done = false;
++    static bool saveChecked = false;
++    if (!saveChecked) {
++        saveChecked = true;
++        EbRepairBrokenSave();
++    }
++    // Once per race, as it starts (the text is loaded with the race): when the race step appears,
++    // or the race clock goes back (the next race).
++    static bool wasRacing = false;
++    static float lastClock = 0.0f;
++    const bool racing = ReadF32(kRaceTimeStep) > 0.0f;
++    const float clock = ReadF32(kRaceClock);
++    if (racing && (!wasRacing || clock + 1.0f < lastClock)) HideShakeText();
++    wasRacing = racing;
++    lastClock = clock;
++    if (done) {
++        return;
++    }
++    const uint32_t step = Memory::Read32(kBootStep);
++    if (step == kBootDone) {
++        done = true;
++    } else if (step < kBootDone) {
++        Memory::Write32(kBootStep, kBootDone);
++    }
++}
++
++// For the GX thread: true while a race is loaded (paused included). Reads memory only.
++bool EbRaceRunningForGx()
++{
++    return ReadF32(kRaceTimeStep) > 0.0f;
++}
+diff --git a/runtime/src/hle/gx/gx_copy.cpp b/runtime/src/hle/gx/gx_copy.cpp
+index c93affe..69cdd47 100644
+--- a/runtime/src/hle/gx/gx_copy.cpp
++++ b/runtime/src/hle/gx/gx_copy.cpp
+@@ -27,6 +27,7 @@ extern "C" __declspec(dllimport) int __stdcall K32GetProcessMemoryInfo(void* pro
+ #include <cstdlib>
+ #include <map>
+ #include <mutex>
++#include <unordered_set>
+ #include <vector>
+ 
+ namespace {
+@@ -271,7 +272,24 @@ void RunCopyTex(uint32_t da, uint32_t c, const TexCopyState& state) {
+ }
+ } // namespace
+ 
++namespace {
++// Every address the game has copied the EFB to, recorded on the game thread at call time (the copy
++// itself may still be queued for the GX worker). Such a texture lives on the GPU, so it must never
++// be swapped for a CPU snapshot of guest memory (see EtTexSnapshots in gx_texture.cpp).
++std::mutex g_copyTexTargetsMutex;
++std::unordered_set<uint32_t> g_copyTexTargets;
++} // namespace
++
++bool GxWasCopyTexDestination(uint32_t addr) {
++    std::lock_guard<std::mutex> guard(g_copyTexTargetsMutex);
++    return g_copyTexTargets.count(CanonicalizeGxMainRamAddress(addr)) != 0;
++}
++
+ extern "C" void GX__CopyTex_8016fd74(uint32_t da, uint32_t c) {
++    {
++        std::lock_guard<std::mutex> guard(g_copyTexTargetsMutex);
++        g_copyTexTargets.insert(CanonicalizeGxMainRamAddress(da));
++    }
+     // Begin the frame first so a deferred begin reaches the worker before the copy.
+     EnsureAuroraFrameActive();
+     const TexCopyState state = g_texCopyState;
+diff --git a/runtime/src/hle/gx/gx_dl.cpp b/runtime/src/hle/gx/gx_dl.cpp
+index e49a831..05dad31 100644
+--- a/runtime/src/hle/gx/gx_dl.cpp
++++ b/runtime/src/hle/gx/gx_dl.cpp
+@@ -723,6 +723,13 @@ static void AppendBytes(std::vector<uint8_t>& out, const uint8_t* data, uint32_t
+     out.insert(out.end(), data, data + count);
+ }
+ 
++// WC_DEBUG_DL=1 logs nested display-list calls whose address is not guest memory (a sign
++// that the vertex layout used to walk the list is wrong).
++static bool DebugDlEnabled() {
++    static const bool enabled = std::getenv("WC_DEBUG_DL") != nullptr;
++    return enabled;
++}
++
+ template <class Visitor>
+ static bool WalkDisplayList(const uint8_t* data, uint32_t nbytes, Visitor& visitor, int depth) {
+     if (depth > Visitor::kMaxDepth) {
+@@ -769,6 +776,19 @@ static bool WalkDisplayList(const uint8_t* data, uint32_t nbytes, Visitor& visit
+             if (pos + 8u > nbytes) return false;
+             const uint32_t addr = ReadBE32(data + pos);
+             const uint32_t size = ReadBE32(data + pos + 4);
++            if (DebugDlEnabled() && (addr < 0x80000000u || addr >= 0x94000000u)) {
++                static int shown = 0;
++                if (shown++ < 6) {
++                    std::string hex;
++                    char t[8];
++                    const uint32_t from = pos > 97 ? pos - 97 : 0;
++                    for (uint32_t i = from; i < pos + 8 && i < nbytes; ++i) { std::snprintf(t, sizeof t, "%02X%s", data[i], i + 1 == pos ? "|" : " "); hex += t; }
++                    std::fprintf(stderr, "[dldbg] bad call at +0x%X of %u (depth %d): %s\n", pos - 1, nbytes, depth, hex.c_str());
++                    std::string vcd;
++                    for (int a = 0; a < 26; ++a) if (g_hleGxState.vtxDesc[a] != GX_NONE) { std::snprintf(t, sizeof t, " %d:%d", a, int(g_hleGxState.vtxDesc[a])); vcd += t; }
++                    std::fprintf(stderr, "[dldbg]   frame %d vcd%s\n", g_gxFrameCount, vcd.c_str());
++                }
++            }
+             pos += 8u;
+             if (!visitor.OnCallDisplayList(addr, size, depth)) return false;
+             continue;
+@@ -1364,7 +1384,7 @@ bool g_dlVtxDescDirty = false;
+ void GxNoteVtxDescChangedWhileRecording() {
+     if (IsDisplayListActive()) g_dlVtxDescDirty = true;
+ }
+-void GxFlushDisplayListDirtyState() {
++void GxFlushDisplayListDirtyState(bool padLikeGXFlush) {
+     if (!IsDisplayListActive()) return;
+     if (g_dlVtxDescDirty) {
+         g_dlVtxDescDirty = false;
+@@ -1389,7 +1409,9 @@ void GxFlushDisplayListDirtyState() {
+     }
+     // GXFlush pads the write-gather pipe with 32 zero bytes (GX NOPs), and they land in
+     // the list too, so list sizes match hardware.
+-    for (int i = 0; i < 8; ++i) WriteDisplayListData(0, 4);
++    if (padLikeGXFlush) {
++        for (int i = 0; i < 8; ++i) WriteDisplayListData(0, 4);
++    }
+ }
+ 
+ void GxRestoreVtxStateAfterDisplayList() {
+diff --git a/runtime/src/hle/gx/gx_init.cpp b/runtime/src/hle/gx/gx_init.cpp
+index e890b8b..e2e7e7e 100644
+--- a/runtime/src/hle/gx/gx_init.cpp
++++ b/runtime/src/hle/gx/gx_init.cpp
+@@ -90,10 +90,13 @@ extern "C" uint32_t GX__Init_8016b850(uint32_t fifoBase, uint32_t fifoSize)
+             Memory::Write32(block + off, 0);
+         }
+         Memory::Write16(block + 0x0000u, 0x000Cu);
+-        Memory::Write32(0x8055D924u, block + 0x0000u); // __cpReg  (-0x2fdc(r13))
+-        Memory::Write32(0x8055D928u, block + 0x1000u); // __peReg  (-0x2fd8(r13))
+-        Memory::Write32(0x8055D920u, block + 0x3000u); // __piReg  (-0x2fe0(r13))
+-        Memory::Write32(0x8055D92Cu, block + 0x4000u); // __memReg (-0x2fd4(r13))
++        // Register pointers: Excite Truck -0x2fe0..-0x2fd4(r13), Excitebots -0x6208..-0x61fc(r13)
++        // (Excitebots GXInit 0x80043d94).
++        const bool et = ::GuestRegion::IsExciteTruck();
++        Memory::Write32(et ? 0x8055D924u : 0x805A1DDCu, block + 0x0000u); // __cpReg
++        Memory::Write32(et ? 0x8055D928u : 0x805A1DE0u, block + 0x1000u); // __peReg
++        Memory::Write32(et ? 0x8055D920u : 0x805A1DD8u, block + 0x3000u); // __piReg
++        Memory::Write32(et ? 0x8055D92Cu : 0x805A1DE4u, block + 0x4000u); // __memReg
+     }
+     RT_LOGF(RT_TAG_GX, "GX initialized, FIFO at 0x%08X (base=0x%08X size=0x%08X)\n",
+             kFifoObjAddr, fifoBase, fifoSize);
+@@ -190,7 +193,7 @@ bool g_dlInline = false;
+ 
+ void GxSaveVtxStateForDisplayList();
+ void GxRestoreVtxStateAfterDisplayList();
+-void GxFlushDisplayListDirtyState();
++void GxFlushDisplayListDirtyState(bool padLikeGXFlush);
+ 
+ extern "C" void GX__BeginDisplayList_80172e00(uint32_t la, uint32_t s) {
+     if (!g_dlInline) {
+@@ -231,8 +234,9 @@ static void EndDisplayListInline() {
+ 
+ extern "C" uint32_t GX__EndDisplayList_80172eb4() {
+     try {
+-        // Excite Truck's SDK flushes dirty state into the list here (GXGetCPUFifo calls GXFlush).
+-        if (!::GuestRegion::IsMarioKart()) GxFlushDisplayListDirtyState();
++        // Both Excite games record lists that hold only a vertex descriptor change, so the dirty
++        // state is flushed into the list here (Excite Truck: GXGetCPUFifo calls GXFlush).
++        if (!::GuestRegion::IsMarioKart()) GxFlushDisplayListDirtyState(true);
+         GXFlush();
+         GX__GetCPUFifo_8016cf10(MKW_GADDR(80344090));
+         const uint8_t wrapped = Memory::Read8(kDlFifoAddr + kDlWrapFlagOffset);
+diff --git a/runtime/src/hle/gx/gx_internal.h b/runtime/src/hle/gx/gx_internal.h
+index 732729d..c80058a 100644
+--- a/runtime/src/hle/gx/gx_internal.h
++++ b/runtime/src/hle/gx/gx_internal.h
+@@ -368,6 +368,8 @@ void MarkTexObjsDirtyForRange(uint32_t addr, uint32_t size);
+ // over their destination. This is the allocation-reuse generation boundary
+ // for copy textures; it must be called for every data-cache store/flush range.
+ void InvalidateEfbCopyDestinationsForRange(uint32_t addr, uint32_t size);
++// True once the game has used addr as a GXCopyTex destination (render-to-texture).
++bool GxWasCopyTexDestination(uint32_t addr);
+ GXTlutObj* CreateHostTlutObj(uint32_t addr);
+ void MarkHostTlutObjConstructed(uint32_t addr);
+ GXTlutObj* GetHostTlutObj(uint32_t addr);
+diff --git a/runtime/src/hle/gx/gx_stubs.cpp b/runtime/src/hle/gx/gx_stubs.cpp
+index 49be121..1f0e12f 100644
+--- a/runtime/src/hle/gx/gx_stubs.cpp
++++ b/runtime/src/hle/gx/gx_stubs.cpp
+@@ -52,10 +52,13 @@ std::mutex g_drawSyncMutex;
+ bool g_breakPointActive = false;
+ std::vector<uint16_t> g_heldTokens;
+ 
+-// The SDK's stored token callback (-0x2f88(r13) in Excite Truck). Only known for Excite Truck.
++// The SDK's stored token callback: -0x2f88(r13) in Excite Truck, -0x61b0(r13) in Excitebots
++// (GXSetDrawSyncCallback 0x80046cb0). Not used for Mario Kart.
+ uint32_t GxTokenCallbackAddr()
+ {
+-    return ::GuestRegion::IsMarioKart() ? 0u : 0x8055D978u;
++    if (::GuestRegion::IsExciteTruck()) return 0x8055D978u;
++    if (::GuestRegion::IsExcitebots()) return 0x805A1E30u;
++    return 0u;
+ }
+ 
+ void DeliverDrawSyncToken(CpuContext* ctx, uint16_t token)
+diff --git a/runtime/src/hle/gx/gx_texture.cpp b/runtime/src/hle/gx/gx_texture.cpp
+index b644a42..f7970eb 100644
+--- a/runtime/src/hle/gx/gx_texture.cpp
++++ b/runtime/src/hle/gx/gx_texture.cpp
+@@ -1,5 +1,9 @@
+ ﻿// gx_texture.cpp - Texture Object and TLUT Functions
+ #include "gx_internal.h"
++#include "guest_abi/guest_region.h"
++#include <xxhash.h>
++#include <atomic>
++#include <unordered_map>
+ #include "runtime_log.h"
+ 
+ #include <algorithm>
+@@ -554,6 +558,7 @@ struct Scope {
+ } // namespace EtTexSnapshots
+ 
+ bool EtRaceRunningForGx();
++bool EbRaceRunningForGx();
+ extern "C" int g_gxFrameCount;
+ 
+ static void* TexDataHostPtr(uint32_t addr, uint32_t size) {
+@@ -750,7 +755,133 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+     }
+ }
+ 
++// Excitebots: notices when the game draws one of its "move the remote" prompts (the crash
++// "SHAKE!!!" remote and the bar "Push" remote, both 256x256 CMPR). The pad's A button only plays a
++// remote swing while one of them is on screen, so at other times A is turbo alone. Textures are
++// identified by the same XXH64 of the base level that names the replacement files; each address
++// is hashed once and checked again only when its first bytes change.
++// Excitebots screens recognised by a texture they draw (XXH64 of the CMPR base level, the hash
++// in the texture dump names): the swing prompts, during which the A button plays a remote swing,
++// the Wii Remote / Wii Wheel choice, which input skips, and the Back / OK button icons of any
++// menu, which switch the pad to the menu layout even mid-race (eb_input.cpp).
++namespace EbScreenTextures {
++enum Kind : uint8_t { kNone, kShake, kPush, kCrashMeter, kControllerType, kMenuButton };
++std::mutex g_mutex;
++struct Seen {
++    uint64_t head = 0;
++    Kind kind = kNone;
++};
++std::unordered_map<uint32_t, Seen> g_seen;
++std::atomic<int> g_lastShake{-1000};
++std::atomic<int> g_lastPush{-1000};
++std::atomic<int> g_lastCrashMeter{-1000};
++std::atomic<int> g_lastControllerType{-1000};
++std::atomic<int> g_firstControllerType{0};
++std::atomic<int> g_lastMenuButton{-1000};
++
++Kind Classify(uint16_t w, uint16_t h, uint64_t hash) {
++    if (w == 256 && h == 256 && hash == 0xf2965209f9cff340ull) {  // overlays.res shakecont.art
++        return kShake;
++    }
++    if (w == 256 && h == 256 && hash == 0xddf1c663d39c4ad2ull) {  // the bar's "Push" remote
++        return kPush;
++    }
++    if (w == 256 && h == 256 && hash == 0xfcf8a1191fd23f9cull) {  // the crash meter's chevrons
++        return kCrashMeter;
++    }
++    if (w == 256 && h == 128 && hash == 0xc8c6e66dee7d90ccull) {  // the remote and wheel pictures
++        return kControllerType;
++    }
++    if (w == 64 && h == 64 &&
++        (hash == 0xc8e9868a2a851ed2ull ||     // common.res but_1 ("Back")
++         hash == 0x82d8d8bfb09e0473ull)) {    // common.res but_2 ("OK", "Select")
++        return kMenuButton;
++    }
++    return kNone;
++}
++
++void Note(uint32_t oa) {
++    TexObjMeta m;
++    {
++        std::lock_guard<std::mutex> guard(g_texObjMutex);
++        try {
++            if (!TryGetOrExtractTexObjMeta(oa, m)) return;
++        } catch (...) {
++            return;
++        }
++    }
++    const bool large = m.width == 256 && (m.height == 256 || m.height == 128);
++    const bool icon = m.width == 64 && m.height == 64;
++    if (!(large || icon) || m.format != GX_TF_CMPR || m.dataAddr == 0) {
++        return;
++    }
++    const uint32_t bytes = uint32_t(m.width) * m.height / 2u; // CMPR base level
++    if (!Memory::Contains(m.dataAddr, bytes)) return;
++    const auto* data = static_cast<const uint8_t*>(GuestToHostPtr(m.dataAddr, bytes));
++    if (data == nullptr) return;
++    uint64_t head;
++    std::memcpy(&head, data, sizeof(head));
++    Kind kind;
++    {
++        std::lock_guard<std::mutex> lock(g_mutex);
++        Seen& seen = g_seen[m.dataAddr];
++        if (seen.head != head || head == 0) {
++            seen.head = head;
++            seen.kind = Classify(m.width, m.height, XXH64(data, bytes, 0));
++        }
++        kind = seen.kind;
++    }
++    if (kind == kMenuButton) g_lastMenuButton.store(g_gxFrameCount, std::memory_order_relaxed);
++    if (kind == kShake) {
++        if (std::getenv("WC_TRACE_INPUT") && g_gxFrameCount - g_lastShake.load(std::memory_order_relaxed) > 3) {
++            RT_LOGF(RT_TAG_GX, "Excitebots shake prompt shown\n");
++        }
++        g_lastShake.store(g_gxFrameCount, std::memory_order_relaxed);
++    }
++    if (kind == kPush) g_lastPush.store(g_gxFrameCount, std::memory_order_relaxed);
++    if (kind == kCrashMeter) g_lastCrashMeter.store(g_gxFrameCount, std::memory_order_relaxed);
++    if (kind == kControllerType) {
++        const int now = g_gxFrameCount;
++        if (now - g_lastControllerType.load(std::memory_order_relaxed) > 3) {
++            g_firstControllerType.store(now, std::memory_order_relaxed);
++        }
++        g_lastControllerType.store(now, std::memory_order_relaxed);
++    }
++}
++} // namespace EbScreenTextures
++
++// The shaking remote: crash recovery, a bar spin, the dentures.
++bool EbShakePromptShown() {
++    return g_gxFrameCount - EbScreenTextures::g_lastShake.load(std::memory_order_relaxed) <= 3;
++}
++
++// The crash meter (crash recovery).
++bool EbCrashMeterShown() {
++    return g_gxFrameCount - EbScreenTextures::g_lastCrashMeter.load(std::memory_order_relaxed) <= 3;
++}
++
++// The pushed remote: let go of a bar.
++bool EbPushPromptShown() {
++    return g_gxFrameCount - EbScreenTextures::g_lastPush.load(std::memory_order_relaxed) <= 3;
++}
++
++// A menu's button bar (Back / OK) is on screen: pause, tutorial cards, results.
++bool EbMenuButtonsShown() {
++    return g_gxFrameCount - EbScreenTextures::g_lastMenuButton.load(std::memory_order_relaxed) <= 3;
++}
++
++// Frames the Wii Remote / Wii Wheel choice has been on screen, or -1 when it is not shown.
++int EbControllerTypeScreenFrames() {
++    using namespace EbScreenTextures;
++    const int now = g_gxFrameCount;
++    if (now - g_lastControllerType.load(std::memory_order_relaxed) > 3) return -1;
++    return now - g_firstControllerType.load(std::memory_order_relaxed);
++}
++
+ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
++    if (::GuestRegion::IsExcitebots()) {
++        EbScreenTextures::Note(oa);
++    }
+     if (g_gxTraceFrame) {
+         TexObjMeta m; bool ok = false;
+         { std::lock_guard<std::mutex> guard(g_texObjMutex); try { ok = TryGetOrExtractTexObjMeta(oa, m); } catch (...) {} }
+@@ -765,11 +896,14 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+         }
+         uint32_t snapAddr = 0;
+         const void* snapPtr = nullptr;
+-        if (!EtRaceRunningForGx()) {
++        // Only outside races (menus play video); Excitebots has its own race state.
++        const bool racing = ::GuestRegion::IsExcitebots() ? EbRaceRunningForGx() : EtRaceRunningForGx();
++        if (!racing) {
+             try {
+                 std::lock_guard<std::mutex> guard(g_texObjMutex);
+                 TexObjMeta m;
+                 if (TryGetOrExtractTexObjMeta(oa, m) && m.needsUpload && m.dataAddr != 0 &&
++                    !GxWasCopyTexDestination(m.dataAddr) &&
+                     IsReasonableTextureDimensions(m.width, m.height) && IsAuroraLoadableTexFormat(m.format)) {
+                     const uint8_t maxLod = m.mipmap ? static_cast<uint8_t>(ComputeMaxMipLevel(m.width, m.height)) : 0u;
+                     const uint32_t size = GXGetTexBufferSize(m.width, m.height, m.format, (GXBool)m.mipmap, maxLod);
+diff --git a/runtime/src/hle/gx/gx_vertex.cpp b/runtime/src/hle/gx/gx_vertex.cpp
+index 285f1c5..368f1ac 100644
+--- a/runtime/src/hle/gx/gx_vertex.cpp
++++ b/runtime/src/hle/gx/gx_vertex.cpp
+@@ -41,6 +41,7 @@ bool ApiVtxArray(uint32_t attr, uint32_t& base, uint32_t& stride) {
+ // ============================================================================
+ 
+ void GxNoteVtxDescChangedWhileRecording();
++void GxFlushDisplayListDirtyState(bool padLikeGXFlush);
+ 
+ extern "C" void GX__ClearVtxDesc_8016dc34() {
+     GxNoteVtxDescChangedWhileRecording();
+@@ -59,6 +60,7 @@ PPC_NATIVE_OVERRIDE_VOID(8016dc34, GX__ClearVtxDesc_8016dc34, (), ());
+ extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
+     GxNoteVtxDescChangedWhileRecording();
+     GX_DEFER_CALL(GX__SetVtxDesc_8016d3a4, a, t);
++    GXT("[gxt] vtxdesc %u=%u\n", a, t);
+     const uint32_t attr = CanonicalVtxAttr(a);
+     if(attr>=26||attr==GX_VA_NULL) return;
+     const GXAttrType oldType = g_hleGxState.vtxDesc[attr];
+@@ -321,6 +323,9 @@ static void GxBeginImpl(uint32_t t, uint32_t vf, uint32_t nv);
+ 
+ extern "C" void GX__Begin_8016f0f0(uint32_t t, uint32_t vf, uint32_t nv) { GXT("[gxt] BEGIN prim%X fmt%u n%u\n", t,vf,nv);
+     if(IsDisplayListActive()){
++        // The 2008 SDK's GXBegin writes a changed vertex descriptor into the list first
++        // (__GXSetDirtyState). Excitebots records model lists that rely on it.
++        if (::GuestRegion::IsExcitebots()) GxFlushDisplayListDirtyState(false);
+         WriteDisplayListData((u8)(t|vf), 1);
+         WriteDisplayListData((u16)nv, 2);
+         return;
+diff --git a/runtime/src/hle/net/network_config.cpp b/runtime/src/hle/net/network_config.cpp
+index e033eb7..52c0106 100644
+--- a/runtime/src/hle/net/network_config.cpp
++++ b/runtime/src/hle/net/network_config.cpp
+@@ -1,3 +1,4 @@
++#include "guest_abi/guest_region.h"
+ #include "network_internal.h"
+ 
+ #include "abi_bridge.h"
+@@ -189,7 +190,11 @@ int32_t HandleKdIoctl(uint32_t cmd, uint32_t inBuf, uint32_t inLen, uint32_t out
+         // this like Dolphin does (unchanged output) leaks cmd 3's zero result
+         // into MKW's post-resume probe and makes the SDK panic. Preserve the
+         // two pending startup probes, then report success once ready.
+-        if (g_kdTrySuspendPhase == KdTrySuspendPhase::Boot) {
++        // Excitebots opens the WiiConnect24 library for its friend messages (msgbox) and shows
++        // error 109042 when this probe fails, so it gets success from the start.
++        if (::GuestRegion::IsExcitebots()) {
++            WriteReturn(outBuf, outLen, 0);
++        } else if (g_kdTrySuspendPhase == KdTrySuspendPhase::Boot) {
+             g_kdBootProbeSeen = true;
+             WriteReturn(outBuf, outLen, -42);
+         } else if (g_kdTrySuspendPhase == KdTrySuspendPhase::PostResumeProbe) {
+diff --git a/runtime/src/hle/storage/nand_async.cpp b/runtime/src/hle/storage/nand_async.cpp
+index 2e11911..ca8d025 100644
+--- a/runtime/src/hle/storage/nand_async.cpp
++++ b/runtime/src/hle/storage/nand_async.cpp
+@@ -6,6 +6,7 @@
+ // Shared state and helpers live in nand_internal.h.
+ 
+ #include "nand_internal.h"
++#include "guest_abi/guest_region.h"
+ 
+ // Guest callback dispatch: host NAND work completes synchronously, so an "async" call just
+ // queues its guest completion callback here and an HLE pump dispatches it later.
+@@ -107,10 +108,18 @@ bool NandProcessPendingCallbacks(CpuContext* cpu, int maxToProcess) {
+ // because the C# translator regex-scans this file as raw text to decide which addresses to leave untranslated.
+ 
+ // Returns the synchronous result verbatim.
++// On the Wii an async call returns OK once the request is queued, and the result reaches the
++// guest only through the callback. Excitebots' save code depends on that: it accepts EXISTS from
++// NANDCreateAsync's callback, but treats any non-OK direct return as a fatal error ("An error
++// occurred while accessing Wii system memory"). Excite Truck keeps returning the result directly,
++// the behaviour it was tested with.
+ #define NAND_ASYNC_FWD_BODY(Name, Sync, params, sync_args)        \
+     extern "C" int32_t Name params {                              \
+         int32_t result = Sync sync_args;                          \
+         InvokeNandCallback(callbackPtr, result, commandBlockPtr); \
++        if (::GuestRegion::IsExcitebots() && callbackPtr != 0) {  \
++            return NAND_RESULT_OK;                                \
++        }                                                         \
+         return result;                                            \
+     }
+ 
+@@ -120,6 +129,9 @@ bool NandProcessPendingCallbacks(CpuContext* cpu, int maxToProcess) {
+     extern "C" int32_t Name params {                              \
+         int32_t result = Sync sync_args;                          \
+         InvokeNandCallback(callbackPtr, result, commandBlockPtr); \
++        if (::GuestRegion::IsExcitebots() && callbackPtr != 0) {  \
++            return NAND_RESULT_OK;                                \
++        }                                                         \
+         return (result < 0) ? result : NAND_RESULT_OK;            \
+     }
+ 
+diff --git a/runtime/src/hle/storage/nand_fs.cpp b/runtime/src/hle/storage/nand_fs.cpp
+index 28c0cbd..518bc1d 100644
+--- a/runtime/src/hle/storage/nand_fs.cpp
++++ b/runtime/src/hle/storage/nand_fs.cpp
+@@ -480,3 +480,26 @@ NandFileExtent NandProbeFileExtent(FILE* file) {
+     std::fseek(file, extent.position, SEEK_SET);
+     return extent;
+ }
++
++// Excitebots builds before setup 0.3.x failed the second save of a new profile and then deleted
++// banner.bin and roam.dat, leaving only the empty inbox*.mf files. The game reports that as a
++// corrupted file on a dialog driven by the Wii Remote pointer, so a pad cannot pick "Delete file"
++// and every later session runs without saving. With neither banner.bin nor roam.dat the folder
++// holds no progress, so clear it and let the game make a new save.
++void EbRepairBrokenSave() {
++    const std::filesystem::path dir = TranslateNandPath(CurrentNandDataDir().c_str());
++    std::error_code ec;
++    if (!std::filesystem::is_directory(dir, ec)) return;
++    if (std::filesystem::exists(dir / "banner.bin", ec) || std::filesystem::exists(dir / "roam.dat", ec)) return;
++    bool any = false;
++    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
++        (void)entry;
++        any = true;
++        break;
++    }
++    if (!any) return;
++    std::filesystem::remove_all(dir, ec);
++    std::filesystem::create_directories(dir, ec);
++    std::fprintf(stderr, "[nand] Excitebots: cleared a save left incomplete by an older build (%s)\n",
++                 HostPathText(dir).c_str());
++}
+diff --git a/runtime/src/hle/vi.cpp b/runtime/src/hle/vi.cpp
+index f5a91c1..e86c907 100644
+--- a/runtime/src/hle/vi.cpp
++++ b/runtime/src/hle/vi.cpp
+@@ -17,6 +17,7 @@
+ #include <aurora/gfx.h>
+ #include "system_bridge.h"
+ #include "hle/excite_truck/et_achievements.h"
++void EbFrameTick(); // hle/excitebots/eb_input.cpp
+ #include <filesystem>
+ #include <sstream>
+ #include <cstdio>
+@@ -601,9 +602,12 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+         // cadence, and zero only happens when production outruns VI. "Kept up" means <=1 retrace
+         // elapsed; 2+ means a boundary was missed, so Aurora seals that frame without its interpolated
+         // slots (a windowed backstop lowers the slot target only under sustained overload).
+-        if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
++        if (::GuestRegion::IsExciteTruck() || ::GuestRegion::IsExcitebots()) {
+             EtAchievements::Tick();
+         }
++        if (::GuestRegion::IsExcitebots()) {
++            EbFrameTick();
++        }
+         // WC_MEMDUMP_REQ=<path>: creating <path> dumps MEM1/MEM2 to <path>_<n>.bin (testing only).
+         if (static const char* s_dumpReq = std::getenv("WC_MEMDUMP_REQ"); s_dumpReq) {
+             static uint32_t s_dumpCheck = 0, s_dumpIndex = 0;
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index 739db18..138c67d 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -869,7 +869,8 @@ void RuntimeAuroraLogCallback(AuroraLogLevel level, const char* module,
+ 
+ const TranslatedFunctionInfo* ResolveEntry() {
+     // Excite Truck (REXE01) starts at __start = 0x80004170.
+-    const uint32_t entryAddress = ::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck
++    // Excitebots (RX3E01) uses the same entry point.
++    const uint32_t entryAddress = !::GuestRegion::IsMarioKart()
+                                       ? 0x80004170u
+                                       : kDefaultEntryAddress;
+     const auto* entry = TranslatedFunctionRegistry::FindByAddressPtr(entryAddress);
+@@ -1376,7 +1377,9 @@ int RuntimeMain(int argc, char** argv) {
+         RuntimeConfigFile::LogLoadedConfig();
+         if (!g_headless && RuntimeConfigFile::DiscordPresenceEnabled()) {
+             DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(),
+-                                        GuestRegion::IsMarioKart() ? "Mario Kart Wii" : "Excite Truck");
++                                        GuestRegion::IsMarioKart()      ? "Mario Kart Wii"
++                                        : GuestRegion::IsExcitebots() ? "Excitebots: Trick Racing"
++                                                                      : "Excite Truck");
+         }
+         SystemBridge::Initialize();
+         TranslatedFunctionRegistry::Finalize();
+@@ -1513,6 +1516,8 @@ int RuntimeMain(int argc, char** argv) {
+         settings_overlay::InitializeRuntimeSettings();
+         if (GuestRegion::Current() == GuestRegion::Id::ExciteTruck) {
+             EtPrompts::Apply(RuntimeConfigFile::EtXboxPrompts(true));
++        } else if (GuestRegion::Current() == GuestRegion::Id::Excitebots) {
++            EtPrompts::Apply(RuntimeConfigFile::EbXboxPrompts(true));
+         }
+         if (BootRace::Requested()) {
+             aurora_set_skip_unready_pipelines(false);
+diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
+index 6cbd761..b4390ec 100644
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -980,6 +980,19 @@ void DrawControllerSettings() {
+         ImGui::TextDisabled("Gamepad: RT/R drive, X brake, A turbo, left stick steers and tilts in the air.");
+         ImGui::TextDisabled("Menus: A select, B back, left stick or D-pad move.");
+         ImGui::Separator();
++    } else if (::GuestRegion::Current() == ::GuestRegion::Id::Excitebots) {
++        static bool invertAir = RuntimeConfigFile::InvertAirControl(true);
++        if (ImGui::Checkbox("Invert air control (push up to dip the nose)", &invertAir)) {
++            RuntimeConfigFile::SetInvertAirControl(invertAir);
++        }
++        static bool xboxPrompts = RuntimeConfigFile::EbXboxPrompts(true);
++        if (ImGui::Checkbox("Xbox button prompts (off: the original Wii Remote pictures)", &xboxPrompts)) {
++            RuntimeConfigFile::SetEbXboxPrompts(xboxPrompts);
++            EtPrompts::Apply(xboxPrompts);
++        }
++        ImGui::TextDisabled("Gamepad: RT/RB drive, X/LT brake, A turbo and swing (bars, crash shake),");
++        ImGui::TextDisabled("left stick steers and tilts in the air, View resets. Menus: A select, B back.");
++        ImGui::Separator();
+     }
+     for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
+         DrawPlayerRow(port);
+@@ -1423,6 +1436,7 @@ void DrawExitPrompt() {
+     if (g_exitPromptOpen && !ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+     if (!ImGui::BeginPopupModal(kTitle, &g_exitPromptOpen, ImGuiWindowFlags_AlwaysAutoResize)) return;
+     ImGui::TextUnformatted("Quit the game?");
++    if (::GuestRegion::IsExcitebots()) ImGui::TextDisabled("Controller: A to exit, B to cancel");
+     if (ImGui::Button("Exit", ImVec2(120.0f, 0.0f))) ExitForAuroraWindowClose();
+     ImGui::SameLine();
+     if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f))) g_exitPromptOpen = false;
+@@ -1505,7 +1519,7 @@ void DrawTopBar() {
+         ImGui::EndMenu();
+     }
+ 
+-    if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
++    if (::GuestRegion::IsExciteTruck() || ::GuestRegion::IsExcitebots()) {
+         ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f), ImVec2(FLT_MAX, viewport->Size.y * 0.75f));
+         if (ImGui::BeginMenu("Achievements")) {
+             EtAchievements::DrawMenu();
+@@ -1651,6 +1665,21 @@ void HandleEvents(const AuroraEvent* events) noexcept {
+             CompleteRebind(g_rebind.kind == RebindKind::Controller ? PAD_NATIVE_BUTTON_DISABLED
+                                                                   : static_cast<uint32_t>(PAD_KEY_INVALID));
+         }
++        // Excitebots: the Guide (Home) button asks to quit, in place of the Wii's HOME menu and
++        // its Wii Menu button; A confirms and B cancels.
++        if (::GuestRegion::IsExcitebots() && !g_rebind.active && !controller_mapping_wizard::IsActive() &&
++            ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
++            const auto button = static_cast<SDL_GamepadButton>(ev->sdl.gbutton.button);
++            if (button == SDL_GAMEPAD_BUTTON_GUIDE) {
++                g_exitPromptOpen = !g_exitPromptOpen;
++                ApplyInputBlockState();
++            } else if (g_exitPromptOpen && button == SDL_GAMEPAD_BUTTON_SOUTH) {
++                ExitForAuroraWindowClose();
++            } else if (g_exitPromptOpen && button == SDL_GAMEPAD_BUTTON_EAST) {
++                g_exitPromptOpen = false;
++                ApplyInputBlockState();
++            }
++        }
+         if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
+             SetTopBarVisible(!g_topBarVisible);
+             ApplyInputBlockState();
+@@ -1711,7 +1740,7 @@ void Draw() noexcept {
+         DrawShaderCompilationStatus();
+     }
+     DrawFpsOverlay();
+-    if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
++    if (::GuestRegion::IsExciteTruck() || ::GuestRegion::IsExcitebots()) {
+         EtAchievements::DrawToasts();
+     }
+     DrawTopBar();
+diff --git a/runtime/src/system_bridge.cpp b/runtime/src/system_bridge.cpp
+index ad826d4..02751b3 100644
+--- a/runtime/src/system_bridge.cpp
++++ b/runtime/src/system_bridge.cpp
+@@ -335,9 +335,10 @@ void SystemBridge::Initialize() {
+     RT_LOG(RT_TAG_RUNTIME) << "Running static constructors for main DOL..." << std::endl;
+ 
+     const bool exciteTruck = ::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck;
+-    // Excite Truck: .ctors section of REXE01 main.dol (0x802ED060, 0x5E0 bytes).
+-    const uint32_t dolCtorStart = exciteTruck ? 0x802ED060u : MKW_GADDR(80244DE0);
+-    const uint32_t dolCtorEnd = exciteTruck ? 0x802ED640u : MKW_GADDR(80244EA0);
++    const bool excitebots = ::GuestRegion::IsExcitebots();
++    // .ctors of the main DOL: REXE01 0x802ED060 (0x5E0 bytes), RX3E01 0x80417720 (0x740 bytes).
++    const uint32_t dolCtorStart = exciteTruck ? 0x802ED060u : excitebots ? 0x80417720u : MKW_GADDR(80244DE0);
++    const uint32_t dolCtorEnd = exciteTruck ? 0x802ED640u : excitebots ? 0x80417E60u : MKW_GADDR(80244EA0);
+ 
+     int dolCount = 0;
+     for (uint32_t addr = dolCtorStart; addr < dolCtorEnd; addr += 4) {
+@@ -542,8 +543,15 @@ void SystemBridge::SeedLowMemDefaults(const Memory::Config& config) {
+     // Seed OS clock values used by SDK timing helpers (OSBusClock/OSClock).
+     entries.push_back({0x800000F8u, kBusClockHz, "__OSBusClock"});
+     entries.push_back({0x800000FCu, kCpuClockHz, "__OSClock"});
+-    entries.push_back({0x80003140u, kIos36Version, "IOS36 version"});
+-    entries.push_back({0x80003144u, kIos36Date, "IOS36 date"});
++    // Excitebots' disc asks for IOS55 (TMD), and its 2008 SDK refuses an older version.
++    // IOS55 v5663 (Dolphin VersionInfo.cpp).
++    const bool iosFiftyFive = ::GuestRegion::IsExcitebots();
++    entries.push_back({0x80003140u, iosFiftyFive ? 0x0037161Fu : kIos36Version, "IOS version"});
++    entries.push_back({0x80003144u, iosFiftyFive ? 0x00031810u : kIos36Date, "IOS date"});
++    if (iosFiftyFive) {
++        // The IOS version the apploader saw in the TMD; OSInit compares it with 0x80003140.
++        entries.push_back({0x80003188u, 0x0037161Fu, "Expected IOS version"});
++    }
+ 
+     if (mem1Size != 0) {
+         const uint32_t mem1End = Memory::kMem1CachedBase + mem1Size;
+diff --git a/translator/src/Translator.Core/GuestAddressTable.cs b/translator/src/Translator.Core/GuestAddressTable.cs
+index 4e10bfa..7446b41 100644
+--- a/translator/src/Translator.Core/GuestAddressTable.cs
++++ b/translator/src/Translator.Core/GuestAddressTable.cs
+@@ -11,6 +11,8 @@ public enum GuestRegion
+     // Excite Truck (REXE01): a different game built on the same Wii SDK. Only the SDK functions
+     // and data that have a counterpart get an address; everything else maps to 0 (absent).
+     ExciteTruck = 3,
++    // Excitebots: Trick Racing (RX3E01): same rules as Excite Truck.
++    Excitebots = 4,
+ }
+ 
+ public static class GuestRegions
+@@ -25,6 +27,7 @@ public static class GuestRegions
+         "RMCJ01" => GuestRegion.NtscJ,
+         "RMCP01" => GuestRegion.Pal,
+         "REXE01" => GuestRegion.ExciteTruck,
++        "RX3E01" => GuestRegion.Excitebots,
+         { } id when id.StartsWith("RMC", StringComparison.Ordinal) =>
+             throw new InvalidDataException($"Mario Kart Wii release '{gameId}' is not supported."),
+         _ => GuestRegion.Pal,
+@@ -107,7 +110,7 @@ public sealed partial class GuestAddressTable
+             if (lo > 0 && pal <= ranges[lo - 1].Last)
+                 return (uint)(pal + (long)ranges[lo - 1].Delta);
+         }
+-        if (region == GuestRegion.ExciteTruck)
++        if (region is GuestRegion.ExciteTruck or GuestRegion.Excitebots)
+             return 0; // no counterpart in this game
+         throw new InvalidDataException($"PAL address 0x{pal:X8} has no {region} address in {SourcePath}.");
+     }
