@@ -733,6 +733,7 @@ void BotsControlsPage() {
     ControlLine("Y", IM_COL32(240, 200, 60, 255), false, "The Wii Remote's A button");
     ControlLine("LS", 0, true, "Steer, and tilt in the air");
     ControlLine("MENU", 0, true, "Pause");
+    ControlLine("GUIDE", 0, true, "Quit the game (A to quit, B to stay)");
     ImGui::Unindent(S(8));
     Heading("MENUS");
     ImGui::Indent(S(8));
@@ -745,7 +746,8 @@ void BotsControlsPage() {
     }
     ImGui::Dummy(ImVec2(0, S(4)));
     ImGui::Indent(S(8));
-    Paragraph("Your bot grabs bars by itself. The game shows the Xbox button for each action. To change which "
+    Paragraph("Your bot grabs bars by itself. Hold A to spin on a bar or to shake in the dentures. The game "
+              "shows the Xbox button for each action. To change which "
               "button does what, press F10 in the game and open Controllers.");
     ImGui::Unindent(S(8));
 }
