@@ -65,6 +65,7 @@ struct Logo {
     ImVec2 size;
 };
 Logo g_logos[kGameCount];
+Logo g_silhouettes[kGameCount];   // traced from the disc's banner art, or drawn (vehicles.cpp)
 
 // Home (choose a game, set games up) or one game's own menu and pages.
 enum class Screen { Home, Game };
@@ -1180,27 +1181,32 @@ void RefreshInstalled() {
     for (int i = 0; i < kGameCount; ++i) g_installed[i] = IsInstalled(GameAt(i));
 }
 
+void MakeTexture(Logo& logo, const Image& image) {
+    if (logo.texture) SDL_DestroyTexture(logo.texture);
+    logo = Logo{};
+    if (!g_renderer || image.width <= 0) return;
+    logo.texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, image.width,
+                                     image.height);
+    if (logo.texture) {
+        SDL_UpdateTexture(logo.texture, nullptr, image.rgba.data(), image.width * 4);
+        SDL_SetTextureBlendMode(logo.texture, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(logo.texture, SDL_SCALEMODE_LINEAR);
+        logo.size = ImVec2(float(image.width), float(image.height));
+    }
+}
+
+// The logos, and the vehicle silhouettes behind them, from each set-up game's disc banner.
 void LoadLogos() {
     for (int i = 0; i < kGameCount; ++i) {
-        Logo& logo = g_logos[i];
-        if (logo.texture) {
-            SDL_DestroyTexture(logo.texture);
-            logo = Logo{};
-        }
         const GameId id = GameAt(i);
-        Image image;
-        if (!g_renderer ||
-            !LoadBannerTexture(cfg::DiscFolder(id) / "files" / "opening.bnr", Game(id).logoTexture, image)) {
-            continue;
+        const fs::path banner = cfg::DiscFolder(id) / "files" / "opening.bnr";
+        Image logo, source, silhouette;
+        if (!LoadBannerTexture(banner, Game(id).logoTexture, logo)) logo = Image{};
+        MakeTexture(g_logos[i], logo);
+        if (!LoadBannerTexture(banner, SilhouetteSource(id), source) || !TraceSilhouette(id, source, silhouette)) {
+            silhouette = Image{};
         }
-        logo.texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, image.width,
-                                         image.height);
-        if (logo.texture) {
-            SDL_UpdateTexture(logo.texture, nullptr, image.rgba.data(), image.width * 4);
-            SDL_SetTextureBlendMode(logo.texture, SDL_BLENDMODE_BLEND);
-            SDL_SetTextureScaleMode(logo.texture, SDL_SCALEMODE_LINEAR);
-            logo.size = ImVec2(float(image.width), float(image.height));
-        }
+        MakeTexture(g_silhouettes[i], silhouette);
     }
 }
 
@@ -1380,28 +1386,35 @@ std::string Elapsed(double seconds) {
     return text;
 }
 
-// --- Vehicles behind the home screen's logos (see vehicles.cpp) ----------------------------------
+// --- Vehicles behind the home screen's logos ----------------------------------------------------
 
-SDL_Texture* g_silhouettes[kGameCount] = {};
+SDL_Texture* g_drawnVehicles[kGameCount] = {};   // until the game is set up (vehicles.cpp)
 
-// The game's vehicle, centred on `centre`, `width` wide, facing right (or left when flipped).
-void DrawSilhouette(ImDrawList* draw, GameId game, ImVec2 centre, float width, ImU32 color, bool flip) {
-    SDL_Texture*& texture = g_silhouettes[int(game)];
-    if (!texture && g_renderer) {
-        std::vector<uint32_t> pixels;
-        const int w = 720, h = RenderVehicle(game, flip, w, pixels);
-        texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
-        if (texture) {
-            SDL_UpdateTexture(texture, nullptr, pixels.data(), w * 4);
-            SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-            SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR);
+// A one-colour silhouette of the game's vehicle, as big as fits in the box, centred on `centre`.
+// Traced from the disc's banner art once the game is set up; before that, a drawn stand-in.
+void DrawSilhouette(ImDrawList* draw, GameId game, ImVec2 centre, ImVec2 box, ImU32 color) {
+    SDL_Texture* texture = g_silhouettes[int(game)].texture;
+    ImVec2 size = g_silhouettes[int(game)].size;
+    if (!texture) {
+        SDL_Texture*& drawn = g_drawnVehicles[int(game)];
+        if (!drawn && g_renderer) {
+            std::vector<uint32_t> pixels;
+            const int w = 720, h = RenderVehicle(game, game == GameId::Bots, w, pixels, true);
+            drawn = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
+            if (drawn) {
+                SDL_UpdateTexture(drawn, nullptr, pixels.data(), w * 4);
+                SDL_SetTextureBlendMode(drawn, SDL_BLENDMODE_BLEND);
+                SDL_SetTextureScaleMode(drawn, SDL_SCALEMODE_LINEAR);
+            }
         }
+        texture = drawn;
+        size = ImVec2(720.0f, 720.0f * kVehicleHeight);
     }
     if (!texture) return;
-    // Centre on the body (around y 0.24), not on the antennae above it.
-    const float top = centre.y - (0.24f - kVehicleTop) * width;
-    draw->AddImage(ImTextureID(texture), ImVec2(centre.x - width * 0.5f, top),
-                   ImVec2(centre.x + width * 0.5f, top + width * kVehicleHeight), ImVec2(0, 0), ImVec2(1, 1), color);
+    const float scale = std::min(box.x / size.x, box.y / size.y);
+    const ImVec2 half(size.x * scale * 0.5f, size.y * scale * 0.5f);
+    draw->AddImage(ImTextureID(texture), ImVec2(centre.x - half.x, centre.y - half.y),
+                   ImVec2(centre.x + half.x, centre.y + half.y), ImVec2(0, 0), ImVec2(1, 1), color);
 }
 
 float g_logoHot[kGameCount] = {};   // 0..1, eases in while the cursor is on that game
@@ -1471,8 +1484,7 @@ void DrawGameColumn(int slot, float cx, float colW, float top, float logoH, doub
         }
     }
     // A grey silhouette of the game's vehicle behind its logo, facing the middle of the screen.
-    DrawSilhouette(draw, id, ImVec2(centre.x, centre.y - logoH * 0.02f), logoW * 1.02f,
-                   IM_COL32(255, 255, 255, int(150 + 50 * hot)), slot == 1);
+    DrawSilhouette(draw, id, centre, ImVec2(logoW * 1.02f, logoH * 1.3f), IM_COL32(58, 60, 72, int(135 + 40 * hot)));
     const float scale = 1.0f + 0.06f * hot;
     const ImVec2 half(logoW * 0.5f * scale, logoH * 0.5f * scale);
     const float lift = S(6) * hot;
@@ -1728,9 +1740,13 @@ bool UiUpdateFonts(float windowWidth, float windowHeight) {
 }
 
 void UiShutdown() {
-    for (SDL_Texture*& texture : g_silhouettes) {
+    for (SDL_Texture*& texture : g_drawnVehicles) {
         if (texture) SDL_DestroyTexture(texture);
         texture = nullptr;
+    }
+    for (Logo& logo : g_silhouettes) {
+        if (logo.texture) SDL_DestroyTexture(logo.texture);
+        logo = Logo{};
     }
     for (Logo& logo : g_logos) {
         if (logo.texture) SDL_DestroyTexture(logo.texture);

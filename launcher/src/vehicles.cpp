@@ -403,7 +403,7 @@ float ShadePart(const Part& part, V2 p) {
 
 } // namespace
 
-int RenderVehicle(GameId game, bool faceLeft, int width, std::vector<uint32_t>& rgba) {
+int RenderVehicle(GameId game, bool faceLeft, int width, std::vector<uint32_t>& rgba, bool solid) {
     const std::vector<Part> parts = game == GameId::Truck ? Truck() : Beetle();
     g_light = Norm({faceLeft ? 0.5f : -0.5f, -0.75f, 0.65f});
     const int height = int(width * kVehicleHeight);
@@ -428,9 +428,161 @@ int RenderVehicle(GameId game, bool faceLeft, int width, std::vector<uint32_t>& 
     rgba.assign(size_t(width) * height, 0);
     for (size_t i = 0; i < rgba.size(); ++i) {
         if (cover[i] <= 0.0f) continue;
-        const uint32_t g = uint32_t(std::clamp(value[i] / cover[i], 0.0f, 1.0f) * 255.0f + 0.5f);
+        const uint32_t g = solid ? 255u : uint32_t(std::clamp(value[i] / cover[i], 0.0f, 1.0f) * 255.0f + 0.5f);
         const uint32_t a = uint32_t(cover[i] / (ss * ss) * 255.0f + 0.5f);
         rgba[i] = (a << 24) | (g << 16) | (g << 8) | g;
     }
     return height;
+}
+
+// --- Silhouettes traced from the disc's banner art --------------------------------------------
+
+const char* SilhouetteSource(GameId game) {
+    return game == GameId::Truck ? "veh_strip.tpl" : "Bot_Grasshopper.tpl";
+}
+
+namespace {
+
+using Mask = std::vector<float>;
+
+// Box blur, `r` pixels each way, along both axes.
+void Blur(Mask& m, int w, int h, int r) {
+    Mask tmp(m.size());
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float sum = 0;
+            int n = 0;
+            for (int k = std::max(0, x - r); k <= std::min(w - 1, x + r); ++k, ++n) sum += m[size_t(y) * w + k];
+            tmp[size_t(y) * w + x] = sum / n;
+        }
+    }
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float sum = 0;
+            int n = 0;
+            for (int k = std::max(0, y - r); k <= std::min(h - 1, y + r); ++k, ++n) sum += tmp[size_t(k) * w + x];
+            m[size_t(y) * w + x] = sum / n;
+        }
+    }
+}
+
+// Grows (or with `shrink`, thins) the mask by `r` pixels.
+void Spread(Mask& m, int w, int h, int r, bool shrink) {
+    Mask out(m.size());
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float v = shrink ? 1.0f : 0.0f;
+            for (int dy = -r; dy <= r; ++dy) {
+                for (int dx = -r; dx <= r; ++dx) {
+                    const int xx = x + dx, yy = y + dy;
+                    const float s = (xx < 0 || yy < 0 || xx >= w || yy >= h) ? 0.0f : m[size_t(yy) * w + xx];
+                    v = shrink ? std::min(v, s) : std::max(v, s);
+                }
+            }
+            out[size_t(y) * w + x] = v;
+        }
+    }
+    m.swap(out);
+}
+
+// Fills everything a line drawing encloses: whatever can't be reached from the border.
+void FillEnclosed(Mask& m, int w, int h) {
+    std::vector<char> outside(m.size(), 0);
+    std::vector<int> stack;
+    auto push = [&](int x, int y) {
+        if (x < 0 || y < 0 || x >= w || y >= h) return;
+        const size_t i = size_t(y) * w + x;
+        if (outside[i] || m[i] > 0.5f) return;
+        outside[i] = 1;
+        stack.push_back(int(i));
+    };
+    for (int x = 0; x < w; ++x) push(x, 0), push(x, h - 1);
+    for (int y = 0; y < h; ++y) push(0, y), push(w - 1, y);
+    while (!stack.empty()) {
+        const int i = stack.back();
+        stack.pop_back();
+        push(i % w + 1, i / w), push(i % w - 1, i / w), push(i % w, i / w + 1), push(i % w, i / w - 1);
+    }
+    for (size_t i = 0; i < m.size(); ++i) m[i] = outside[i] ? 0.0f : 1.0f;
+}
+
+} // namespace
+
+bool TraceSilhouette(GameId game, const Image& source, Image& out) {
+    if (source.width <= 0 || source.height <= 0) return false;
+    const int sw = source.width;
+    auto alpha = [&](int x, int y) { return source.rgba[(size_t(y) * sw + x) * 4 + 3]; };
+
+    // The part of the texture to trace, and how.
+    int x0 = 0, y0 = 0, x1 = sw, y1 = source.height;
+    if (game == GameId::Truck) {
+        // A column of truck silhouettes, each with a fainter shadow: take the last (a lifted
+        // truck with a light bar), without its shadow.
+        std::vector<std::pair<int, int>> rows;
+        for (int y = 0, start = -1; y <= source.height; ++y) {
+            bool any = false;
+            for (int x = 0; y < source.height && x < sw && !any; ++x) any = alpha(x, y) > 0;
+            if (any && start < 0) start = y;
+            if (!any && start >= 0) {
+                if (y - start > 20) rows.push_back({start, y});
+                start = -1;
+            }
+        }
+        if (rows.empty()) return false;
+        y0 = rows.back().first;
+        y1 = rows.back().second;
+    }
+    const int w = x1 - x0, h = y1 - y0;
+    Mask m(size_t(w) * h);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const int a = alpha(x0 + x, y0 + y);
+            m[size_t(y) * w + x] = game == GameId::Truck ? (a >= 140 ? 1.0f : 0.0f) : (a > 40 ? 1.0f : 0.0f);
+        }
+    }
+    if (game == GameId::Bots) {
+        // A line drawing: close small gaps, fill it in, then take back the extra edge.
+        Spread(m, w, h, 2, false);
+        FillEnclosed(m, w, h);
+        Spread(m, w, h, 1, true);
+    }
+
+    // Crop to the shape, with a margin for the smoothing.
+    int bx0 = w, by0 = h, bx1 = -1, by1 = -1;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            if (m[size_t(y) * w + x] > 0.5f) {
+                bx0 = std::min(bx0, x), by0 = std::min(by0, y), bx1 = std::max(bx1, x), by1 = std::max(by1, y);
+            }
+        }
+    }
+    if (bx1 < 0) return false;
+    const int pad = 2;
+    bx0 -= pad, by0 -= pad, bx1 += pad, by1 += pad;
+
+    // Scale up smoothly: sample the mask with bilinear filtering, blur, then sharpen the edge.
+    const int scale = game == GameId::Truck ? 8 : 4;
+    const int ow = (bx1 - bx0 + 1) * scale, oh = (by1 - by0 + 1) * scale;
+    auto at = [&](int x, int y) {
+        return (x < 0 || y < 0 || x >= w || y >= h) ? 0.0f : m[size_t(y) * w + x];
+    };
+    Mask big(size_t(ow) * oh);
+    for (int y = 0; y < oh; ++y) {
+        for (int x = 0; x < ow; ++x) {
+            const float fx = bx0 + (x + 0.5f) / scale - 0.5f, fy = by0 + (y + 0.5f) / scale - 0.5f;
+            const int ix = int(std::floor(fx)), iy = int(std::floor(fy));
+            const float tx = fx - ix, ty = fy - iy;
+            big[size_t(y) * ow + x] = (at(ix, iy) * (1 - tx) + at(ix + 1, iy) * tx) * (1 - ty) +
+                                      (at(ix, iy + 1) * (1 - tx) + at(ix + 1, iy + 1) * tx) * ty;
+        }
+    }
+    Blur(big, ow, oh, scale / 2);
+    Blur(big, ow, oh, scale / 2);
+    out.width = ow;
+    out.height = oh;
+    out.rgba.assign(size_t(ow) * oh * 4, 255);
+    for (size_t i = 0; i < big.size(); ++i) {
+        out.rgba[i * 4 + 3] = (unsigned char)(std::clamp((big[i] - 0.5f) * 5.0f + 0.5f, 0.0f, 1.0f) * 255.0f + 0.5f);
+    }
+    return true;
 }
