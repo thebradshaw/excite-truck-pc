@@ -728,7 +728,7 @@ void BotsControlsPage() {
     ImGui::Indent(S(8));
     ControlLine("RT", 0, true, "Drive", "RB");
     ControlLine("X", IM_COL32(80, 150, 255, 255), false, "Brake", "LT");
-    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Turbo, and swing on bars when the A prompt shows");
+    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Turbo; on a bar, swing and let go");
     ControlLine("LS", 0, true, "Steer, and tilt in the air");
     ControlLine("B", IM_COL32(240, 80, 70, 255), false, "Back in menus");
     ControlLine("MENU", 0, true, "Pause");
@@ -739,7 +739,8 @@ void BotsControlsPage() {
     }
     ImGui::Dummy(ImVec2(0, S(4)));
     ImGui::Indent(S(8));
-    Paragraph("This layout follows the Excitebots port as it is made, so it may still change. To change which "
+    Paragraph("Your bot grabs bars by itself: press A when the A prompt shows to swing, and again to let go. "
+              "This layout follows the Excitebots port as it is made, so it may still change. To change which "
               "button does what, press F10 in the game and open Controllers.");
     ImGui::Unindent(S(8));
 }

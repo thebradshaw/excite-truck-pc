@@ -1,5 +1,5 @@
-// Grey, shaded side views of each game's vehicle, drawn behind the logos on the home screen.
-// They are drawn here from simple shapes (not taken from the games) and rendered once on the CPU.
+// The vehicle silhouettes behind the home screen's logos: traced from each disc's banner art once
+// the game is set up, with drawn stand-ins (simple shapes, rendered once on the CPU) before that.
 #pragma once
 
 #include <cstdint>
