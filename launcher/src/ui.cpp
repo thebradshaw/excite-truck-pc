@@ -726,12 +726,18 @@ void ControlLine(const char* label, ImU32 color, bool pill, const char* action, 
 void BotsControlsPage() {
     Heading("XBOX CONTROLLER");
     ImGui::Indent(S(8));
-    ControlLine("RT", 0, true, "Drive", "RB");
+    ControlLine("RT", 0, true, "Accelerate", "RB");
     ControlLine("X", IM_COL32(80, 150, 255, 255), false, "Brake", "LT");
-    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Turbo; on a bar, swing and let go");
+    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Turbo; swing when SHAKE!!! or Push shows");
+    ControlLine("B", IM_COL32(240, 80, 70, 255), false, "Use your weapon");
+    ControlLine("Y", IM_COL32(240, 200, 60, 255), false, "The Wii Remote's A button");
     ControlLine("LS", 0, true, "Steer, and tilt in the air");
-    ControlLine("B", IM_COL32(240, 80, 70, 255), false, "Back in menus");
     ControlLine("MENU", 0, true, "Pause");
+    ImGui::Unindent(S(8));
+    Heading("MENUS");
+    ImGui::Indent(S(8));
+    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "OK");
+    ControlLine("B", IM_COL32(240, 80, 70, 255), false, "Back");
     ImGui::Unindent(S(8));
     Heading("OPTIONS");
     if (ToggleRow("Vibration", "Rumble on your controller when you land, crash and boost.", g_settings.rumble)) {
@@ -739,8 +745,7 @@ void BotsControlsPage() {
     }
     ImGui::Dummy(ImVec2(0, S(4)));
     ImGui::Indent(S(8));
-    Paragraph("Your bot grabs bars by itself: press A when the A prompt shows to swing, and again to let go. "
-              "This layout follows the Excitebots port as it is made, so it may still change. To change which "
+    Paragraph("Your bot grabs bars by itself. The game shows the Xbox button for each action. To change which "
               "button does what, press F10 in the game and open Controllers.");
     ImGui::Unindent(S(8));
 }
