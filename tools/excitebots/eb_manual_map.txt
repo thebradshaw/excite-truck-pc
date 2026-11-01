@@ -48,8 +48,11 @@
 80015500 8002f034 __write_console (calls OSGetConsoleType)
 # nand.o: same layout as MKWii ahead of NANDDelete (0x800af248)
 8019b43c 800af0e4 NANDCreate
-8019b4b0 800af158 NANDPrivateCreate
 8019b524 800af1d0 NANDPrivateCreateAsync
 # ai.o: Excitebots links AIStopDMA right after AIStartDMA (same size), which MKWii lacks, so the
 # aligner was off by one here. AIStopDMA (0x800342c0) gets its own hook (eb_hooks.cpp).
 80124048 800342ac AIStartDMA
+# nand.o: Excitebots links the public async calls (NANDCreateAsync 0x800af158, NANDCreateDirAsync
+# 0x800af900) where MKWii has the private sync ones; those get Excitebots hooks (eb_hooks.cpp).
+8019bbe0 800af88c NANDCreateDir
+8019bcc8 800af978 NANDPrivateCreateDirAsync

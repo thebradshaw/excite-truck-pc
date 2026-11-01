@@ -86,10 +86,10 @@ index f4daa52..c1de418 100644
  
 diff --git a/runtime/src/hle/excitebots/eb_hooks.cpp b/runtime/src/hle/excitebots/eb_hooks.cpp
 new file mode 100644
-index 0000000..b2af41c
+index 0000000..2aa8ac2
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_hooks.cpp
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,147 @@
 +// Excitebots: Trick Racing (RX3E01) specific hooks.
 +//
 +// Addresses here use the 0x8E000000 alias: guest_versions.inc maps 0x8E000000 + (EB address
@@ -212,6 +212,31 @@ index 0000000..b2af41c
 +    ET_OSReadROM_80052f8c(ctx);
 +}
 +PPC_NATIVE_OVERRIDE_VOID(8E05A708, EB_OSReadROM_8005a708, (CpuContext* ctx), (ctx));
++
++// NANDCreateAsync (0x800AF158) and NANDCreateDirAsync (0x800AF900): the public async calls, which
++// Mario Kart never links. Same arguments as the private ones the runtime implements.
++extern "C" int32_t NANDPrivateCreateAsync_HLE(uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr,
++                                              uint32_t commandBlockPtr);
++extern "C" int32_t NANDPrivateCreateDirAsync_HLE(uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr,
++                                                 uint32_t commandBlockPtr);
++
++extern "C" int32_t EB_NANDCreateAsync_800af158(uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr,
++                                               uint32_t commandBlockPtr)
++{
++    return NANDPrivateCreateAsync_HLE(pathPtr, perm, attr, callbackPtr, commandBlockPtr);
++}
++PPC_NATIVE_OVERRIDE(8E0AF158, EB_NANDCreateAsync_800af158, int32_t,
++    (uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr, uint32_t commandBlockPtr),
++    (pathPtr, perm, attr, callbackPtr, commandBlockPtr));
++
++extern "C" int32_t EB_NANDCreateDirAsync_800af900(uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr,
++                                                  uint32_t commandBlockPtr)
++{
++    return NANDPrivateCreateDirAsync_HLE(pathPtr, perm, attr, callbackPtr, commandBlockPtr);
++}
++PPC_NATIVE_OVERRIDE(8E0AF900, EB_NANDCreateDirAsync_800af900, int32_t,
++    (uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr, uint32_t commandBlockPtr),
++    (pathPtr, perm, attr, callbackPtr, commandBlockPtr));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
 index 0000000..ca60626
@@ -485,8 +510,66 @@ index 0000000..ca60626
 +    ctx->gpr[3] = 1;
 +}
 +PPC_NATIVE_OVERRIDE_VOID(8E04DABC, EB_KPADReadEx_8004dabc, (CpuContext* ctx), (ctx));
+diff --git a/runtime/src/hle/gx/gx_dl.cpp b/runtime/src/hle/gx/gx_dl.cpp
+index e49a831..05dad31 100644
+--- a/runtime/src/hle/gx/gx_dl.cpp
++++ b/runtime/src/hle/gx/gx_dl.cpp
+@@ -723,6 +723,13 @@ static void AppendBytes(std::vector<uint8_t>& out, const uint8_t* data, uint32_t
+     out.insert(out.end(), data, data + count);
+ }
+ 
++// WC_DEBUG_DL=1 logs nested display-list calls whose address is not guest memory (a sign
++// that the vertex layout used to walk the list is wrong).
++static bool DebugDlEnabled() {
++    static const bool enabled = std::getenv("WC_DEBUG_DL") != nullptr;
++    return enabled;
++}
++
+ template <class Visitor>
+ static bool WalkDisplayList(const uint8_t* data, uint32_t nbytes, Visitor& visitor, int depth) {
+     if (depth > Visitor::kMaxDepth) {
+@@ -769,6 +776,19 @@ static bool WalkDisplayList(const uint8_t* data, uint32_t nbytes, Visitor& visit
+             if (pos + 8u > nbytes) return false;
+             const uint32_t addr = ReadBE32(data + pos);
+             const uint32_t size = ReadBE32(data + pos + 4);
++            if (DebugDlEnabled() && (addr < 0x80000000u || addr >= 0x94000000u)) {
++                static int shown = 0;
++                if (shown++ < 6) {
++                    std::string hex;
++                    char t[8];
++                    const uint32_t from = pos > 97 ? pos - 97 : 0;
++                    for (uint32_t i = from; i < pos + 8 && i < nbytes; ++i) { std::snprintf(t, sizeof t, "%02X%s", data[i], i + 1 == pos ? "|" : " "); hex += t; }
++                    std::fprintf(stderr, "[dldbg] bad call at +0x%X of %u (depth %d): %s\n", pos - 1, nbytes, depth, hex.c_str());
++                    std::string vcd;
++                    for (int a = 0; a < 26; ++a) if (g_hleGxState.vtxDesc[a] != GX_NONE) { std::snprintf(t, sizeof t, " %d:%d", a, int(g_hleGxState.vtxDesc[a])); vcd += t; }
++                    std::fprintf(stderr, "[dldbg]   frame %d vcd%s\n", g_gxFrameCount, vcd.c_str());
++                }
++            }
+             pos += 8u;
+             if (!visitor.OnCallDisplayList(addr, size, depth)) return false;
+             continue;
+@@ -1364,7 +1384,7 @@ bool g_dlVtxDescDirty = false;
+ void GxNoteVtxDescChangedWhileRecording() {
+     if (IsDisplayListActive()) g_dlVtxDescDirty = true;
+ }
+-void GxFlushDisplayListDirtyState() {
++void GxFlushDisplayListDirtyState(bool padLikeGXFlush) {
+     if (!IsDisplayListActive()) return;
+     if (g_dlVtxDescDirty) {
+         g_dlVtxDescDirty = false;
+@@ -1389,7 +1409,9 @@ void GxFlushDisplayListDirtyState() {
+     }
+     // GXFlush pads the write-gather pipe with 32 zero bytes (GX NOPs), and they land in
+     // the list too, so list sizes match hardware.
+-    for (int i = 0; i < 8; ++i) WriteDisplayListData(0, 4);
++    if (padLikeGXFlush) {
++        for (int i = 0; i < 8; ++i) WriteDisplayListData(0, 4);
++    }
+ }
+ 
+ void GxRestoreVtxStateAfterDisplayList() {
 diff --git a/runtime/src/hle/gx/gx_init.cpp b/runtime/src/hle/gx/gx_init.cpp
-index e890b8b..f0a953f 100644
+index e890b8b..e2e7e7e 100644
 --- a/runtime/src/hle/gx/gx_init.cpp
 +++ b/runtime/src/hle/gx/gx_init.cpp
 @@ -90,10 +90,13 @@ extern "C" uint32_t GX__Init_8016b850(uint32_t fifoBase, uint32_t fifoSize)
@@ -507,12 +590,24 @@ index e890b8b..f0a953f 100644
      }
      RT_LOGF(RT_TAG_GX, "GX initialized, FIFO at 0x%08X (base=0x%08X size=0x%08X)\n",
              kFifoObjAddr, fifoBase, fifoSize);
-@@ -232,7 +235,7 @@ static void EndDisplayListInline() {
+@@ -190,7 +193,7 @@ bool g_dlInline = false;
+ 
+ void GxSaveVtxStateForDisplayList();
+ void GxRestoreVtxStateAfterDisplayList();
+-void GxFlushDisplayListDirtyState();
++void GxFlushDisplayListDirtyState(bool padLikeGXFlush);
+ 
+ extern "C" void GX__BeginDisplayList_80172e00(uint32_t la, uint32_t s) {
+     if (!g_dlInline) {
+@@ -231,8 +234,9 @@ static void EndDisplayListInline() {
+ 
  extern "C" uint32_t GX__EndDisplayList_80172eb4() {
      try {
-         // Excite Truck's SDK flushes dirty state into the list here (GXGetCPUFifo calls GXFlush).
+-        // Excite Truck's SDK flushes dirty state into the list here (GXGetCPUFifo calls GXFlush).
 -        if (!::GuestRegion::IsMarioKart()) GxFlushDisplayListDirtyState();
-+        if (::GuestRegion::IsExciteTruck()) GxFlushDisplayListDirtyState();
++        // Both Excite games record lists that hold only a vertex descriptor change, so the dirty
++        // state is flushed into the list here (Excite Truck: GXGetCPUFifo calls GXFlush).
++        if (!::GuestRegion::IsMarioKart()) GxFlushDisplayListDirtyState(true);
          GXFlush();
          GX__GetCPUFifo_8016cf10(MKW_GADDR(80344090));
          const uint8_t wrapped = Memory::Read8(kDlFifoAddr + kDlWrapFlagOffset);
@@ -536,6 +631,36 @@ index 49be121..1f0e12f 100644
  }
  
  void DeliverDrawSyncToken(CpuContext* ctx, uint16_t token)
+diff --git a/runtime/src/hle/gx/gx_vertex.cpp b/runtime/src/hle/gx/gx_vertex.cpp
+index 285f1c5..368f1ac 100644
+--- a/runtime/src/hle/gx/gx_vertex.cpp
++++ b/runtime/src/hle/gx/gx_vertex.cpp
+@@ -41,6 +41,7 @@ bool ApiVtxArray(uint32_t attr, uint32_t& base, uint32_t& stride) {
+ // ============================================================================
+ 
+ void GxNoteVtxDescChangedWhileRecording();
++void GxFlushDisplayListDirtyState(bool padLikeGXFlush);
+ 
+ extern "C" void GX__ClearVtxDesc_8016dc34() {
+     GxNoteVtxDescChangedWhileRecording();
+@@ -59,6 +60,7 @@ PPC_NATIVE_OVERRIDE_VOID(8016dc34, GX__ClearVtxDesc_8016dc34, (), ());
+ extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
+     GxNoteVtxDescChangedWhileRecording();
+     GX_DEFER_CALL(GX__SetVtxDesc_8016d3a4, a, t);
++    GXT("[gxt] vtxdesc %u=%u\n", a, t);
+     const uint32_t attr = CanonicalVtxAttr(a);
+     if(attr>=26||attr==GX_VA_NULL) return;
+     const GXAttrType oldType = g_hleGxState.vtxDesc[attr];
+@@ -321,6 +323,9 @@ static void GxBeginImpl(uint32_t t, uint32_t vf, uint32_t nv);
+ 
+ extern "C" void GX__Begin_8016f0f0(uint32_t t, uint32_t vf, uint32_t nv) { GXT("[gxt] BEGIN prim%X fmt%u n%u\n", t,vf,nv);
+     if(IsDisplayListActive()){
++        // The 2008 SDK's GXBegin writes a changed vertex descriptor into the list first
++        // (__GXSetDirtyState). Excitebots records model lists that rely on it.
++        if (::GuestRegion::IsExcitebots()) GxFlushDisplayListDirtyState(false);
+         WriteDisplayListData((u8)(t|vf), 1);
+         WriteDisplayListData((u16)nv, 2);
+         return;
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
 index 739db18..4da7fcc 100644
 --- a/runtime/src/main.cpp

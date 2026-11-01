@@ -40,12 +40,17 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
 
 - `GuestRegion::Id::Excitebots = 4`, game ID `RX3E01`, `IsExciteTruck()` / `IsExcitebots()`.
   Excitebots-only hooks use the `0x8E000000` alias (Excite Truck's are at `0x8F000000`).
-- Excite Truck workarounds for its 2006 SDK (display-list dirty-state flush, frame pipelining)
-  now apply to Excite Truck only; GX register pointers and the draw-sync token callback have
-  Excitebots addresses.
+- Display lists: the game records small lists that hold only a vertex descriptor change and
+  calls them before its model lists, so the dirty vertex descriptor is written into a list at
+  `GXEndDisplayList` (as for Excite Truck) and at `GXBegin` while recording (2008 SDK
+  behaviour). Without it the model lists were walked with the wrong vertex size and the race
+  drew nothing. `WC_DEBUG_DL=1` logs nested list calls with impossible addresses.
+- Excite Truck's frame pipelining stays Excite Truck only; GX register pointers and the
+  draw-sync token callback have Excitebots addresses.
 - Boot: IOS55 version values in low memory (`0x80003140`, `0x80003188`), `.ctors` range, entry.
 - `runtime/src/hle/excitebots/eb_hooks.cpp`: `GXSetDrawDone`, the `WPADGetStatus` boot spin,
-  `OSGetFontEncode` (no VI DTV register), `__OSReadROM` fonts, `AIStopDMA` (Mario Kart lacks it;
+  `OSGetFontEncode` (no VI DTV register), `__OSReadROM` fonts, `NANDCreateAsync` and
+  `NANDCreateDirAsync` (save file), `AIStopDMA` (Mario Kart lacks it;
   the aligner had put `AIStartDMA` one function off), the debug printf (`WC_GAME_LOG=1`) and the
   developer command line (`WC_EB_ARGS`).
 - `runtime/src/hle/excitebots/eb_input.cpp`: a virtual sideways Wii Remote at the KPAD level, as
@@ -60,8 +65,9 @@ Set them with `WC_EB_ARGS`.
 
 ## Status
 
-- Boots to "Press 2 to Start" and the save prompt at about 59 fps (container, software renderer),
-  16:9.
-- Next: save file, menus and the first race; race-state detection for the controls; bar swings on
+- Boots to "Press 2 to Start" at about 59 fps (container, software renderer), 16:9, creates its
+  save file and reaches the profile screen.
+- Races load and draw (`WC_EB_ARGS=-direct_to_track:China`), with the HUD in 16:9.
+- Next: race-state detection for the controls; bar swings on
   A (`barswingComponent`, Red/Yellow bar minigames) with an on-screen prompt; shader list;
   achievements; build scripts (`scripts/excitebots/`).
