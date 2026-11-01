@@ -1,9 +1,12 @@
-// The settings the launcher shows, read from and written to the game's own Config.toml.
+// The settings the launcher shows, read from and written to the selected game's Config.toml
+// (<install dir>/UserData/Config.toml: the games are installed portable).
 #pragma once
 
 #include <filesystem>
 #include <string>
 #include <vector>
+
+#include "games.h"
 
 struct LauncherSettings {
     std::string displayMode = "borderless";   // windowed, borderless, exclusive
@@ -25,8 +28,12 @@ struct LauncherSettings {
 
 namespace launcher_config {
 
-// Reads Config.toml (creating it the way the game would) and applies the game's one-time
-// Excite Truck defaults, so the first launch shows what the game will really use.
+// Every call below works on this game's files.
+void SelectGame(GameId id);
+GameId SelectedGame();
+
+// Reads Config.toml and applies the game's one-time defaults (Excite Truck: borderless, Auto
+// resolution), so the first launch shows what the game will really use.
 LauncherSettings Load();
 
 // Each setter writes one value straight away, like the game's F10 bar.
@@ -53,9 +60,8 @@ std::filesystem::path MusicFolder(const LauncherSettings& settings);
 std::filesystem::path TextureFolder();
 // The extracted disc (holds sys/main.dol), from [paths] dvd_root.
 std::filesystem::path DiscFolder();
+std::filesystem::path DiscFolder(GameId id);
 bool DiscFound();
-// ExciteTruck(.exe) next to the launcher; empty when it isn't there.
-std::filesystem::path GameExecutable();
 
 std::string PathToUtf8(const std::filesystem::path& path);
 std::filesystem::path PathFromUtf8(const std::string& text);
@@ -63,7 +69,7 @@ std::filesystem::path PathFromUtf8(const std::string& text);
 // Every MP3 under the folder, in the order the game's SD card lists them.
 std::vector<std::filesystem::path> FindSongs(const std::filesystem::path& folder);
 
-// The game's 48x48 save icon from the disc (RGBA8), for the window icon.
-bool LoadGameIcon(std::vector<unsigned char>& rgba);
+// A game's 48x48 save icon from its disc (RGBA8), for the window icon.
+bool LoadGameIcon(GameId id, std::vector<unsigned char>& rgba);
 
 } // namespace launcher_config

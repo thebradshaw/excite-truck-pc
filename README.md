@@ -53,27 +53,43 @@ Alt+Enter switches to a window; F10 has the display and resolution settings.
 
 ## Launcher
 
-`ExciteTruckLauncher` opens first (the desktop shortcut points at it). It has the same layout as
-the [1080° Snowboarding launcher](https://github.com/thebradshaw/1080-Snowboarding-decomp): the
+**Excite PC** (`ExcitePC.exe`, the "Excite PC" shortcut) opens first. Its first screen lists
+both games, Excite Truck on the left and Excitebots on the right:
+
+- A game that isn't set up yet takes its disc image (drop it on the window or choose it), then
+  **Set Up** builds it on this PC with a progress bar: the launcher runs the game's build script
+  (`scripts/build-windows.ps1`, or `build-linux.sh`) and reads its `==>` steps, `##progress` lines
+  and ninja's `[n/m]` counts. One game builds at a time; a second one waits its turn. Stopping and
+  starting again picks up where it stopped.
+- A game that is set up has **Play**, which opens its own menu, and **Set Up Again** (rebuilds it
+  after an update, keeping settings and saves).
+
+Each game's menu has the same layout as the
+[1080° Snowboarding launcher](https://github.com/thebradshaw/1080-Snowboarding-decomp): the
 main menu at the bottom left, a help box that explains whatever is under the cursor, and the
-current page on the right. The Excite Truck logo is read from your own disc files
-(`files/opening.bnr`, the Wii channel banner) when the launcher starts; no game art is in this repo.
+current page on the right. The logos are read from your own disc files (`files/opening.bnr`, the
+Wii channel banner) once a game is set up; no game art is in this repo.
 
 ![The launcher: main menu and help on the left, settings on the right](docs/screenshots/launcher.png)
 
-- **Start Game** starts `ExciteTruck` and closes the launcher.
+- **Start Game** starts the game and closes the launcher (or steps aside while another game is
+  still being set up).
 - **Settings**: window mode, resolution, aspect ratio, graphics API (Windows), anti-aliasing,
-  sharper textures, frame rate (60, 120 or 180), VSync, the FPS counter, draw distance and volume.
+  sharper textures, frame rate (60, or 120 and 180, which are experimental: they need a fast PC),
+  VSync, the FPS counter, draw distance (Excite Truck) and volume.
 - **Controls**: the Xbox layout, air control (flight style or direct) and vibration.
 - **Music**: where your MP3s go, the songs found there, buttons to open the folder or pick another
   one, and you can drop MP3s on the window to copy them in.
 - **Mods**: Dolphin-format texture packs on or off, and their folder.
+- **All Games**: back to the game list.
 - **Achievements**: every achievement with its points, a progress bar, and the date you unlocked
   each one (see [Achievements](#achievements)).
 
-Everything is saved straight to the game's `Config.toml`, so the F10 bar in the game shows the
-same values. Mouse, keyboard (arrows, Enter, Esc) and controllers (D-pad or left stick, A, B) all
-work. The launcher's code is in `launcher/`; the build scripts compile it next to the game.
+Everything is saved straight to that game's `Config.toml` (`<game folder>/UserData`), so the F10
+bar in the game shows the same values. Mouse, keyboard (arrows, Enter, Esc) and controllers
+(D-pad or left stick, A, B) all work. The launcher's code is in `launcher/`. It needs none of the
+games' code, so it is built on its own: `scripts/make-setup.sh` cross-compiles it for Windows,
+`scripts/build-launcher.sh` builds it on Linux.
 
 ## Achievements
 
@@ -106,10 +122,12 @@ one works on Windows). The scripts check the disc, fetch the pinned WiiCompiled 
 repo's patches, translate the game's code to C++, compile it and put the game in `ExciteTruck/`.
 The first build takes a while (mostly compiling); nothing from the disc ends up in this repo.
 
-**Windows 10/11, easiest:** drag your disc image onto `ExciteTruckSetup.exe`. It needs nothing
-installed, builds the game into `%LOCALAPPDATA%\Programs\ExciteTruck` and puts "Excite Truck" and
-"Excite Truck Music" shortcuts on the desktop. Windows may warn that the exe is unrecognised (it
-isn't signed): click More info, then Run anyway. `scripts/make-setup.sh` builds the exe.
+**Windows 10/11, easiest:** run `ExciteSetup.exe`. It needs nothing installed: it puts the Excite
+PC launcher in `%LOCALAPPDATA%\Programs\ExcitePC`, adds "Excite PC" to the desktop and Start menu,
+and opens it. Add your disc image there and press Set Up; the game is built into
+`%LOCALAPPDATA%\Programs\ExciteTruck` (an existing install there is picked up as it is). Windows may
+warn that the exe is unrecognised (it isn't signed): click More info, then Run anyway.
+`scripts/make-setup.sh` builds the exe.
 
 **Windows 10/11, from a checkout** (needs [Git for Windows](https://git-scm.com/download/win), for example
 `winget install Git.Git`; the compiler, CMake, Ninja, .NET and libraries are downloaded with
@@ -121,14 +139,15 @@ cd excite-truck-pc
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1 "D:\Games\Excite Truck (USA).wbfs"
 ```
 
-Then run `ExciteTruck\ExciteTruckLauncher.exe` (or `ExciteTruck.exe` to skip the launcher). Build files go to `C:\ETBuild` (about 20 GB, safe to
+Then run `ExciteTruck\ExciteTruck.exe`. Build files go to `C:\ETBuild` (about 20 GB, safe to
 delete afterwards; `-Work` picks another folder).
 
 **Linux** (Debian/Ubuntu: `sudo apt install git cmake ninja-build clang python3 curl dotnet-sdk-8.0`):
 
 ```sh
+scripts/build-launcher.sh     # the launcher, in ExcitePC/; it can run the next line for you
 scripts/build-linux.sh "/path/to/Excite Truck (USA).wbfs"
-./ExciteTruck/ExciteTruckLauncher
+./ExcitePC/ExcitePC
 ```
 
 The game folder is portable: settings, saves and caches live in `ExciteTruck/UserData`, and your
