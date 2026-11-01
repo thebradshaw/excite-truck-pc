@@ -517,10 +517,10 @@ index 0000000..2aa8ac2
 +    (pathPtr, perm, attr, callbackPtr, commandBlockPtr));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..38e594e
+index 0000000..e40bac7
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,493 @@
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
 +// keyboard, answered at the KPAD level like Excite Truck (see et_input.cpp).
 +//   - KPADSetConnectCallback (0x8004E984) is recorded; the first KPADRead reports channel 0 as
@@ -545,6 +545,7 @@ index 0000000..38e594e
 +#include <algorithm>
 +#include <chrono>
 +#include <array>
++#include <cctype>
 +#include <cmath>
 +#include <cstdint>
 +#include <cstdio>
@@ -556,9 +557,13 @@ index 0000000..38e594e
 +#include "ppc_runtime.h"
 +#include "runtime_config.h"
 +#include "runtime_log.h"
++#include "input_bindings.h"
 +
-+bool EbSwingPromptShown(); // gx_texture.cpp: SHAKE!!! or Push is on screen
-+bool EbControllerTypeScreenShown(); // gx_texture.cpp: the Wii Remote / Wii Wheel choice
++bool EbShakePromptShown(); // gx_texture.cpp: the shaking remote (crash, bar spin, dentures)
++bool EbPushPromptShown();  // gx_texture.cpp: the pushed remote (let go of a bar)
++bool EbCrashMeterShown();  // gx_texture.cpp: the crash recovery meter
++bool EbMenuButtonsShown(); // gx_texture.cpp: a menu's Back / OK icons are on screen
++int EbControllerTypeScreenFrames(); // gx_texture.cpp: the Wii Remote / Wii Wheel choice, -1 if not shown
 +
 +namespace {
 +
@@ -690,9 +695,21 @@ index 0000000..38e594e
 +RemoteInput ReadInput()
 +{
 +    RemoteInput in;
-+    const bool racing = RaceRunning();
++    // A menu over a race (pause, Training's lesson cards, results) takes the menu layout.
++    const bool racing = RaceRunning() && !EbMenuButtonsShown();
++    static int lastRacing = -1;
++    if (int(racing) != lastRacing && std::getenv("WC_TRACE_INPUT")) {
++        RT_LOGF(RT_TAG_HLE, "EB layout %s (step %.4f clock %.3f)\n", racing ? "race" : "menu",
++                ReadF32(kRaceTimeStep), ReadF32(kRaceClock));
++    }
++    lastRacing = racing;
 +    const bool invertAir = RuntimeConfigFile::InvertAirControl(true);
 +    bool swingButton = false;
++    bool actionButton = false; // A on the pad, C or Space: turbo, or the motion a prompt asks for
++    // The exit prompt or the F10 bar has the controls.
++    if (InputBindings::InputBlocked()) {
++        return in;
++    }
 +    if (SDL_Gamepad* pad = ActiveGamepad()) {
 +        auto button = [pad](SDL_GamepadButton b) { return SDL_GetGamepadButton(pad, b); };
 +        const bool rightTrigger = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000;
@@ -707,7 +724,7 @@ index 0000000..38e594e
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_LEFT)) in.hold |= kSidewaysLeft;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) in.hold |= kSidewaysRight;
 +        if (button(SDL_GAMEPAD_BUTTON_START)) in.hold |= kWpadPlus;
-+        if (button(SDL_GAMEPAD_BUTTON_GUIDE)) in.hold |= kWpadHome;
++        // Guide opens the runtime's exit prompt (settings_overlay.cpp), not the Wii HOME menu.
 +        if (racing) {
 +            // Drive: RT/RB gas (2), X and LT/LB brake (1), A turbo (any D-pad direction), B the Wii
 +            // A button (weapons), left stick steers and tilts in the air. While the game asks for a
@@ -716,7 +733,7 @@ index 0000000..38e594e
 +            if (leftTrigger || button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) in.hold |= kWpad1;
 +            if (button(SDL_GAMEPAD_BUTTON_SOUTH)) {
 +                in.hold |= kSidewaysUp;
-+                swingButton = EbSwingPromptShown();
++                actionButton = true;
 +            }
 +            if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= kWpadA;
 +            in.steer = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
@@ -740,7 +757,7 @@ index 0000000..38e594e
 +        if (key(SDL_SCANCODE_Z) || key(SDL_SCANCODE_BACKSPACE)) in.hold |= kWpad1;
 +        if (key(SDL_SCANCODE_C) || key(SDL_SCANCODE_SPACE)) {
 +            in.hold |= kSidewaysUp;
-+            if (racing) swingButton = EbSwingPromptShown();
++            if (racing) actionButton = true;
 +        }
 +        if (key(SDL_SCANCODE_P)) in.hold |= kWpadPlus;
 +        if (key(SDL_SCANCODE_A)) in.hold |= kWpadA;
@@ -755,16 +772,25 @@ index 0000000..38e594e
 +    }
 +    // The Wii Remote / Wii Wheel choice (new profile, Options) means nothing on a pad: both play
 +    // the same. Once it has settled on screen, confirm the highlighted Wii Remote for the player.
-+    static int controllerTypeReads = 0;
-+    if (!racing && EbControllerTypeScreenShown()) {
-+        const int phase = controllerTypeReads++ % 60;
-+        if (phase >= 15 && phase < 19) in.hold |= kWpad2;
-+    } else {
-+        controllerTypeReads = 0;
++    // Tapped every few frames from the first one, since the menu ignores input while it fades in.
++    if (const int frames = EbControllerTypeScreenFrames(); !racing && frames >= 0) {
++        if (frames % 6 < 3) in.hold |= kWpad2;
 +    }
 +    if (!racing) {
 +        in.steer = 0.0f; // keep the remote level in the menus
 +        in.pitch = 0.0f;
++    }
++    // The motion prompts. Push (let go of a bar) and the crash recovery's shake take one swing per
++    // press. The shake prompt on a bar spin or in the dentures wants a real shake: holding A
++    // rocks the remote left and right, like shaking the stick.
++    if (racing && actionButton) {
++        const bool shake = EbShakePromptShown();
++        if (EbPushPromptShown() || (shake && EbCrashMeterShown())) {
++            swingButton = true;
++        } else if (shake) {
++            static int rock = 0;
++            in.steer = ((++rock / 3) % 2) != 0 ? 1.0f : -1.0f;
++        }
 +    }
 +    // Developer aid for testing swings without a pad: WC_EB_AUTOSWING=N swings every N reads.
 +    static const int autoSwing = std::getenv("WC_EB_AUTOSWING") ? std::atoi(std::getenv("WC_EB_AUTOSWING")) : 0;
@@ -919,11 +945,59 @@ index 0000000..38e594e
 +// Not Rated" and the Wii Remote / Wii Wheel "Press 2 to Start" picture), which are about the Wii
 +// hardware. They are steps 0 to 10 of the boot sequence that 0x803E6CD0 runs while the main
 +// thread waits (0x803E6EA0) for step 11; the step number is at 0x805A47F0 (r13-0x37F0).
++void EbRepairBrokenSave(); // hle/storage/nand_fs.cpp
++
++namespace {
++// Crash recovery shows "SHAKE!!!" over the meter, which reads as an instruction to shake the pad.
++// The text comes from the race's message table; once a race has loaded, find it in guest memory
++// (ASCII or UTF-16) and cut it to an empty string. A word must start right there and continue
++// with '!', which leaves keys such as "Popup:SHAKE" alone.
++void HideShakeText()
++{
++    struct Range { uint32_t begin, end; };
++    static const Range kRanges[] = {{0x80000000u, 0x81800000u}, {0x90000000u, 0x94000000u}};
++    int hidden = 0;
++    for (const Range& r : kRanges) {
++        const uint8_t* base = Memory::GetPointer(r.begin, r.end - r.begin);
++        if (base == nullptr) continue;
++        const size_t size = r.end - r.begin;
++        static const uint8_t kAscii[] = {'S', 'H', 'A', 'K', 'E', '!'};
++        static const uint8_t kWide[] = {0, 'S', 0, 'H', 0, 'A', 0, 'K', 0, 'E', 0, '!'};
++        for (size_t i = 1; i + sizeof(kWide) < size; ++i) {
++            if (base[i] != 'S' && base[i] != 0) continue;
++            if (std::memcmp(base + i, kAscii, sizeof(kAscii)) == 0 && !std::isalpha(base[i - 1])) {
++                Memory::Write8(r.begin + uint32_t(i), 0);
++                ++hidden;
++            } else if ((i % 2) == 0 && std::memcmp(base + i, kWide, sizeof(kWide)) == 0 &&
++                       !(base[i - 2] == 0 && std::isalpha(base[i - 1]))) {
++                Memory::Write8(r.begin + uint32_t(i) + 1, 0);
++                ++hidden;
++            }
++        }
++    }
++    if (std::getenv("WC_TRACE_INPUT")) RT_LOGF(RT_TAG_HLE, "EB hid %d SHAKE!!! text(s)\n", hidden);
++}
++} // namespace
++
 +void EbFrameTick()
 +{
 +    constexpr uint32_t kBootStep = 0x805A47F0u;
 +    constexpr uint32_t kBootDone = 11;
 +    static bool done = false;
++    static bool saveChecked = false;
++    if (!saveChecked) {
++        saveChecked = true;
++        EbRepairBrokenSave();
++    }
++    // Once per race, as it starts (the text is loaded with the race): when the race step appears,
++    // or the race clock goes back (the next race).
++    static bool wasRacing = false;
++    static float lastClock = 0.0f;
++    const bool racing = ReadF32(kRaceTimeStep) > 0.0f;
++    const float clock = ReadF32(kRaceClock);
++    if (racing && (!wasRacing || clock + 1.0f < lastClock)) HideShakeText();
++    wasRacing = racing;
++    lastClock = clock;
 +    if (done) {
 +        return;
 +    }
@@ -1112,7 +1186,7 @@ index 49be121..1f0e12f 100644
  
  void DeliverDrawSyncToken(CpuContext* ctx, uint16_t token)
 diff --git a/runtime/src/hle/gx/gx_texture.cpp b/runtime/src/hle/gx/gx_texture.cpp
-index b644a42..855a153 100644
+index b644a42..f7970eb 100644
 --- a/runtime/src/hle/gx/gx_texture.cpp
 +++ b/runtime/src/hle/gx/gx_texture.cpp
 @@ -1,5 +1,9 @@
@@ -1133,7 +1207,7 @@ index b644a42..855a153 100644
  extern "C" int g_gxFrameCount;
  
  static void* TexDataHostPtr(uint32_t addr, uint32_t size) {
-@@ -750,7 +755,84 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+@@ -750,7 +755,133 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
      }
  }
  
@@ -1144,26 +1218,40 @@ index b644a42..855a153 100644
 +// is hashed once and checked again only when its first bytes change.
 +// Excitebots screens recognised by a texture they draw (XXH64 of the CMPR base level, the hash
 +// in the texture dump names): the swing prompts, during which the A button plays a remote swing,
-+// and the Wii Remote / Wii Wheel choice, which input skips (eb_input.cpp).
++// the Wii Remote / Wii Wheel choice, which input skips, and the Back / OK button icons of any
++// menu, which switch the pad to the menu layout even mid-race (eb_input.cpp).
 +namespace EbScreenTextures {
-+enum Kind : uint8_t { kNone, kSwing, kControllerType };
++enum Kind : uint8_t { kNone, kShake, kPush, kCrashMeter, kControllerType, kMenuButton };
 +std::mutex g_mutex;
 +struct Seen {
 +    uint64_t head = 0;
 +    Kind kind = kNone;
 +};
 +std::unordered_map<uint32_t, Seen> g_seen;
-+std::atomic<int> g_lastSwing{-1000};
++std::atomic<int> g_lastShake{-1000};
++std::atomic<int> g_lastPush{-1000};
++std::atomic<int> g_lastCrashMeter{-1000};
 +std::atomic<int> g_lastControllerType{-1000};
++std::atomic<int> g_firstControllerType{0};
++std::atomic<int> g_lastMenuButton{-1000};
 +
 +Kind Classify(uint16_t w, uint16_t h, uint64_t hash) {
-+    if (w == 256 && h == 256 &&
-+        (hash == 0xf2965209f9cff340ull ||     // overlays.res shakecont.art ("SHAKE!!!")
-+         hash == 0xddf1c663d39c4ad2ull)) {    // the bar's "Push" remote
-+        return kSwing;
++    if (w == 256 && h == 256 && hash == 0xf2965209f9cff340ull) {  // overlays.res shakecont.art
++        return kShake;
++    }
++    if (w == 256 && h == 256 && hash == 0xddf1c663d39c4ad2ull) {  // the bar's "Push" remote
++        return kPush;
++    }
++    if (w == 256 && h == 256 && hash == 0xfcf8a1191fd23f9cull) {  // the crash meter's chevrons
++        return kCrashMeter;
 +    }
 +    if (w == 256 && h == 128 && hash == 0xc8c6e66dee7d90ccull) {  // the remote and wheel pictures
 +        return kControllerType;
++    }
++    if (w == 64 && h == 64 &&
++        (hash == 0xc8e9868a2a851ed2ull ||     // common.res but_1 ("Back")
++         hash == 0x82d8d8bfb09e0473ull)) {    // common.res but_2 ("OK", "Select")
++        return kMenuButton;
 +    }
 +    return kNone;
 +}
@@ -1178,8 +1266,9 @@ index b644a42..855a153 100644
 +            return;
 +        }
 +    }
-+    if (m.width != 256 || (m.height != 256 && m.height != 128) || m.format != GX_TF_CMPR ||
-+        m.dataAddr == 0) {
++    const bool large = m.width == 256 && (m.height == 256 || m.height == 128);
++    const bool icon = m.width == 64 && m.height == 64;
++    if (!(large || icon) || m.format != GX_TF_CMPR || m.dataAddr == 0) {
 +        return;
 +    }
 +    const uint32_t bytes = uint32_t(m.width) * m.height / 2u; // CMPR base level
@@ -1198,17 +1287,51 @@ index b644a42..855a153 100644
 +        }
 +        kind = seen.kind;
 +    }
-+    if (kind == kSwing) g_lastSwing.store(g_gxFrameCount, std::memory_order_relaxed);
-+    if (kind == kControllerType) g_lastControllerType.store(g_gxFrameCount, std::memory_order_relaxed);
++    if (kind == kMenuButton) g_lastMenuButton.store(g_gxFrameCount, std::memory_order_relaxed);
++    if (kind == kShake) {
++        if (std::getenv("WC_TRACE_INPUT") && g_gxFrameCount - g_lastShake.load(std::memory_order_relaxed) > 3) {
++            RT_LOGF(RT_TAG_GX, "Excitebots shake prompt shown\n");
++        }
++        g_lastShake.store(g_gxFrameCount, std::memory_order_relaxed);
++    }
++    if (kind == kPush) g_lastPush.store(g_gxFrameCount, std::memory_order_relaxed);
++    if (kind == kCrashMeter) g_lastCrashMeter.store(g_gxFrameCount, std::memory_order_relaxed);
++    if (kind == kControllerType) {
++        const int now = g_gxFrameCount;
++        if (now - g_lastControllerType.load(std::memory_order_relaxed) > 3) {
++            g_firstControllerType.store(now, std::memory_order_relaxed);
++        }
++        g_lastControllerType.store(now, std::memory_order_relaxed);
++    }
 +}
 +} // namespace EbScreenTextures
 +
-+bool EbSwingPromptShown() {
-+    return g_gxFrameCount - EbScreenTextures::g_lastSwing.load(std::memory_order_relaxed) <= 3;
++// The shaking remote: crash recovery, a bar spin, the dentures.
++bool EbShakePromptShown() {
++    return g_gxFrameCount - EbScreenTextures::g_lastShake.load(std::memory_order_relaxed) <= 3;
 +}
 +
-+bool EbControllerTypeScreenShown() {
-+    return g_gxFrameCount - EbScreenTextures::g_lastControllerType.load(std::memory_order_relaxed) <= 3;
++// The crash meter (crash recovery).
++bool EbCrashMeterShown() {
++    return g_gxFrameCount - EbScreenTextures::g_lastCrashMeter.load(std::memory_order_relaxed) <= 3;
++}
++
++// The pushed remote: let go of a bar.
++bool EbPushPromptShown() {
++    return g_gxFrameCount - EbScreenTextures::g_lastPush.load(std::memory_order_relaxed) <= 3;
++}
++
++// A menu's button bar (Back / OK) is on screen: pause, tutorial cards, results.
++bool EbMenuButtonsShown() {
++    return g_gxFrameCount - EbScreenTextures::g_lastMenuButton.load(std::memory_order_relaxed) <= 3;
++}
++
++// Frames the Wii Remote / Wii Wheel choice has been on screen, or -1 when it is not shown.
++int EbControllerTypeScreenFrames() {
++    using namespace EbScreenTextures;
++    const int now = g_gxFrameCount;
++    if (now - g_lastControllerType.load(std::memory_order_relaxed) > 3) return -1;
++    return now - g_firstControllerType.load(std::memory_order_relaxed);
 +}
 +
  extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
@@ -1218,7 +1341,7 @@ index b644a42..855a153 100644
      if (g_gxTraceFrame) {
          TexObjMeta m; bool ok = false;
          { std::lock_guard<std::mutex> guard(g_texObjMutex); try { ok = TryGetOrExtractTexObjMeta(oa, m); } catch (...) {} }
-@@ -765,11 +847,14 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+@@ -765,11 +896,14 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
          }
          uint32_t snapAddr = 0;
          const void* snapPtr = nullptr;
@@ -1264,6 +1387,28 @@ index 285f1c5..368f1ac 100644
          WriteDisplayListData((u8)(t|vf), 1);
          WriteDisplayListData((u16)nv, 2);
          return;
+diff --git a/runtime/src/hle/net/network_config.cpp b/runtime/src/hle/net/network_config.cpp
+index e033eb7..52c0106 100644
+--- a/runtime/src/hle/net/network_config.cpp
++++ b/runtime/src/hle/net/network_config.cpp
+@@ -1,3 +1,4 @@
++#include "guest_abi/guest_region.h"
+ #include "network_internal.h"
+ 
+ #include "abi_bridge.h"
+@@ -189,7 +190,11 @@ int32_t HandleKdIoctl(uint32_t cmd, uint32_t inBuf, uint32_t inLen, uint32_t out
+         // this like Dolphin does (unchanged output) leaks cmd 3's zero result
+         // into MKW's post-resume probe and makes the SDK panic. Preserve the
+         // two pending startup probes, then report success once ready.
+-        if (g_kdTrySuspendPhase == KdTrySuspendPhase::Boot) {
++        // Excitebots opens the WiiConnect24 library for its friend messages (msgbox) and shows
++        // error 109042 when this probe fails, so it gets success from the start.
++        if (::GuestRegion::IsExcitebots()) {
++            WriteReturn(outBuf, outLen, 0);
++        } else if (g_kdTrySuspendPhase == KdTrySuspendPhase::Boot) {
+             g_kdBootProbeSeen = true;
+             WriteReturn(outBuf, outLen, -42);
+         } else if (g_kdTrySuspendPhase == KdTrySuspendPhase::PostResumeProbe) {
 diff --git a/runtime/src/hle/storage/nand_async.cpp b/runtime/src/hle/storage/nand_async.cpp
 index 2e11911..ca8d025 100644
 --- a/runtime/src/hle/storage/nand_async.cpp
@@ -1305,6 +1450,37 @@ index 2e11911..ca8d025 100644
          return (result < 0) ? result : NAND_RESULT_OK;            \
      }
  
+diff --git a/runtime/src/hle/storage/nand_fs.cpp b/runtime/src/hle/storage/nand_fs.cpp
+index 28c0cbd..518bc1d 100644
+--- a/runtime/src/hle/storage/nand_fs.cpp
++++ b/runtime/src/hle/storage/nand_fs.cpp
+@@ -480,3 +480,26 @@ NandFileExtent NandProbeFileExtent(FILE* file) {
+     std::fseek(file, extent.position, SEEK_SET);
+     return extent;
+ }
++
++// Excitebots builds before setup 0.3.x failed the second save of a new profile and then deleted
++// banner.bin and roam.dat, leaving only the empty inbox*.mf files. The game reports that as a
++// corrupted file on a dialog driven by the Wii Remote pointer, so a pad cannot pick "Delete file"
++// and every later session runs without saving. With neither banner.bin nor roam.dat the folder
++// holds no progress, so clear it and let the game make a new save.
++void EbRepairBrokenSave() {
++    const std::filesystem::path dir = TranslateNandPath(CurrentNandDataDir().c_str());
++    std::error_code ec;
++    if (!std::filesystem::is_directory(dir, ec)) return;
++    if (std::filesystem::exists(dir / "banner.bin", ec) || std::filesystem::exists(dir / "roam.dat", ec)) return;
++    bool any = false;
++    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
++        (void)entry;
++        any = true;
++        break;
++    }
++    if (!any) return;
++    std::filesystem::remove_all(dir, ec);
++    std::filesystem::create_directories(dir, ec);
++    std::fprintf(stderr, "[nand] Excitebots: cleared a save left incomplete by an older build (%s)\n",
++                 HostPathText(dir).c_str());
++}
 diff --git a/runtime/src/hle/vi.cpp b/runtime/src/hle/vi.cpp
 index f5a91c1..e86c907 100644
 --- a/runtime/src/hle/vi.cpp
@@ -1366,7 +1542,7 @@ index 739db18..138c67d 100644
          if (BootRace::Requested()) {
              aurora_set_skip_unready_pipelines(false);
 diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
-index 6cbd761..f9c1872 100644
+index 6cbd761..b4390ec 100644
 --- a/runtime/src/settings_overlay.cpp
 +++ b/runtime/src/settings_overlay.cpp
 @@ -980,6 +980,19 @@ void DrawControllerSettings() {
@@ -1389,7 +1565,15 @@ index 6cbd761..f9c1872 100644
      }
      for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
          DrawPlayerRow(port);
-@@ -1505,7 +1518,7 @@ void DrawTopBar() {
+@@ -1423,6 +1436,7 @@ void DrawExitPrompt() {
+     if (g_exitPromptOpen && !ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+     if (!ImGui::BeginPopupModal(kTitle, &g_exitPromptOpen, ImGuiWindowFlags_AlwaysAutoResize)) return;
+     ImGui::TextUnformatted("Quit the game?");
++    if (::GuestRegion::IsExcitebots()) ImGui::TextDisabled("Controller: A to exit, B to cancel");
+     if (ImGui::Button("Exit", ImVec2(120.0f, 0.0f))) ExitForAuroraWindowClose();
+     ImGui::SameLine();
+     if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f))) g_exitPromptOpen = false;
+@@ -1505,7 +1519,7 @@ void DrawTopBar() {
          ImGui::EndMenu();
      }
  
@@ -1398,7 +1582,29 @@ index 6cbd761..f9c1872 100644
          ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f), ImVec2(FLT_MAX, viewport->Size.y * 0.75f));
          if (ImGui::BeginMenu("Achievements")) {
              EtAchievements::DrawMenu();
-@@ -1711,7 +1724,7 @@ void Draw() noexcept {
+@@ -1651,6 +1665,21 @@ void HandleEvents(const AuroraEvent* events) noexcept {
+             CompleteRebind(g_rebind.kind == RebindKind::Controller ? PAD_NATIVE_BUTTON_DISABLED
+                                                                   : static_cast<uint32_t>(PAD_KEY_INVALID));
+         }
++        // Excitebots: the Guide (Home) button asks to quit, in place of the Wii's HOME menu and
++        // its Wii Menu button; A confirms and B cancels.
++        if (::GuestRegion::IsExcitebots() && !g_rebind.active && !controller_mapping_wizard::IsActive() &&
++            ev->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
++            const auto button = static_cast<SDL_GamepadButton>(ev->sdl.gbutton.button);
++            if (button == SDL_GAMEPAD_BUTTON_GUIDE) {
++                g_exitPromptOpen = !g_exitPromptOpen;
++                ApplyInputBlockState();
++            } else if (g_exitPromptOpen && button == SDL_GAMEPAD_BUTTON_SOUTH) {
++                ExitForAuroraWindowClose();
++            } else if (g_exitPromptOpen && button == SDL_GAMEPAD_BUTTON_EAST) {
++                g_exitPromptOpen = false;
++                ApplyInputBlockState();
++            }
++        }
+         if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
+             SetTopBarVisible(!g_topBarVisible);
+             ApplyInputBlockState();
+@@ -1711,7 +1740,7 @@ void Draw() noexcept {
          DrawShaderCompilationStatus();
      }
      DrawFpsOverlay();

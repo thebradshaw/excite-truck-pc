@@ -73,9 +73,17 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   ("SHAKE!!!") and letting go of a bar ("Push") use the flick. Grabbing a bar is automatic.
 - Pad layout in a race: RT/RB accelerate (Wii 2), X and LT/LB brake (Wii 1), A turbo, B the Wii
   A button (weapons), Y also Wii A, left stick steers and tilts. Menus: A OK, B or X back.
-- While the crash prompt or the bar prompt is on screen (spotted by its texture,
-  `EbScreenTextures` in gx_texture.cpp), A (pad), C or Space (keyboard) plays one swing per press
-  instead of turbo: three reads with the acceleration thrown against gravity at twice its strength. On the crash prompt the meter fills and the bot
+- Motion prompts are spotted by their textures (`EbScreenTextures` in gx_texture.cpp). On "Push"
+  (let go of a bar) and on the crash meter (256x256 CMPR fcf8a1191fd23f9c), A (pad), C or Space
+  (keyboard) plays one swing per press: three reads with the acceleration thrown against gravity
+  at twice its strength. On the shaking remote without the crash meter (bar spin, dentures),
+  holding A rocks the remote left and right, like shaking the stick.
+- Any menu's Back / OK icons on screen (pause, Training cards, results) switch the pad to the
+  menu layout, even while the race clock runs.
+- The "SHAKE!!!" text over the crash meter is cut to an empty string in guest memory as each race
+  starts (it comes with the race's message table).
+- The Guide button opens the runtime's "Quit the game?" prompt (A exits, B cancels) instead of
+  the Wii HOME menu. On the crash prompt the meter fills and the bot
   boosts out; on a bar it lets go. `WC_EB_AUTOSWING=N` swings every N reads for testing.
 - The remote pictures on the crash prompt (overlays.res `shakecont.art`) and the bar prompt
   ("Push") are replaced by the A button (`tools/prompts/make_eb_pack.py`, installed to
@@ -107,6 +115,13 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
 - Excite Truck's fix for the menu videos copies textures to fresh memory at each load outside
   races. Excitebots reads its own race state for that, and render-to-texture targets (GXCopyTex
   destinations) are never copied, which caused flickering scenery and white bots.
+- An Excitebots save left by builds before this fix (inbox files only, no banner.bin or
+  roam.dat) is cleared at launch: the game calls it corrupted on a pointer-driven dialog a pad
+  cannot answer.
+- WiiConnect24: the KD "try suspend scheduler" probe answers success for Excitebots (Mario Kart's
+  two failing boot probes made Excitebots show error 109042 when loading a profile).
+- Races use a fixed 1/30 s step (`0x805A2CE4`), so they run at 30 FPS. Aurora's frame
+  interpolation assumes a 60 FPS game (one retrace per frame), so it does not help yet.
 - Async NAND calls return OK and report the result through the callback, as on the Wii (for
   Excitebots only). The save code accepts EXISTS from the callback but treated a direct EXISTS as
   "An error occurred while accessing Wii system memory" on the second save of a new profile.
