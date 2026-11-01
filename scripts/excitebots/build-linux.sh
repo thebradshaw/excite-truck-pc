@@ -31,14 +31,16 @@ NODTOOL_URL=https://github.com/encounter/nod/releases/download/v1.4.4/nodtool-li
 NODTOOL_SHA256=cf20828d1a437ca14ed7acfd5545e1a0e62c082f5a77240a399aa4f172119fc4
 DOL_SHA256=14ed09f70c8f9fcd5c027bb9e423ba2deade3c15bbd7d4376b2f63fe99c80c1e
 
-step() { printf '\n==> %s\n' "$*"; }
+# A step's title, and where the launcher's progress bar stands when it starts ("A B": the steps
+# after it run from A to B percent, moved along by ninja's [n/m] lines).
+step() { printf '\n==> %s\n' "$1"; if [ -n "${2:-}" ]; then printf '##progress %s\n' "$2"; fi; }
 die() { printf '\nError: %s\n' "$*" >&2; exit 1; }
 
 [ -n "$DISC" ] || die "usage: $0 <disc image or extracted folder>"
 [ -e "$DISC" ] || die "not found: $DISC"
 DISC="$(cd "$(dirname "$DISC")" && pwd)/$(basename "$DISC")"
 
-step "Checking tools"
+step "Checking tools" 1
 for tool in git cmake ninja clang clang++ python3 curl dotnet; do
     command -v "$tool" >/dev/null || die "$tool is not installed (see the top of this script)"
 done
@@ -54,7 +56,7 @@ elif [ ! -f "$DATA/sys/main.dol" ]; then
     if [ -z "$NODTOOL" ]; then
         NODTOOL="$WORK/tools/nodtool"
         if [ ! -x "$NODTOOL" ]; then
-            step "Downloading nodtool (reads Wii disc images)"
+            step "Downloading nodtool (reads Wii disc images)" 7
             mkdir -p "$WORK/tools"
             curl -fsSL -o "$NODTOOL.partial" "$NODTOOL_URL"
             echo "$NODTOOL_SHA256  $NODTOOL.partial" | sha256sum -c --quiet || die "nodtool download is corrupt"
@@ -64,7 +66,7 @@ elif [ ! -f "$DATA/sys/main.dol" ]; then
     IMAGE="$DISC"
     case "$DISC" in
         *.zip.[0-9][0-9][0-9]|*.zip)
-            step "Unpacking the zip"
+            step "Unpacking the zip" 5
             ZIPDIR="$WORK/disc-zip"
             rm -rf "$ZIPDIR"; mkdir -p "$ZIPDIR"
             ZIP="$DISC"
@@ -77,7 +79,7 @@ elif [ ! -f "$DATA/sys/main.dol" ]; then
             [ -n "$IMAGE" ] || die "the zip holds no .wbfs/.iso/.rvz disc image"
             ;;
     esac
-    step "Extracting the disc"
+    step "Extracting the disc" 8
     rm -rf "$DATA.partial"
     "$NODTOOL" extract "$IMAGE" "$DATA.partial"
     rm -rf "$WORK/disc-zip"
@@ -92,7 +94,7 @@ WS="$WORK/wiicompiled"
 PATCH_STAMP="$( (cat "$REPO"/patches/*.patch "$REPO"/patches/excitebots/*.patch "$REPO/tools/sdk_map/et_versions.inc" \
     "$REPO/tools/sdk_map/eb_versions.inc" "$REPO"/projects/excitebots/*) | sha256sum | cut -c1-16)"
 if [ "$(cat "$WS/.eb-patched" 2>/dev/null)" != "$PATCH_STAMP" ]; then
-    step "Fetching WiiCompiled (the recompiler and runtime this port is built on)"
+    step "Fetching WiiCompiled (the recompiler and runtime this port is built on)" 12
     if [ ! -d "$WS/.git" ]; then
         rm -rf "$WS"
         git clone --quiet "$WIICOMPILED_URL" "$WS"
@@ -104,7 +106,7 @@ if [ "$(cat "$WS/.eb-patched" 2>/dev/null)" != "$PATCH_STAMP" ]; then
     git -C "$WS/aurora-main" checkout --quiet --force "$AURORA_COMMIT"
     git -C "$WS/aurora-main" clean -fdq
 
-    step "Applying the patches"
+    step "Applying the patches" 15
     git -C "$WS" apply --whitespace=nowarn "$REPO/patches/0001-excite-truck-runtime.patch"
     git -C "$WS/aurora-main" apply --whitespace=nowarn "$REPO/patches/0002-aurora-channel-colors.patch"
     git -C "$WS" apply --whitespace=nowarn "$REPO/patches/0003-xbox-button-prompts.patch"
@@ -121,12 +123,12 @@ mkdir -p "$WS/Assets"
 cp "$DATA/sys/main.dol" "$WS/Assets/main.dol"
 CLI="$WS/translator/src/Translator.Cli/bin/Release/net8.0/Translator.Cli.dll"
 if [ ! -f "$CLI" ]; then
-    step "Building the translator"
+    step "Building the translator" 20
     dotnet build "$WS/translator/src/Translator.Cli/Translator.Cli.csproj" -c Release -v quiet -nologo
 fi
 P=projects/excitebots/recomp.yml
 cd "$WS"
-step "Translating the game's code (a few minutes)"
+step "Translating the game's code (a few minutes)" 25
 dotnet "$CLI" translate-recursive 0x80004170 --project $P --outdir generated/functions \
     --output-metadata generated/base_translation_output.json \
     --production-source-bundle generated/base_translation_sources.bin \
@@ -136,30 +138,31 @@ dotnet "$CLI" emit-build-shards --project $P --base-metadata generated/base_tran
     --base-functions-dir generated/functions --native-source-dir runtime/src --out generated/build_shards
 
 # --- Compile ------------------------------------------------------------------------------
-step "Configuring"
+step "Configuring" 34
 # shellcheck disable=SC2086
 cmake -S runtime -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DAURORA_SDL3_PROVIDER=vendor \
     -DMKW_INITIAL_PIPELINE_CACHE=NONE \
     -DMKW_TRANSLATED_COMPILE_JOBS="$JOBS" ${ET_CMAKE_ARGS:-} >/dev/null
-step "Compiling (this is the long part: 20 to 60 minutes)"
+step "Compiling (this is the long part: 20 to 60 minutes)" "40 97"
 cmake --build build-linux --target WiiCompiled --parallel "$JOBS"
 
 # --- Package ------------------------------------------------------------------------------
-step "Installing to $OUT"
+step "Installing to $OUT" 98
 B="$WS/build-linux"
 install -m 755 "$B/WiiCompiled" "$OUT/Excitebots"
 for f in "$B"/*.bin "$B"/*.pem "$B"/*.db "$B"/*.so*; do [ -e "$f" ] && cp -f "$f" "$OUT/"; done
 for d in fonts wii_bootstrap; do [ -d "$B/$d" ] && rm -rf "${OUT:?}/$d" && cp -r "$B/$d" "$OUT/"; done
 # portable.txt keeps settings, saves and caches in UserData next to the game.
 touch "$OUT/portable.txt"
-mkdir -p "$OUT/UserData"
+mkdir -p "$OUT/UserData/achievements"
 if [ ! -f "$OUT/UserData/Config.toml" ]; then
     DVD_ROOT="../Disc"
     [ "$DATA" = "$OUT/Disc" ] || DVD_ROOT="$DATA"
     printf '[paths]\ndvd_root = "%s"\n' "$DVD_ROOT" > "$OUT/UserData/Config.toml"
 fi
 
+printf '##progress 100\n'
 cat <<EOF
 
 Done. Start the game with:

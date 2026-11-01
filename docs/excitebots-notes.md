@@ -63,6 +63,19 @@ The command-line table at `0x804A0EE8` matches Excite Truck's: `-direct_to_track
 `-force_chassis`, `-widescreen`, `-standardscreen`, `-players`, `-no_music`, `-kiosk` and more.
 Set them with `WC_EB_ARGS`.
 
+## Building
+
+- Windows: `scripts\excitebots\build-windows.ps1 <disc>` (work folder `C:\EBBuild`, kept apart
+  from Excite Truck's `C:\ETBuild` because the WiiCompiled tree is patched differently). Without a
+  checkout it runs in setup mode: a `payload` folder beside it holding `overlay\` (the WiiCompiled
+  files changed by patches 0001 to 0004, `guest_versions.inc` with both games' tables appended, and
+  `projects\excitebots\`), `stamp.txt` and `prompts\`. The Excite PC launcher runs it from
+  `setup\bots\` with `-Disc` and `-Out`.
+- Linux: `scripts/excitebots/build-linux.sh <disc>` (`OUT=`, `WORK=`, `JOBS=`).
+- Both print `==> step` lines, `##progress P` / `##progress A B` for the launcher's bar, and
+  `Error: ...` on failure. The game is `Excitebots(.exe)` with `portable.txt` and
+  `UserData\Config.toml` (`[paths] dvd_root`).
+
 ## Status
 
 - Boots to "Press 2 to Start" at about 59 fps (container, software renderer), 16:9, creates its
