@@ -21,6 +21,7 @@
 #include "launcher_config.h"
 #include "scene.h"
 #include "setup_job.h"
+#include "vehicles.h"
 
 extern const unsigned char et_font_barlow_regular[];
 extern const unsigned int et_font_barlow_regular_size;
@@ -1379,165 +1380,28 @@ std::string Elapsed(double seconds) {
     return text;
 }
 
-// --- Vehicle silhouettes behind the home screen's logos (drawn here, not taken from the games) ---
-//
-// Each is a flat side view in a box 1 wide, made of filled shapes with thin gaps cut out (windows,
-// hubcaps, the gap around each wheel), rendered once into a white texture with soft edges and
-// tinted grey when drawn.
-
-struct SilhouetteShape {
-    std::vector<std::vector<ImVec2>> fills, holes;
-    std::vector<std::pair<ImVec2, float>> discs, rings;   // rings: thin circles cut out
-    std::vector<std::vector<ImVec2>> strokes, cuts;        // thick lines added / cut out
-    float stroke = 0.012f, cut = 0.012f;
-};
-
-void WheelArch(std::vector<ImVec2>& path, ImVec2 c, float r, float bottom) {
-    const float h = std::clamp((c.y - bottom) / r, -1.0f, 1.0f);
-    const float a0 = 3.14159265f + std::asin(h), a1 = 6.28318531f - std::asin(h);
-    for (int i = 0; i <= 18; ++i) {
-        const float a = a0 + (a1 - a0) * i / 18.0f;
-        path.push_back(ImVec2(c.x + std::cos(a) * r, c.y + std::sin(a) * r));
-    }
-}
-
-std::vector<ImVec2> Curve(ImVec2 a, ImVec2 control, ImVec2 b) {
-    std::vector<ImVec2> out;
-    for (int i = 0; i <= 16; ++i) {
-        const float t = i / 16.0f, u = 1.0f - t;
-        out.push_back(ImVec2(u * u * a.x + 2 * u * t * control.x + t * t * b.x, u * u * a.y + 2 * u * t * control.y + t * t * b.y));
-    }
-    return out;
-}
-
-SilhouetteShape VehicleShape(GameId game) {
-    SilhouetteShape s;
-    const float gap = 0.022f;
-    std::vector<ImVec2> body;
-    if (game == GameId::Truck) {
-        // An off-road pickup with big tyres and a light bar on the roof.
-        const float bottom = 0.30f, r = 0.115f;
-        const ImVec2 rear(0.22f, 0.37f), front(0.79f, 0.37f);
-        body.push_back(ImVec2(0.03f, bottom));
-        WheelArch(body, rear, r + gap, bottom);
-        WheelArch(body, front, r + gap, bottom);
-        for (ImVec2 p : {ImVec2(0.975f, bottom), ImVec2(0.985f, 0.235f), ImVec2(0.955f, 0.185f), ImVec2(0.76f, 0.165f),
-                         ImVec2(0.665f, 0.065f), ImVec2(0.64f, 0.065f), ImVec2(0.64f, 0.035f), ImVec2(0.50f, 0.035f),
-                         ImVec2(0.50f, 0.065f), ImVec2(0.475f, 0.065f), ImVec2(0.445f, 0.175f), ImVec2(0.06f, 0.175f),
-                         ImVec2(0.025f, 0.19f)}) {
-            body.push_back(p);
-        }
-        s.holes = {{ImVec2(0.492f, 0.088f), ImVec2(0.578f, 0.088f), ImVec2(0.578f, 0.158f), ImVec2(0.468f, 0.158f)},
-                   {ImVec2(0.596f, 0.088f), ImVec2(0.652f, 0.088f), ImVec2(0.725f, 0.158f), ImVec2(0.596f, 0.158f)}};
-        s.discs = {{rear, r}, {front, r}};
-    } else {
-        // A beetle on wheels: a domed shell, a head with jaws, a horn and antennae, and three legs.
-        const float bottom = 0.29f, r = 0.10f;
-        const ImVec2 rear(0.24f, 0.36f), front(0.64f, 0.36f);
-        body.push_back(ImVec2(0.06f, 0.28f));
-        WheelArch(body, rear, r + gap, bottom);
-        WheelArch(body, front, r + gap, bottom);
-        for (ImVec2 p : {ImVec2(0.84f, bottom), ImVec2(0.975f, 0.325f), ImVec2(0.915f, 0.265f), ImVec2(0.955f, 0.215f),
-                         ImVec2(0.935f, 0.16f), ImVec2(0.84f, 0.14f), ImVec2(0.79f, 0.175f)}) {
-            body.push_back(p);
-        }
-        for (int i = 0; i <= 28; ++i) {   // the shell, from its front edge over the top to the back
-            const float a = -0.35f - (3.14159265f - 0.35f) * i / 28.0f;
-            body.push_back(ImVec2(0.42f + std::cos(a) * 0.38f, 0.255f + std::sin(a) * 0.235f));
-        }
-        std::vector<ImVec2> seam;   // the edge of the wing case
-        for (int i = 0; i <= 28; ++i) {
-            const float a = -0.55f - (3.14159265f - 0.75f) * i / 28.0f;
-            seam.push_back(ImVec2(0.42f + std::cos(a) * 0.33f, 0.265f + std::sin(a) * 0.19f));
-        }
-        s.cuts = {seam};
-        s.strokes = {Curve(ImVec2(0.86f, 0.15f), ImVec2(0.90f, 0.05f), ImVec2(0.965f, 0.0f)),
-                     Curve(ImVec2(0.86f, 0.15f), ImVec2(0.845f, 0.04f), ImVec2(0.895f, -0.03f)),
-                     Curve(ImVec2(0.91f, 0.18f), ImVec2(0.995f, 0.16f), ImVec2(0.985f, 0.06f)),
-                     {ImVec2(0.11f, 0.27f), ImVec2(0.05f, 0.37f)},
-                     {ImVec2(0.44f, 0.28f), ImVec2(0.46f, 0.39f)},
-                     {ImVec2(0.81f, 0.28f), ImVec2(0.88f, 0.37f)}};
-        s.stroke = 0.013f;
-        s.discs = {{rear, r}, {front, r}};
-    }
-    s.fills.push_back(body);
-    for (const auto& [c, r] : s.discs) s.rings.push_back({c, r * 0.55f});   // hubcaps
-    return s;
-}
-
-bool InPolygon(const std::vector<ImVec2>& poly, float x, float y) {
-    bool inside = false;
-    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
-        const ImVec2 a = poly[i], b = poly[j];
-        if ((a.y > y) != (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x) inside = !inside;
-    }
-    return inside;
-}
-
-bool NearLine(const std::vector<ImVec2>& line, float x, float y, float radius) {
-    for (size_t i = 0; i + 1 < line.size(); ++i) {
-        const ImVec2 a = line[i], b = line[i + 1];
-        const float dx = b.x - a.x, dy = b.y - a.y, len = dx * dx + dy * dy;
-        const float t = len > 0.0f ? std::clamp(((x - a.x) * dx + (y - a.y) * dy) / len, 0.0f, 1.0f) : 0.0f;
-        const float ex = a.x + dx * t - x, ey = a.y + dy * t - y;
-        if (ex * ex + ey * ey <= radius * radius) return true;
-    }
-    return false;
-}
-
-// Renders the shape into a texture covering x 0..1, y kTop..kTop+kHeight, white with soft edges.
-constexpr float kSilhouetteTop = -0.10f, kSilhouetteHeight = 0.56f;
-
-SDL_Texture* MakeSilhouette(SDL_Renderer* renderer, GameId game) {
-    const SilhouetteShape s = VehicleShape(game);
-    const int w = 640, h = int(w * kSilhouetteHeight), ss = 3;
-    std::vector<uint32_t> pixels(size_t(w) * h, 0);
-    for (int py = 0; py < h; ++py) {
-        for (int px = 0; px < w; ++px) {
-            int covered = 0;
-            for (int sy = 0; sy < ss; ++sy) {
-                for (int sx = 0; sx < ss; ++sx) {
-                    const float x = (px + (sx + 0.5f) / ss) / w;
-                    const float y = kSilhouetteTop + (py + (sy + 0.5f) / ss) / w;
-                    bool in = false;
-                    for (const auto& f : s.fills) in = in || InPolygon(f, x, y);
-                    for (const auto& [c, r] : s.discs) in = in || (x - c.x) * (x - c.x) + (y - c.y) * (y - c.y) <= r * r;
-                    for (const auto& l : s.strokes) in = in || NearLine(l, x, y, s.stroke * 0.5f);
-                    if (!in) continue;
-                    bool out = false;
-                    for (const auto& hole : s.holes) out = out || InPolygon(hole, x, y);
-                    for (const auto& [c, r] : s.rings) {
-                        out = out || std::abs(std::sqrt((x - c.x) * (x - c.x) + (y - c.y) * (y - c.y)) - r) <= s.cut * 0.5f;
-                    }
-                    for (const auto& l : s.cuts) out = out || NearLine(l, x, y, s.cut * 0.5f);
-                    covered += out ? 0 : 1;
-                }
-            }
-            const uint32_t alpha = uint32_t(covered * 255 / (ss * ss));
-            pixels[size_t(py) * w + px] = (alpha << 24) | 0x00FFFFFF;
-        }
-    }
-    SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
-    if (texture) {
-        SDL_UpdateTexture(texture, nullptr, pixels.data(), w * 4);
-        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-        SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR);
-    }
-    return texture;
-}
+// --- Vehicles behind the home screen's logos (see vehicles.cpp) ----------------------------------
 
 SDL_Texture* g_silhouettes[kGameCount] = {};
 
 // The game's vehicle, centred on `centre`, `width` wide, facing right (or left when flipped).
 void DrawSilhouette(ImDrawList* draw, GameId game, ImVec2 centre, float width, ImU32 color, bool flip) {
     SDL_Texture*& texture = g_silhouettes[int(game)];
-    if (!texture && g_renderer) texture = MakeSilhouette(g_renderer, game);
+    if (!texture && g_renderer) {
+        std::vector<uint32_t> pixels;
+        const int w = 720, h = RenderVehicle(game, flip, w, pixels);
+        texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
+        if (texture) {
+            SDL_UpdateTexture(texture, nullptr, pixels.data(), w * 4);
+            SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+            SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR);
+        }
+    }
     if (!texture) return;
-    const float height = width * kSilhouetteHeight;
-    // Centre on the body (y 0..0.48 of the shape), not on the antennae above it.
-    const float bodyMid = (0.24f - kSilhouetteTop) * width;
-    const ImVec2 min(centre.x - width * 0.5f, centre.y - bodyMid), max(centre.x + width * 0.5f, centre.y - bodyMid + height);
-    draw->AddImage(ImTextureID(texture), min, max, ImVec2(flip ? 1.0f : 0.0f, 0.0f), ImVec2(flip ? 0.0f : 1.0f, 1.0f), color);
+    // Centre on the body (around y 0.24), not on the antennae above it.
+    const float top = centre.y - (0.24f - kVehicleTop) * width;
+    draw->AddImage(ImTextureID(texture), ImVec2(centre.x - width * 0.5f, top),
+                   ImVec2(centre.x + width * 0.5f, top + width * kVehicleHeight), ImVec2(0, 0), ImVec2(1, 1), color);
 }
 
 float g_logoHot[kGameCount] = {};   // 0..1, eases in while the cursor is on that game
@@ -1608,7 +1472,7 @@ void DrawGameColumn(int slot, float cx, float colW, float top, float logoH, doub
     }
     // A grey silhouette of the game's vehicle behind its logo, facing the middle of the screen.
     DrawSilhouette(draw, id, ImVec2(centre.x, centre.y - logoH * 0.02f), logoW * 1.02f,
-                   IM_COL32(58, 60, 72, int(135 + 40 * hot)), slot == 1);
+                   IM_COL32(255, 255, 255, int(150 + 50 * hot)), slot == 1);
     const float scale = 1.0f + 0.06f * hot;
     const ImVec2 half(logoW * 0.5f * scale, logoH * 0.5f * scale);
     const float lift = S(6) * hot;

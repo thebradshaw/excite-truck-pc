@@ -54,6 +54,7 @@ add_executable(ExcitePC
     src/achievements.cpp
     src/banner.cpp
     src/games.cpp
+    src/vehicles.cpp
     src/launcher_config.cpp
     src/setup_job.cpp
     src/scene.cpp
