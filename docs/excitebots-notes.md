@@ -57,6 +57,25 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   for Excite Truck. The game reads one `KPADStatus` per channel per frame (`0x803F1C54`) and learns
   of a remote through its KPAD connect callback (`0x803F10E0`).
 
+## Controls and swings
+
+- Race state: `0x805A2CE4` (r13-0x52FC) is the race time step (zero in the menus, kept while
+  paused) and `0x805A2AC4` (r13-0x551C) the race clock (stops while paused). A race counts as
+  running while the step is set and the clock moved in the last 1.5 s, which picks the driving or
+  the menu layout, as for Excite Truck. Found with `WC_EB_SCAN=<dir>`, which dumps the small-data
+  area every 30 controller reads.
+- The game's input layer (`rjoy`, 0x803F1450) turns each KPADStatus into a joystick record:
+  steering at +4, pitch at +8 and a gravity vector at +0x58..+0x60. A motion detector
+  (0x801E3D50) keeps a slow average of that vector and reports a flick when the acceleration points
+  against it, plus a shake strength from how fast it changes. Crash recovery ("SHAKE!!!") reads
+  these, and so do the bars (`controller_swing` in a bar's `hookbar_params`).
+- A (pad), C or Space (keyboard) plays one swing per press: three reads with the acceleration
+  thrown against gravity at twice its strength. On the crash prompt the meter fills and the bot
+  boosts out. `WC_EB_AUTOSWING=N` swings every N reads for testing.
+- The crash prompt's shaking remote (overlays.res `shakecont.art`) is replaced by the A button
+  (`tools/prompts/make_eb_pack.py`, installed to `prompts/excitebots`; `[excitebots] xbox_prompts`
+  or the F10 Controllers checkbox turns it off).
+
 ## Developer options
 
 The command-line table at `0x804A0EE8` matches Excite Truck's: `-direct_to_track`,
@@ -81,6 +100,5 @@ Set them with `WC_EB_ARGS`.
 - Boots to "Press 2 to Start" at about 59 fps (container, software renderer), 16:9, creates its
   save file and reaches the profile screen.
 - Races load and draw (`WC_EB_ARGS=-direct_to_track:China`), with the HUD in 16:9.
-- Next: race-state detection for the controls; bar swings on
-  A (`barswingComponent`, Red/Yellow bar minigames) with an on-screen prompt; shader list;
-  achievements; build scripts (`scripts/excitebots/`).
+- Xbox layout in races and menus; A swings (checked on crash recovery).
+- Next: check a bar swing in play, the rest of the Wii prompts, shader list, achievements.

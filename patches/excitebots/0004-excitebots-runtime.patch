@@ -84,6 +84,66 @@ index f4daa52..c1de418 100644
  
  inline const Facts& CurrentFacts() noexcept { return kFacts[static_cast<size_t>(Current())]; }
  
+diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
+index baed2d3..d5eaefd 100644
+--- a/runtime/include/runtime_config.h
++++ b/runtime/include/runtime_config.h
+@@ -76,6 +76,7 @@ struct RuntimeUserConfig {
+     // Excite Truck: which one-time default changes have been applied to this config (see main.cpp).
+     std::optional<int64_t> etDefaultsVersion;
+     std::optional<bool> etXboxPrompts;
++    std::optional<bool> ebXboxPrompts;
+     // Excite Truck: multiplier on the race fog and far clip distances (1 = original).
+     std::optional<float> etDrawDistance;
+     std::optional<bool> networkEnabled;
+@@ -489,6 +490,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
+     config.invertAirControl = FindConfigValue<bool>(document, "controller", "invert_air_control");
+     config.etDefaultsVersion = FindConfigValue<int64_t>(document, "excite_truck", "defaults_version");
+     config.etXboxPrompts = FindConfigValue<bool>(document, "excite_truck", "xbox_prompts");
++    config.ebXboxPrompts = FindConfigValue<bool>(document, "excitebots", "xbox_prompts");
+     if (auto value = FindConfigFloat(document, "excite_truck", "draw_distance"); value && *value >= 1.0f && *value <= 4.0f) {
+         config.etDrawDistance = *value;
+     }
+@@ -939,6 +941,16 @@ inline bool SetEtXboxPrompts(bool value) {
+     return WriteSetting("excite_truck", "xbox_prompts", value ? "true" : "false");
+ }
+ 
++// Excitebots: the same switch, kept in its own [excitebots] section.
++inline bool EbXboxPrompts(bool fallback = true) {
++    return Get().ebXboxPrompts.value_or(fallback);
++}
++
++inline bool SetEbXboxPrompts(bool value) {
++    Mutable().ebXboxPrompts = value;
++    return WriteSetting("excitebots", "xbox_prompts", value ? "true" : "false");
++}
++
+ inline int64_t EtDefaultsVersion() {
+     return Get().etDefaultsVersion.value_or(0);
+ }
+diff --git a/runtime/src/hle/excite_truck/et_prompts.cpp b/runtime/src/hle/excite_truck/et_prompts.cpp
+index c35cfa6..7c3c52d 100644
+--- a/runtime/src/hle/excite_truck/et_prompts.cpp
++++ b/runtime/src/hle/excite_truck/et_prompts.cpp
+@@ -8,6 +8,7 @@
+ //
+ // "[excite_truck] xbox_prompts = false" (or the F10 Controllers checkbox) brings the Wii Remote
+ // prompts back; the switch takes effect immediately.
++#include "guest_abi/guest_region.h"
+ #include "runtime_config.h"
+ #include "runtime_log.h"
+ 
+@@ -41,7 +42,9 @@ void Apply(bool enabled) {
+     if (!exeDir) {
+         return;
+     }
+-    const std::filesystem::path root = *exeDir / "prompts" / "xbox";
++    // Excite Truck's pack is prompts/xbox; Excitebots has its own, prompts/excitebots.
++    const std::filesystem::path root =
++        *exeDir / "prompts" / (::GuestRegion::IsExcitebots() ? "excitebots" : "xbox");
+     std::error_code ec;
+     if (!std::filesystem::is_directory(root, ec)) {
+         RT_LOG(RT_TAG_RUNTIME) << "Xbox button prompts: " << root.string() << " is missing, keeping the Wii prompts"
 diff --git a/runtime/src/hle/excitebots/eb_hooks.cpp b/runtime/src/hle/excitebots/eb_hooks.cpp
 new file mode 100644
 index 0000000..2aa8ac2
@@ -239,10 +299,10 @@ index 0000000..2aa8ac2
 +    (pathPtr, perm, attr, callbackPtr, commandBlockPtr));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..ca60626
+index 0000000..e4996cf
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,373 @@
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
 +// keyboard, answered at the KPAD level like Excite Truck (see et_input.cpp).
 +//   - KPADSetConnectCallback (0x8004E984) is recorded; the first KPADRead reports channel 0 as
@@ -251,15 +311,24 @@ index 0000000..ca60626
 +//   - WPADProbe (0x8006830C) reports a core remote on channel 0.
 +// The game reads one KPADStatus per channel per frame (0x803F1C54) into 0x8059BAB8 + chan*0xCB0.
 +//
++// Layout in a race: RT/RB gas (2), X/B and LT/LB brake (1), A turbo (D-pad) plus a remote swing on
++// each press (crash recovery and bars), left stick steers and tilts in the air (inverted by
++// default), View or Y is the Wii A button ("Press A to reset"), Start pauses (+).
++// Menus and the pause menu: A OK (2), B/X back (1), left stick or D-pad move, View is minus.
++// Keyboard: X/Enter gas, Z/Backspace brake, C or Space turbo and swing, arrows steer, W/S tilt,
++// A = Wii A, P pause.
++//
 +// Addresses use the 0x8E000000 alias (see eb_hooks.cpp).
 +
 +#include <SDL3/SDL_gamepad.h>
 +#include <SDL3/SDL_keyboard.h>
 +
 +#include <algorithm>
++#include <chrono>
 +#include <array>
 +#include <cmath>
 +#include <cstdint>
++#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
 +
@@ -333,6 +402,7 @@ index 0000000..ca60626
 +    uint32_t hold = 0;
 +    float steer = 0.0f; // -1 left .. +1 right
 +    float pitch = 0.0f; // -1 nose down .. +1 nose up
++    bool swing = false; // this read is part of a swing
 +};
 +
 +uint32_t StickAsDpad(SDL_Gamepad* pad)
@@ -353,35 +423,88 @@ index 0000000..ca60626
 +    return held;
 +}
 +
-+// TODO(race state): Excite Truck switches between a driving and a menu layout on the race time
-+// step; Excitebots' equivalent is not mapped yet, so the stick both steers and moves menus.
++// Race state, found by watching the small-data area in menus, races and the pause menu:
++//   0x805A2CE4 (r13-0x52FC, float): the race simulation's time step. Zero in the menus, non-zero
++//                                   from the start of a race (it keeps its value while paused).
++//   0x805A2AC4 (r13-0x551C, float): the race clock in seconds. It stops while paused.
++// As for Excite Truck, a race counts as running while the step is set and the clock has moved in
++// the last 1.5 s, so the menus and the pause menu get the menu layout.
++constexpr uint32_t kRaceTimeStep = 0x805A2CE4u;
++constexpr uint32_t kRaceClock = 0x805A2AC4u;
++
++float ReadF32(uint32_t addr)
++{
++    const uint32_t bits = Memory::Read32(addr);
++    float v;
++    std::memcpy(&v, &bits, sizeof(v));
++    return v;
++}
++
++bool RaceRunning()
++{
++    if (!(ReadF32(kRaceTimeStep) > 0.0f)) {
++        return false;
++    }
++    static float lastClock = -1.0f;
++    static auto lastChange = std::chrono::steady_clock::now();
++    const float clock = ReadF32(kRaceClock);
++    const auto now = std::chrono::steady_clock::now();
++    if (clock != lastClock) {
++        lastClock = clock;
++        lastChange = now;
++    }
++    return now - lastChange < std::chrono::milliseconds(1500);
++}
++
++// Swings. Excitebots reads remote motion through its own detector (0x801E3D50): it keeps a slow
++// average of the gravity vector and reports a "flick" when the measured acceleration points
++// against that average, and a "shake" strength from how fast it changes. Crash recovery
++// ("SHAKE!!!") and bar swings are driven by these. A virtual remote never moves, so each press
++// of the swing button plays a short swing instead: a few reads with the acceleration thrown
++// hard against gravity, then back to rest.
++constexpr int kSwingReads = 3;
++int g_swingReadsLeft = 0;
++
 +RemoteInput ReadInput()
 +{
 +    RemoteInput in;
++    const bool racing = RaceRunning();
 +    const bool invertAir = RuntimeConfigFile::InvertAirControl(true);
++    bool swingButton = false;
 +    if (SDL_Gamepad* pad = ActiveGamepad()) {
 +        auto button = [pad](SDL_GamepadButton b) { return SDL_GetGamepadButton(pad, b); };
-+        if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000 ||
-+            button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) || button(SDL_GAMEPAD_BUTTON_SOUTH)) {
-+            in.hold |= kWpad2;
-+        }
-+        if (button(SDL_GAMEPAD_BUTTON_WEST) || button(SDL_GAMEPAD_BUTTON_EAST) ||
-+            SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000 ||
-+            button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) {
-+            in.hold |= kWpad1;
-+        }
-+        if (button(SDL_GAMEPAD_BUTTON_NORTH)) in.hold |= kWpadA;
++        const bool rightTrigger = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000;
++        const bool leftTrigger = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000;
++        if (button(SDL_GAMEPAD_BUTTON_NORTH)) in.hold |= kWpadA; // "Press A to reset"
++        if (button(SDL_GAMEPAD_BUTTON_WEST) || button(SDL_GAMEPAD_BUTTON_EAST)) in.hold |= kWpad1;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_UP)) in.hold |= kSidewaysUp;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_DOWN)) in.hold |= kSidewaysDown;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_LEFT)) in.hold |= kSidewaysLeft;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) in.hold |= kSidewaysRight;
 +        if (button(SDL_GAMEPAD_BUTTON_START)) in.hold |= kWpadPlus;
-+        if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= kWpadMinus;
 +        if (button(SDL_GAMEPAD_BUTTON_GUIDE)) in.hold |= kWpadHome;
-+        in.hold |= StickAsDpad(pad);
-+        in.steer = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
-+        const float stickY = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
-+        in.pitch = invertAir ? stickY : -stickY;
++        if (racing) {
++            // Drive: RT/RB gas (2), X/B and LT/LB brake (1), A turbo (any D-pad direction) and
++            // swing, left stick steers and tilts in the air, View is the Wii A button.
++            if (rightTrigger || button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) in.hold |= kWpad2;
++            if (leftTrigger || button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) in.hold |= kWpad1;
++            if (button(SDL_GAMEPAD_BUTTON_SOUTH)) {
++                in.hold |= kSidewaysUp;
++                swingButton = true;
++            }
++            if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= kWpadA;
++            in.steer = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
++            const float stickY = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
++            in.pitch = invertAir ? stickY : -stickY;
++        } else {
++            // Menus: A is OK (2), B/X back (1), the stick moves the cursor and the remote stays
++            // level. RT/R also confirm.
++            if (button(SDL_GAMEPAD_BUTTON_SOUTH) || rightTrigger || button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) {
++                in.hold |= kWpad2;
++            }
++            if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= kWpadMinus;
++            in.hold |= StickAsDpad(pad);
++        }
 +    }
 +    int keyCount = 0;
 +    const bool* keys = SDL_GetKeyboardState(&keyCount);
@@ -389,16 +512,37 @@ index 0000000..ca60626
 +        auto key = [keys, keyCount](SDL_Scancode sc) { return static_cast<int>(sc) < keyCount && keys[sc]; };
 +        if (key(SDL_SCANCODE_X) || key(SDL_SCANCODE_RETURN)) in.hold |= kWpad2;
 +        if (key(SDL_SCANCODE_Z) || key(SDL_SCANCODE_BACKSPACE)) in.hold |= kWpad1;
-+        if (key(SDL_SCANCODE_C)) in.hold |= kSidewaysUp;
++        if (key(SDL_SCANCODE_C) || key(SDL_SCANCODE_SPACE)) {
++            in.hold |= kSidewaysUp;
++            if (racing) swingButton = true;
++        }
 +        if (key(SDL_SCANCODE_P)) in.hold |= kWpadPlus;
 +        if (key(SDL_SCANCODE_A)) in.hold |= kWpadA;
 +        if (key(SDL_SCANCODE_B)) in.hold |= kWpadB;
++        const bool gasHeld = (in.hold & kWpad2) != 0;
++        if (key(SDL_SCANCODE_LEFT)) { if (!racing || !gasHeld) in.hold |= kSidewaysLeft; in.steer = -1.0f; }
++        if (key(SDL_SCANCODE_RIGHT)) { if (!racing || !gasHeld) in.hold |= kSidewaysRight; in.steer = 1.0f; }
 +        if (key(SDL_SCANCODE_UP)) in.hold |= kSidewaysUp;
 +        if (key(SDL_SCANCODE_DOWN)) in.hold |= kSidewaysDown;
-+        if (key(SDL_SCANCODE_LEFT)) { in.hold |= kSidewaysLeft; in.steer = -1.0f; }
-+        if (key(SDL_SCANCODE_RIGHT)) { in.hold |= kSidewaysRight; in.steer = 1.0f; }
 +        if (key(SDL_SCANCODE_W)) in.pitch = invertAir ? -1.0f : 1.0f;
 +        if (key(SDL_SCANCODE_S)) in.pitch = invertAir ? 1.0f : -1.0f;
++    }
++    if (!racing) {
++        in.steer = 0.0f; // keep the remote level in the menus
++        in.pitch = 0.0f;
++    }
++    // Developer aid for testing swings without a pad: WC_EB_AUTOSWING=N swings every N reads.
++    static const int autoSwing = std::getenv("WC_EB_AUTOSWING") ? std::atoi(std::getenv("WC_EB_AUTOSWING")) : 0;
++    if (autoSwing > 0 && racing) {
++        static int reads = 0;
++        swingButton = (++reads % autoSwing) < 2;
++    }
++    static bool swingWasDown = false;
++    if (swingButton && !swingWasDown) g_swingReadsLeft = kSwingReads;
++    swingWasDown = swingButton;
++    if (g_swingReadsLeft > 0) {
++        --g_swingReadsLeft;
++        in.swing = true;
 +    }
 +    return in;
 +}
@@ -480,6 +624,22 @@ index 0000000..ca60626
 +        return;
 +    }
 +    ReportConnected(ctx);
++    if (static const char* scan = std::getenv("WC_EB_SCAN"); scan) {
++        // Debug: dump the small-data area every 30 reads to find game state globals.
++        static int reads = 0;
++        if (reads++ % 30 == 0) {
++            char name[512];
++            std::snprintf(name, sizeof name, "%s/sda_%05d.bin", scan, reads / 30);
++            if (FILE* f = std::fopen(name, "wb")) {
++                for (uint32_t a = 0x805A0000u; a < 0x805B0000u; a += 4) {
++                    const uint32_t v = Memory::Read32(a);
++                    const uint8_t b[4] = {uint8_t(v >> 24), uint8_t(v >> 16), uint8_t(v >> 8), uint8_t(v)};
++                    std::fwrite(b, 1, 4, f);
++                }
++                std::fclose(f);
++            }
++        }
++    }
 +    const RemoteInput in = ReadInput();
 +    const uint32_t hold = in.hold;
 +    static const bool traceInput = std::getenv("WC_TRACE_INPUT") != nullptr;
@@ -492,6 +652,12 @@ index 0000000..ca60626
 +
 +    float ax = 0.0f, ay = -1.0f, az = 0.0f;
 +    AccelFor(in, ax, ay, az);
++    if (in.swing) {
++        // Thrown against gravity, about twice as hard as gravity itself.
++        ax *= -2.0f;
++        ay *= -2.0f;
++        az *= -2.0f;
++    }
 +    for (uint32_t i = 0; i < kKpadStatusSize; i += 4) {
 +        Memory::Write32(buf + i, 0);
 +    }
@@ -662,7 +828,7 @@ index 285f1c5..368f1ac 100644
          WriteDisplayListData((u16)nv, 2);
          return;
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index 739db18..4da7fcc 100644
+index 739db18..138c67d 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -869,7 +869,8 @@ void RuntimeAuroraLogCallback(AuroraLogLevel level, const char* module,
@@ -686,6 +852,39 @@ index 739db18..4da7fcc 100644
          }
          SystemBridge::Initialize();
          TranslatedFunctionRegistry::Finalize();
+@@ -1513,6 +1516,8 @@ int RuntimeMain(int argc, char** argv) {
+         settings_overlay::InitializeRuntimeSettings();
+         if (GuestRegion::Current() == GuestRegion::Id::ExciteTruck) {
+             EtPrompts::Apply(RuntimeConfigFile::EtXboxPrompts(true));
++        } else if (GuestRegion::Current() == GuestRegion::Id::Excitebots) {
++            EtPrompts::Apply(RuntimeConfigFile::EbXboxPrompts(true));
+         }
+         if (BootRace::Requested()) {
+             aurora_set_skip_unready_pipelines(false);
+diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
+index 6cbd761..f116cd0 100644
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -980,6 +980,19 @@ void DrawControllerSettings() {
+         ImGui::TextDisabled("Gamepad: RT/R drive, X brake, A turbo, left stick steers and tilts in the air.");
+         ImGui::TextDisabled("Menus: A select, B back, left stick or D-pad move.");
+         ImGui::Separator();
++    } else if (::GuestRegion::Current() == ::GuestRegion::Id::Excitebots) {
++        static bool invertAir = RuntimeConfigFile::InvertAirControl(true);
++        if (ImGui::Checkbox("Invert air control (push up to dip the nose)", &invertAir)) {
++            RuntimeConfigFile::SetInvertAirControl(invertAir);
++        }
++        static bool xboxPrompts = RuntimeConfigFile::EbXboxPrompts(true);
++        if (ImGui::Checkbox("Xbox button prompts (off: the original Wii Remote pictures)", &xboxPrompts)) {
++            RuntimeConfigFile::SetEbXboxPrompts(xboxPrompts);
++            EtPrompts::Apply(xboxPrompts);
++        }
++        ImGui::TextDisabled("Gamepad: RT/RB drive, X/LT brake, A turbo and swing (bars, crash shake),");
++        ImGui::TextDisabled("left stick steers and tilts in the air, View resets. Menus: A select, B back.");
++        ImGui::Separator();
+     }
+     for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
+         DrawPlayerRow(port);
 diff --git a/runtime/src/system_bridge.cpp b/runtime/src/system_bridge.cpp
 index ad826d4..02751b3 100644
 --- a/runtime/src/system_bridge.cpp
