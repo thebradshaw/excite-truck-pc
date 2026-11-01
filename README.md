@@ -54,15 +54,15 @@ Alt+Enter switches to a window; F10 has the display and resolution settings.
 ## Launcher
 
 **Excite PC** (`ExcitePC.exe`, the "Excite PC" shortcut) opens first. Its first screen lists
-both games, Excite Truck on the left and Excitebots on the right:
+both games' logos, Excite Truck on the left and Excitebots on the right. The logo is the button:
 
-- A game that isn't set up yet takes its disc image (drop it on the window or choose it), then
-  **Set Up** builds it on this PC with a progress bar: the launcher runs the game's build script
-  (`scripts/build-windows.ps1`, or `build-linux.sh`) and reads its `==>` steps, `##progress` lines
+- A game that isn't set up yet: click its logo to choose its disc image (or drop it on that side
+  of the window), then click it again (or **Set Up**) to build it on this PC with a progress bar.
+  The launcher runs the game's build script (`scripts/build-windows.ps1`, or `build-linux.sh`) and reads its `==>` steps, `##progress` lines
   and ninja's `[n/m]` counts. One game builds at a time; a second one waits its turn. Stopping and
   starting again picks up where it stopped.
-- A game that is set up has **Play**, which opens its own menu, and **Set Up Again** (rebuilds it
-  after an update, keeping settings and saves).
+- A game that is set up opens its own menu when you click its logo. **Set Up Again** under it
+  rebuilds it after an update, keeping settings and saves.
 
 Each game's menu has the same layout as the
 [1080° Snowboarding launcher](https://github.com/thebradshaw/1080-Snowboarding-decomp): the
