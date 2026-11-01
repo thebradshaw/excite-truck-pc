@@ -1003,17 +1003,6 @@ void AchievementsPage() {
 
 // --- Left column --------------------------------------------------------------------------------
 
-// A small red "PC" tag; (right, top) is its top-right corner.
-void PcTag(ImDrawList* draw, float right, float top, float height) {
-    const ImVec2 text = F.label->CalcTextSizeA(height, FLT_MAX, 0.0f, "PC");
-    const ImVec2 t1(right, top + height * 1.1f);
-    const ImVec2 t0(t1.x - text.x - height * 0.7f, top);
-    draw->AddRectFilled(ImVec2(t0.x + height * 0.08f, t0.y + height * 0.1f), ImVec2(t1.x + height * 0.08f, t1.y + height * 0.1f),
-                        IM_COL32(20, 8, 4, 120), height * 0.25f);
-    draw->AddRectFilled(t0, t1, IM_COL32(220, 40, 30, 255), height * 0.25f);
-    draw->AddText(F.label, height, ImVec2(t0.x + height * 0.35f, t0.y + height * 0.05f), IM_COL32_WHITE, "PC");
-}
-
 void DrawLogo(ImDrawList* draw, ImVec2 min, ImVec2 max, GameId game, float alpha = 1.0f) {
     const float boxW = max.x - min.x, boxH = max.y - min.y;
     const ImU32 tint = IM_COL32(255, 255, 255, int(255 * alpha));
@@ -1023,12 +1012,6 @@ void DrawLogo(ImDrawList* draw, ImVec2 min, ImVec2 max, GameId game, float alpha
         const ImVec2 size(logo.size.x * scale, logo.size.y * scale);
         const ImVec2 at(min.x + (boxW - size.x) * 0.5f, min.y + (boxH - size.y) * 0.5f);
         draw->AddImage(ImTextureID(logo.texture), at, ImVec2(at.x + size.x, at.y + size.y), ImVec2(0, 0), ImVec2(1, 1), tint);
-        // "PC" under the end of the logo's second line.
-        if (game == GameId::Truck) {
-            PcTag(draw, at.x + size.x * 0.735f, at.y + size.y * 0.80f, size.y * 0.10f);
-        } else {
-            PcTag(draw, at.x + size.x * 0.31f, at.y + size.y * 0.66f, size.y * 0.11f);   // before TRICK RACING
-        }
         return;
     }
     const char* second = game == GameId::Truck ? "TRUCK" : "BOTS";
@@ -1065,9 +1048,6 @@ void DrawLogo(ImDrawList* draw, ImVec2 min, ImVec2 max, GameId game, float alpha
     } else {
         outlined(truckPos, truckSizePx, second, IM_COL32(220, 236, 255, a), IM_COL32(110, 150, 210, a), size * 0.035f);
     }
-
-    // A small "PC" tag before TRUCK.
-    PcTag(draw, truckPos.x - size * 0.10f, truckPos.y + truckSize.y * 0.30f, truckSize.y * 0.42f);
 }
 
 struct MenuItem {
@@ -1399,6 +1379,167 @@ std::string Elapsed(double seconds) {
     return text;
 }
 
+// --- Vehicle silhouettes behind the home screen's logos (drawn here, not taken from the games) ---
+//
+// Each is a flat side view in a box 1 wide, made of filled shapes with thin gaps cut out (windows,
+// hubcaps, the gap around each wheel), rendered once into a white texture with soft edges and
+// tinted grey when drawn.
+
+struct SilhouetteShape {
+    std::vector<std::vector<ImVec2>> fills, holes;
+    std::vector<std::pair<ImVec2, float>> discs, rings;   // rings: thin circles cut out
+    std::vector<std::vector<ImVec2>> strokes, cuts;        // thick lines added / cut out
+    float stroke = 0.012f, cut = 0.012f;
+};
+
+void WheelArch(std::vector<ImVec2>& path, ImVec2 c, float r, float bottom) {
+    const float h = std::clamp((c.y - bottom) / r, -1.0f, 1.0f);
+    const float a0 = 3.14159265f + std::asin(h), a1 = 6.28318531f - std::asin(h);
+    for (int i = 0; i <= 18; ++i) {
+        const float a = a0 + (a1 - a0) * i / 18.0f;
+        path.push_back(ImVec2(c.x + std::cos(a) * r, c.y + std::sin(a) * r));
+    }
+}
+
+std::vector<ImVec2> Curve(ImVec2 a, ImVec2 control, ImVec2 b) {
+    std::vector<ImVec2> out;
+    for (int i = 0; i <= 16; ++i) {
+        const float t = i / 16.0f, u = 1.0f - t;
+        out.push_back(ImVec2(u * u * a.x + 2 * u * t * control.x + t * t * b.x, u * u * a.y + 2 * u * t * control.y + t * t * b.y));
+    }
+    return out;
+}
+
+SilhouetteShape VehicleShape(GameId game) {
+    SilhouetteShape s;
+    const float gap = 0.022f;
+    std::vector<ImVec2> body;
+    if (game == GameId::Truck) {
+        // An off-road pickup with big tyres and a light bar on the roof.
+        const float bottom = 0.30f, r = 0.115f;
+        const ImVec2 rear(0.22f, 0.37f), front(0.79f, 0.37f);
+        body.push_back(ImVec2(0.03f, bottom));
+        WheelArch(body, rear, r + gap, bottom);
+        WheelArch(body, front, r + gap, bottom);
+        for (ImVec2 p : {ImVec2(0.975f, bottom), ImVec2(0.985f, 0.235f), ImVec2(0.955f, 0.185f), ImVec2(0.76f, 0.165f),
+                         ImVec2(0.665f, 0.065f), ImVec2(0.64f, 0.065f), ImVec2(0.64f, 0.035f), ImVec2(0.50f, 0.035f),
+                         ImVec2(0.50f, 0.065f), ImVec2(0.475f, 0.065f), ImVec2(0.445f, 0.175f), ImVec2(0.06f, 0.175f),
+                         ImVec2(0.025f, 0.19f)}) {
+            body.push_back(p);
+        }
+        s.holes = {{ImVec2(0.492f, 0.088f), ImVec2(0.578f, 0.088f), ImVec2(0.578f, 0.158f), ImVec2(0.468f, 0.158f)},
+                   {ImVec2(0.596f, 0.088f), ImVec2(0.652f, 0.088f), ImVec2(0.725f, 0.158f), ImVec2(0.596f, 0.158f)}};
+        s.discs = {{rear, r}, {front, r}};
+    } else {
+        // A beetle on wheels: a domed shell, a head with jaws, a horn and antennae, and three legs.
+        const float bottom = 0.29f, r = 0.10f;
+        const ImVec2 rear(0.24f, 0.36f), front(0.64f, 0.36f);
+        body.push_back(ImVec2(0.06f, 0.28f));
+        WheelArch(body, rear, r + gap, bottom);
+        WheelArch(body, front, r + gap, bottom);
+        for (ImVec2 p : {ImVec2(0.84f, bottom), ImVec2(0.975f, 0.325f), ImVec2(0.915f, 0.265f), ImVec2(0.955f, 0.215f),
+                         ImVec2(0.935f, 0.16f), ImVec2(0.84f, 0.14f), ImVec2(0.79f, 0.175f)}) {
+            body.push_back(p);
+        }
+        for (int i = 0; i <= 28; ++i) {   // the shell, from its front edge over the top to the back
+            const float a = -0.35f - (3.14159265f - 0.35f) * i / 28.0f;
+            body.push_back(ImVec2(0.42f + std::cos(a) * 0.38f, 0.255f + std::sin(a) * 0.235f));
+        }
+        std::vector<ImVec2> seam;   // the edge of the wing case
+        for (int i = 0; i <= 28; ++i) {
+            const float a = -0.55f - (3.14159265f - 0.75f) * i / 28.0f;
+            seam.push_back(ImVec2(0.42f + std::cos(a) * 0.33f, 0.265f + std::sin(a) * 0.19f));
+        }
+        s.cuts = {seam};
+        s.strokes = {Curve(ImVec2(0.86f, 0.15f), ImVec2(0.90f, 0.05f), ImVec2(0.965f, 0.0f)),
+                     Curve(ImVec2(0.86f, 0.15f), ImVec2(0.845f, 0.04f), ImVec2(0.895f, -0.03f)),
+                     Curve(ImVec2(0.91f, 0.18f), ImVec2(0.995f, 0.16f), ImVec2(0.985f, 0.06f)),
+                     {ImVec2(0.11f, 0.27f), ImVec2(0.05f, 0.37f)},
+                     {ImVec2(0.44f, 0.28f), ImVec2(0.46f, 0.39f)},
+                     {ImVec2(0.81f, 0.28f), ImVec2(0.88f, 0.37f)}};
+        s.stroke = 0.013f;
+        s.discs = {{rear, r}, {front, r}};
+    }
+    s.fills.push_back(body);
+    for (const auto& [c, r] : s.discs) s.rings.push_back({c, r * 0.55f});   // hubcaps
+    return s;
+}
+
+bool InPolygon(const std::vector<ImVec2>& poly, float x, float y) {
+    bool inside = false;
+    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) {
+        const ImVec2 a = poly[i], b = poly[j];
+        if ((a.y > y) != (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+    }
+    return inside;
+}
+
+bool NearLine(const std::vector<ImVec2>& line, float x, float y, float radius) {
+    for (size_t i = 0; i + 1 < line.size(); ++i) {
+        const ImVec2 a = line[i], b = line[i + 1];
+        const float dx = b.x - a.x, dy = b.y - a.y, len = dx * dx + dy * dy;
+        const float t = len > 0.0f ? std::clamp(((x - a.x) * dx + (y - a.y) * dy) / len, 0.0f, 1.0f) : 0.0f;
+        const float ex = a.x + dx * t - x, ey = a.y + dy * t - y;
+        if (ex * ex + ey * ey <= radius * radius) return true;
+    }
+    return false;
+}
+
+// Renders the shape into a texture covering x 0..1, y kTop..kTop+kHeight, white with soft edges.
+constexpr float kSilhouetteTop = -0.10f, kSilhouetteHeight = 0.56f;
+
+SDL_Texture* MakeSilhouette(SDL_Renderer* renderer, GameId game) {
+    const SilhouetteShape s = VehicleShape(game);
+    const int w = 640, h = int(w * kSilhouetteHeight), ss = 3;
+    std::vector<uint32_t> pixels(size_t(w) * h, 0);
+    for (int py = 0; py < h; ++py) {
+        for (int px = 0; px < w; ++px) {
+            int covered = 0;
+            for (int sy = 0; sy < ss; ++sy) {
+                for (int sx = 0; sx < ss; ++sx) {
+                    const float x = (px + (sx + 0.5f) / ss) / w;
+                    const float y = kSilhouetteTop + (py + (sy + 0.5f) / ss) / w;
+                    bool in = false;
+                    for (const auto& f : s.fills) in = in || InPolygon(f, x, y);
+                    for (const auto& [c, r] : s.discs) in = in || (x - c.x) * (x - c.x) + (y - c.y) * (y - c.y) <= r * r;
+                    for (const auto& l : s.strokes) in = in || NearLine(l, x, y, s.stroke * 0.5f);
+                    if (!in) continue;
+                    bool out = false;
+                    for (const auto& hole : s.holes) out = out || InPolygon(hole, x, y);
+                    for (const auto& [c, r] : s.rings) {
+                        out = out || std::abs(std::sqrt((x - c.x) * (x - c.x) + (y - c.y) * (y - c.y)) - r) <= s.cut * 0.5f;
+                    }
+                    for (const auto& l : s.cuts) out = out || NearLine(l, x, y, s.cut * 0.5f);
+                    covered += out ? 0 : 1;
+                }
+            }
+            const uint32_t alpha = uint32_t(covered * 255 / (ss * ss));
+            pixels[size_t(py) * w + px] = (alpha << 24) | 0x00FFFFFF;
+        }
+    }
+    SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
+    if (texture) {
+        SDL_UpdateTexture(texture, nullptr, pixels.data(), w * 4);
+        SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR);
+    }
+    return texture;
+}
+
+SDL_Texture* g_silhouettes[kGameCount] = {};
+
+// The game's vehicle, centred on `centre`, `width` wide, facing right (or left when flipped).
+void DrawSilhouette(ImDrawList* draw, GameId game, ImVec2 centre, float width, ImU32 color, bool flip) {
+    SDL_Texture*& texture = g_silhouettes[int(game)];
+    if (!texture && g_renderer) texture = MakeSilhouette(g_renderer, game);
+    if (!texture) return;
+    const float height = width * kSilhouetteHeight;
+    // Centre on the body (y 0..0.48 of the shape), not on the antennae above it.
+    const float bodyMid = (0.24f - kSilhouetteTop) * width;
+    const ImVec2 min(centre.x - width * 0.5f, centre.y - bodyMid), max(centre.x + width * 0.5f, centre.y - bodyMid + height);
+    draw->AddImage(ImTextureID(texture), min, max, ImVec2(flip ? 1.0f : 0.0f, 0.0f), ImVec2(flip ? 0.0f : 1.0f, 1.0f), color);
+}
+
 float g_logoHot[kGameCount] = {};   // 0..1, eases in while the cursor is on that game
 
 // One game on the home screen: its logo is the button, with its state and a few text links under it.
@@ -1465,6 +1606,9 @@ void DrawGameColumn(int slot, float cx, float colW, float top, float logoH, doub
                                    IM_COL32(255, 200, 120, int(6 * hot)), 0.0f, 64);
         }
     }
+    // A grey silhouette of the game's vehicle behind its logo, facing the middle of the screen.
+    DrawSilhouette(draw, id, ImVec2(centre.x, centre.y - logoH * 0.02f), logoW * 1.02f,
+                   IM_COL32(58, 60, 72, int(135 + 40 * hot)), slot == 1);
     const float scale = 1.0f + 0.06f * hot;
     const ImVec2 half(logoW * 0.5f * scale, logoH * 0.5f * scale);
     const float lift = S(6) * hot;
@@ -1620,7 +1764,7 @@ void DrawHome(float W, float H, float margin, float footer, double now) {
     const float groupH = logoH + S(140);
     const float logoTop = std::max(areaTop, std::min(H * 0.42f - logoH * 0.5f, areaBottom - groupH));
     {
-        // A thin line between the two games that fades out at both ends, with a small diamond at its middle.
+        // A thin line between the two games that fades out at both ends.
         const float x = std::round(W * 0.5f), top = logoTop - S(10), bottom = logoTop + groupH - S(10);
         const float mid = (top + bottom) * 0.5f, w = S(1.5f);
         const ImU32 clear = IM_COL32(255, 240, 220, 0), solid = IM_COL32(255, 240, 220, 230);
@@ -1631,12 +1775,6 @@ void DrawHome(float W, float H, float margin, float footer, double now) {
                                       shadowClear, shadowClear);
         draw->AddRectFilledMultiColor(ImVec2(x - w, top), ImVec2(x + w, mid), clear, clear, solid, solid);
         draw->AddRectFilledMultiColor(ImVec2(x - w, mid), ImVec2(x + w, bottom), solid, solid, clear, clear);
-        const float d = S(8), o = S(2.5f);
-        draw->AddQuadFilled(ImVec2(x + S(1.5f), mid - d - o + S(2)), ImVec2(x + d + o + S(1.5f), mid + S(2)),
-                            ImVec2(x + S(1.5f), mid + d + o + S(2)), ImVec2(x - d - o + S(1.5f), mid + S(2)), shadow);
-        draw->AddQuadFilled(ImVec2(x, mid - d - o), ImVec2(x + d + o, mid), ImVec2(x, mid + d + o), ImVec2(x - d - o, mid),
-                            IM_COL32(255, 240, 220, 230));
-        draw->AddQuadFilled(ImVec2(x, mid - d), ImVec2(x + d, mid), ImVec2(x, mid + d), ImVec2(x - d, mid), kAmber);
     }
     for (int i = 0; i < kGameCount; ++i) {
         DrawGameColumn(i, margin + colW * (i + 0.5f), colW, logoTop, logoH, now);
@@ -1726,6 +1864,10 @@ bool UiUpdateFonts(float windowWidth, float windowHeight) {
 }
 
 void UiShutdown() {
+    for (SDL_Texture*& texture : g_silhouettes) {
+        if (texture) SDL_DestroyTexture(texture);
+        texture = nullptr;
+    }
     for (Logo& logo : g_logos) {
         if (logo.texture) SDL_DestroyTexture(logo.texture);
         logo = Logo{};
