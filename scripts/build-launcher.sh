@@ -22,4 +22,12 @@ cat > "$OUT/setup/truck/build-linux.sh" <<SH
 exec "$REPO/scripts/build-linux.sh" "\$@"
 SH
 chmod +x "$OUT/setup/truck/build-linux.sh"
+if [ -f "$REPO/scripts/excitebots/build-linux.sh" ]; then
+    mkdir -p "$OUT/setup/bots"
+    cat > "$OUT/setup/bots/build-linux.sh" <<SH
+#!/usr/bin/env bash
+exec "$REPO/scripts/excitebots/build-linux.sh" "\$@"
+SH
+    chmod +x "$OUT/setup/bots/build-linux.sh"
+fi
 echo "Done. Start the launcher with: $OUT/ExcitePC"
