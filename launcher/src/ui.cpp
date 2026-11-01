@@ -1616,7 +1616,9 @@ void DrawHome(float W, float H, float margin, float footer, double now) {
     const float areaTop = y + S(10), areaBottom = helpTop - S(20);
     const float colW = (W - margin * 2.0f) / kGameCount;
     const float logoH = std::min(colW * 0.46f, (areaBottom - areaTop) * 0.46f);
-    const float logoTop = areaTop + (areaBottom - areaTop) * 0.10f;
+    // Logos centred a little above the middle of the window, with room for the lines under them.
+    const float groupH = logoH + S(140);
+    const float logoTop = std::max(areaTop, std::min(H * 0.42f - logoH * 0.5f, areaBottom - groupH));
     for (int i = 0; i < kGameCount; ++i) {
         DrawGameColumn(i, margin + colW * (i + 0.5f), colW, logoTop, logoH, now);
     }
