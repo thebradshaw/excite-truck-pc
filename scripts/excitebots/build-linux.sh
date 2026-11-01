@@ -159,6 +159,8 @@ for d in fonts wii_bootstrap; do [ -d "$B/$d" ] && rm -rf "${OUT:?}/$d" && cp -r
 # portable.txt keeps settings, saves and caches in UserData next to the game.
 touch "$OUT/portable.txt"
 mkdir -p "$OUT/UserData/achievements"
+# Xbox button prompts (tools/prompts/make_eb_pack.py), read from prompts/excitebots.
+rm -rf "${OUT:?}/prompts" && mkdir -p "$OUT/prompts" && cp -r "$REPO/assets/prompts/excitebots" "$OUT/prompts/"
 if [ ! -f "$OUT/UserData/Config.toml" ]; then
     DVD_ROOT="../Disc"
     [ "$DATA" = "$OUT/Disc" ] || DVD_ROOT="$DATA"

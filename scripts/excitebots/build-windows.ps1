@@ -440,11 +440,17 @@ foreach ($name in 'fonts', 'wii_bootstrap', 'config') {
 }
 $iconFile = Join-Path $ws 'runtime\resources\WiiCompiled.ico'
 if (Test-Path -LiteralPath $iconFile -PathType Leaf) { Copy-Item -LiteralPath $iconFile -Destination (Join-Path $Out 'Excitebots.ico') -Force }
-# Xbox button prompts (our own art, see tools/prompts/make_pack.py).
-$prompts = if ($SetupMode) { Join-Path $Payload 'prompts' } else { Join-Path $Repo 'assets\prompts' }
+# Xbox button prompts (our own art, see tools/prompts/make_eb_pack.py). The game reads them from
+# prompts\excitebots next to the executable.
+$prompts = if ($SetupMode) { Join-Path $Payload 'prompts\excitebots' } else { Join-Path $Repo 'assets\prompts\excitebots' }
 $promptsTarget = Join-Path $Out 'prompts'
 if (Test-Path -LiteralPath $promptsTarget) { Remove-Item -LiteralPath $promptsTarget -Recurse -Force }
-if (Test-Path -LiteralPath $prompts -PathType Container) { Copy-Item -LiteralPath $prompts -Destination $promptsTarget -Recurse }
+if (Test-Path -LiteralPath $prompts -PathType Container) {
+    New-Item -ItemType Directory -Force -Path $promptsTarget | Out-Null
+    Copy-Item -LiteralPath $prompts -Destination (Join-Path $promptsTarget 'excitebots') -Recurse
+} else {
+    Write-Host "Warning: $prompts is missing, so the game will show the Wii Remote's buttons."
+}
 # portable.txt keeps settings, saves and caches in UserData next to the game.
 New-Item -ItemType File -Force -Path (Join-Path $Out 'portable.txt') | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $Out 'UserData\achievements')) | Out-Null

@@ -9,6 +9,10 @@ It replaces the Wii Remote pictures that ask for a motion with the A button, sin
 remote swing on the pad: the crash prompt's shaking remote ("SHAKE!!!") and the bar prompt's
 pushed remote ("Push", grab and release a bar).
 
+It also redraws the round button icons Excitebots shares with Excite Truck (common.res, same
+hashes): Wii 2 becomes A (OK / accelerate), Wii 1 becomes B (back) and Wii A becomes B, since B
+fires weapons in a race. + and - become Menu and View.
+
 Usage: make_eb_pack.py <out dir> [scale]     (default scale 2: the texture is already 256x256)
 """
 import os
@@ -22,6 +26,17 @@ from PIL import Image  # noqa: E402
 
 def build(scale):
     out = {}
+    for name, label in (("c8e9868a2a851ed2", "B"),      # but_1: Wii 1 = back
+                        ("82d8d8bfb09e0473", "A"),      # but_2: Wii 2 = OK / accelerate
+                        ("3af32d71c3492a6c", "B"),      # but_a: Wii A = weapon (B in a race)
+                        ("2d1f16a88dbc6ce7", "menu"),   # but_plus: pause
+                        ("f75ed7456325a597", "view")):  # but_minus
+        c = Canvas(64, 64, scale)
+        c.face(0, 0, 64, 64, label)
+        out[f"tex1_64x64_{name}_14.png"] = c.result()
+    out["tex1_64x64_e38526d2efbddd13_0.png"] = circle_mask(64, 64, scale, 0.5, 0.5, 63.5, 63.5)
+    out["tex1_64x64_08fba3554ebf64a8_0.png"] = circle_mask(64, 64, scale, 0.5, 0.5, 63.5, 63.5)
+
     # shakecont.art: a 256x256 colour texture (CMPR) holding the remote twice, at y 24-81 and
     # 164-221 (x 31-231), cut out by a separate I4 mask. Both become an A button centred on the
     # remote's place, the lower one pressed, with a disc mask to match.

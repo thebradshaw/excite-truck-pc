@@ -517,10 +517,10 @@ index 0000000..2aa8ac2
 +    (pathPtr, perm, attr, callbackPtr, commandBlockPtr));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..834ff40
+index 0000000..38e594e
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,373 @@
+@@ -0,0 +1,419 @@
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
 +// keyboard, answered at the KPAD level like Excite Truck (see et_input.cpp).
 +//   - KPADSetConnectCallback (0x8004E984) is recorded; the first KPADRead reports channel 0 as
@@ -529,9 +529,10 @@ index 0000000..834ff40
 +//   - WPADProbe (0x8006830C) reports a core remote on channel 0.
 +// The game reads one KPADStatus per channel per frame (0x803F1C54) into 0x8059BAB8 + chan*0xCB0.
 +//
-+// Layout in a race: RT/RB gas (2), X/B and LT/LB brake (1), A turbo (D-pad) plus a remote swing on
-+// each press (crash recovery and bars), left stick steers and tilts in the air (inverted by
-+// default), View or Y is the Wii A button ("Press A to reset"), Start pauses (+).
++// Layout in a race: RT/RB gas (2), X and LT/LB brake (1), A turbo (D-pad), B the Wii A button
++// (weapons), left stick steers and tilts in the air (inverted by default), Y or View also the Wii
++// A button ("Press A to reset"), Start pauses (+). While the game shows a remote-motion prompt
++// (SHAKE!!! after a crash, Push on a bar) A plays a remote swing instead of only turbo.
 +// Menus and the pause menu: A OK (2), B/X back (1), left stick or D-pad move, View is minus.
 +// Keyboard: X/Enter gas, Z/Backspace brake, C or Space turbo and swing, arrows steer, W/S tilt,
 +// A = Wii A, P pause.
@@ -555,6 +556,9 @@ index 0000000..834ff40
 +#include "ppc_runtime.h"
 +#include "runtime_config.h"
 +#include "runtime_log.h"
++
++bool EbSwingPromptShown(); // gx_texture.cpp: SHAKE!!! or Push is on screen
++bool EbControllerTypeScreenShown(); // gx_texture.cpp: the Wii Remote / Wii Wheel choice
 +
 +namespace {
 +
@@ -693,8 +697,11 @@ index 0000000..834ff40
 +        auto button = [pad](SDL_GamepadButton b) { return SDL_GetGamepadButton(pad, b); };
 +        const bool rightTrigger = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000;
 +        const bool leftTrigger = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000;
-+        if (button(SDL_GAMEPAD_BUTTON_NORTH)) in.hold |= kWpadA; // "Press A to reset"
-+        if (button(SDL_GAMEPAD_BUTTON_WEST) || button(SDL_GAMEPAD_BUTTON_EAST)) in.hold |= kWpad1;
++        // Y is always the Wii A button ("Press A to reset"). B is too in a race (weapons), and
++        // back (1) in the menus.
++        if (button(SDL_GAMEPAD_BUTTON_NORTH)) in.hold |= kWpadA;
++        if (button(SDL_GAMEPAD_BUTTON_WEST)) in.hold |= kWpad1;
++        if (button(SDL_GAMEPAD_BUTTON_EAST)) in.hold |= racing ? kWpadA : kWpad1;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_UP)) in.hold |= kSidewaysUp;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_DOWN)) in.hold |= kSidewaysDown;
 +        if (button(SDL_GAMEPAD_BUTTON_DPAD_LEFT)) in.hold |= kSidewaysLeft;
@@ -702,13 +709,14 @@ index 0000000..834ff40
 +        if (button(SDL_GAMEPAD_BUTTON_START)) in.hold |= kWpadPlus;
 +        if (button(SDL_GAMEPAD_BUTTON_GUIDE)) in.hold |= kWpadHome;
 +        if (racing) {
-+            // Drive: RT/RB gas (2), X/B and LT/LB brake (1), A turbo (any D-pad direction) and
-+            // swing, left stick steers and tilts in the air, View is the Wii A button.
++            // Drive: RT/RB gas (2), X and LT/LB brake (1), A turbo (any D-pad direction), B the Wii
++            // A button (weapons), left stick steers and tilts in the air. While the game asks for a
++            // remote motion (SHAKE!!! after a crash, Push on a bar) A plays a swing instead.
 +            if (rightTrigger || button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) in.hold |= kWpad2;
 +            if (leftTrigger || button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) in.hold |= kWpad1;
 +            if (button(SDL_GAMEPAD_BUTTON_SOUTH)) {
 +                in.hold |= kSidewaysUp;
-+                swingButton = true;
++                swingButton = EbSwingPromptShown();
 +            }
 +            if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= kWpadA;
 +            in.steer = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
@@ -732,7 +740,7 @@ index 0000000..834ff40
 +        if (key(SDL_SCANCODE_Z) || key(SDL_SCANCODE_BACKSPACE)) in.hold |= kWpad1;
 +        if (key(SDL_SCANCODE_C) || key(SDL_SCANCODE_SPACE)) {
 +            in.hold |= kSidewaysUp;
-+            if (racing) swingButton = true;
++            if (racing) swingButton = EbSwingPromptShown();
 +        }
 +        if (key(SDL_SCANCODE_P)) in.hold |= kWpadPlus;
 +        if (key(SDL_SCANCODE_A)) in.hold |= kWpadA;
@@ -745,6 +753,15 @@ index 0000000..834ff40
 +        if (key(SDL_SCANCODE_W)) in.pitch = invertAir ? -1.0f : 1.0f;
 +        if (key(SDL_SCANCODE_S)) in.pitch = invertAir ? 1.0f : -1.0f;
 +    }
++    // The Wii Remote / Wii Wheel choice (new profile, Options) means nothing on a pad: both play
++    // the same. Once it has settled on screen, confirm the highlighted Wii Remote for the player.
++    static int controllerTypeReads = 0;
++    if (!racing && EbControllerTypeScreenShown()) {
++        const int phase = controllerTypeReads++ % 60;
++        if (phase >= 15 && phase < 19) in.hold |= kWpad2;
++    } else {
++        controllerTypeReads = 0;
++    }
 +    if (!racing) {
 +        in.steer = 0.0f; // keep the remote level in the menus
 +        in.pitch = 0.0f;
@@ -756,7 +773,10 @@ index 0000000..834ff40
 +        swingButton = (++reads % autoSwing) < 2;
 +    }
 +    static bool swingWasDown = false;
-+    if (swingButton && !swingWasDown) g_swingReadsLeft = kSwingReads;
++    if (swingButton && !swingWasDown) {
++        g_swingReadsLeft = kSwingReads;
++        if (std::getenv("WC_TRACE_INPUT")) RT_LOGF(RT_TAG_HLE, "EB remote swing\n");
++    }
 +    swingWasDown = swingButton;
 +    if (g_swingReadsLeft > 0) {
 +        in.swing = kSwingReads - g_swingReadsLeft;
@@ -842,7 +862,7 @@ index 0000000..834ff40
 +        return;
 +    }
 +    ReportConnected(ctx);
-+    if (static const char* scan = std::getenv("WC_EB_SCAN"); scan) {
++    if (static const char* scan = std::getenv("WC_EB_SCAN"); scan && *scan) {
 +        // Debug: dump the small-data area every 30 reads to find game state globals.
 +        static int reads = 0;
 +        if (reads++ % 30 == 0) {
@@ -894,6 +914,69 @@ index 0000000..834ff40
 +    ctx->gpr[3] = 1;
 +}
 +PPC_NATIVE_OVERRIDE_VOID(8E04DABC, EB_KPADReadEx_8004dabc, (CpuContext* ctx), (ctx));
++
++// Called once per presented frame. Skips the three boot screens (wrist strap, "Online Interactions
++// Not Rated" and the Wii Remote / Wii Wheel "Press 2 to Start" picture), which are about the Wii
++// hardware. They are steps 0 to 10 of the boot sequence that 0x803E6CD0 runs while the main
++// thread waits (0x803E6EA0) for step 11; the step number is at 0x805A47F0 (r13-0x37F0).
++void EbFrameTick()
++{
++    constexpr uint32_t kBootStep = 0x805A47F0u;
++    constexpr uint32_t kBootDone = 11;
++    static bool done = false;
++    if (done) {
++        return;
++    }
++    const uint32_t step = Memory::Read32(kBootStep);
++    if (step == kBootDone) {
++        done = true;
++    } else if (step < kBootDone) {
++        Memory::Write32(kBootStep, kBootDone);
++    }
++}
++
++// For the GX thread: true while a race is loaded (paused included). Reads memory only.
++bool EbRaceRunningForGx()
++{
++    return ReadF32(kRaceTimeStep) > 0.0f;
++}
+diff --git a/runtime/src/hle/gx/gx_copy.cpp b/runtime/src/hle/gx/gx_copy.cpp
+index c93affe..69cdd47 100644
+--- a/runtime/src/hle/gx/gx_copy.cpp
++++ b/runtime/src/hle/gx/gx_copy.cpp
+@@ -27,6 +27,7 @@ extern "C" __declspec(dllimport) int __stdcall K32GetProcessMemoryInfo(void* pro
+ #include <cstdlib>
+ #include <map>
+ #include <mutex>
++#include <unordered_set>
+ #include <vector>
+ 
+ namespace {
+@@ -271,7 +272,24 @@ void RunCopyTex(uint32_t da, uint32_t c, const TexCopyState& state) {
+ }
+ } // namespace
+ 
++namespace {
++// Every address the game has copied the EFB to, recorded on the game thread at call time (the copy
++// itself may still be queued for the GX worker). Such a texture lives on the GPU, so it must never
++// be swapped for a CPU snapshot of guest memory (see EtTexSnapshots in gx_texture.cpp).
++std::mutex g_copyTexTargetsMutex;
++std::unordered_set<uint32_t> g_copyTexTargets;
++} // namespace
++
++bool GxWasCopyTexDestination(uint32_t addr) {
++    std::lock_guard<std::mutex> guard(g_copyTexTargetsMutex);
++    return g_copyTexTargets.count(CanonicalizeGxMainRamAddress(addr)) != 0;
++}
++
+ extern "C" void GX__CopyTex_8016fd74(uint32_t da, uint32_t c) {
++    {
++        std::lock_guard<std::mutex> guard(g_copyTexTargetsMutex);
++        g_copyTexTargets.insert(CanonicalizeGxMainRamAddress(da));
++    }
+     // Begin the frame first so a deferred begin reaches the worker before the copy.
+     EnsureAuroraFrameActive();
+     const TexCopyState state = g_texCopyState;
 diff --git a/runtime/src/hle/gx/gx_dl.cpp b/runtime/src/hle/gx/gx_dl.cpp
 index e49a831..05dad31 100644
 --- a/runtime/src/hle/gx/gx_dl.cpp
@@ -995,6 +1078,19 @@ index e890b8b..e2e7e7e 100644
          GXFlush();
          GX__GetCPUFifo_8016cf10(MKW_GADDR(80344090));
          const uint8_t wrapped = Memory::Read8(kDlFifoAddr + kDlWrapFlagOffset);
+diff --git a/runtime/src/hle/gx/gx_internal.h b/runtime/src/hle/gx/gx_internal.h
+index 732729d..c80058a 100644
+--- a/runtime/src/hle/gx/gx_internal.h
++++ b/runtime/src/hle/gx/gx_internal.h
+@@ -368,6 +368,8 @@ void MarkTexObjsDirtyForRange(uint32_t addr, uint32_t size);
+ // over their destination. This is the allocation-reuse generation boundary
+ // for copy textures; it must be called for every data-cache store/flush range.
+ void InvalidateEfbCopyDestinationsForRange(uint32_t addr, uint32_t size);
++// True once the game has used addr as a GXCopyTex destination (render-to-texture).
++bool GxWasCopyTexDestination(uint32_t addr);
+ GXTlutObj* CreateHostTlutObj(uint32_t addr);
+ void MarkHostTlutObjConstructed(uint32_t addr);
+ GXTlutObj* GetHostTlutObj(uint32_t addr);
 diff --git a/runtime/src/hle/gx/gx_stubs.cpp b/runtime/src/hle/gx/gx_stubs.cpp
 index 49be121..1f0e12f 100644
 --- a/runtime/src/hle/gx/gx_stubs.cpp
@@ -1015,6 +1111,129 @@ index 49be121..1f0e12f 100644
  }
  
  void DeliverDrawSyncToken(CpuContext* ctx, uint16_t token)
+diff --git a/runtime/src/hle/gx/gx_texture.cpp b/runtime/src/hle/gx/gx_texture.cpp
+index b644a42..855a153 100644
+--- a/runtime/src/hle/gx/gx_texture.cpp
++++ b/runtime/src/hle/gx/gx_texture.cpp
+@@ -1,5 +1,9 @@
+ ﻿// gx_texture.cpp - Texture Object and TLUT Functions
+ #include "gx_internal.h"
++#include "guest_abi/guest_region.h"
++#include <xxhash.h>
++#include <atomic>
++#include <unordered_map>
+ #include "runtime_log.h"
+ 
+ #include <algorithm>
+@@ -554,6 +558,7 @@ struct Scope {
+ } // namespace EtTexSnapshots
+ 
+ bool EtRaceRunningForGx();
++bool EbRaceRunningForGx();
+ extern "C" int g_gxFrameCount;
+ 
+ static void* TexDataHostPtr(uint32_t addr, uint32_t size) {
+@@ -750,7 +755,84 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+     }
+ }
+ 
++// Excitebots: notices when the game draws one of its "move the remote" prompts (the crash
++// "SHAKE!!!" remote and the bar "Push" remote, both 256x256 CMPR). The pad's A button only plays a
++// remote swing while one of them is on screen, so at other times A is turbo alone. Textures are
++// identified by the same XXH64 of the base level that names the replacement files; each address
++// is hashed once and checked again only when its first bytes change.
++// Excitebots screens recognised by a texture they draw (XXH64 of the CMPR base level, the hash
++// in the texture dump names): the swing prompts, during which the A button plays a remote swing,
++// and the Wii Remote / Wii Wheel choice, which input skips (eb_input.cpp).
++namespace EbScreenTextures {
++enum Kind : uint8_t { kNone, kSwing, kControllerType };
++std::mutex g_mutex;
++struct Seen {
++    uint64_t head = 0;
++    Kind kind = kNone;
++};
++std::unordered_map<uint32_t, Seen> g_seen;
++std::atomic<int> g_lastSwing{-1000};
++std::atomic<int> g_lastControllerType{-1000};
++
++Kind Classify(uint16_t w, uint16_t h, uint64_t hash) {
++    if (w == 256 && h == 256 &&
++        (hash == 0xf2965209f9cff340ull ||     // overlays.res shakecont.art ("SHAKE!!!")
++         hash == 0xddf1c663d39c4ad2ull)) {    // the bar's "Push" remote
++        return kSwing;
++    }
++    if (w == 256 && h == 128 && hash == 0xc8c6e66dee7d90ccull) {  // the remote and wheel pictures
++        return kControllerType;
++    }
++    return kNone;
++}
++
++void Note(uint32_t oa) {
++    TexObjMeta m;
++    {
++        std::lock_guard<std::mutex> guard(g_texObjMutex);
++        try {
++            if (!TryGetOrExtractTexObjMeta(oa, m)) return;
++        } catch (...) {
++            return;
++        }
++    }
++    if (m.width != 256 || (m.height != 256 && m.height != 128) || m.format != GX_TF_CMPR ||
++        m.dataAddr == 0) {
++        return;
++    }
++    const uint32_t bytes = uint32_t(m.width) * m.height / 2u; // CMPR base level
++    if (!Memory::Contains(m.dataAddr, bytes)) return;
++    const auto* data = static_cast<const uint8_t*>(GuestToHostPtr(m.dataAddr, bytes));
++    if (data == nullptr) return;
++    uint64_t head;
++    std::memcpy(&head, data, sizeof(head));
++    Kind kind;
++    {
++        std::lock_guard<std::mutex> lock(g_mutex);
++        Seen& seen = g_seen[m.dataAddr];
++        if (seen.head != head || head == 0) {
++            seen.head = head;
++            seen.kind = Classify(m.width, m.height, XXH64(data, bytes, 0));
++        }
++        kind = seen.kind;
++    }
++    if (kind == kSwing) g_lastSwing.store(g_gxFrameCount, std::memory_order_relaxed);
++    if (kind == kControllerType) g_lastControllerType.store(g_gxFrameCount, std::memory_order_relaxed);
++}
++} // namespace EbScreenTextures
++
++bool EbSwingPromptShown() {
++    return g_gxFrameCount - EbScreenTextures::g_lastSwing.load(std::memory_order_relaxed) <= 3;
++}
++
++bool EbControllerTypeScreenShown() {
++    return g_gxFrameCount - EbScreenTextures::g_lastControllerType.load(std::memory_order_relaxed) <= 3;
++}
++
+ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
++    if (::GuestRegion::IsExcitebots()) {
++        EbScreenTextures::Note(oa);
++    }
+     if (g_gxTraceFrame) {
+         TexObjMeta m; bool ok = false;
+         { std::lock_guard<std::mutex> guard(g_texObjMutex); try { ok = TryGetOrExtractTexObjMeta(oa, m); } catch (...) {} }
+@@ -765,11 +847,14 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+         }
+         uint32_t snapAddr = 0;
+         const void* snapPtr = nullptr;
+-        if (!EtRaceRunningForGx()) {
++        // Only outside races (menus play video); Excitebots has its own race state.
++        const bool racing = ::GuestRegion::IsExcitebots() ? EbRaceRunningForGx() : EtRaceRunningForGx();
++        if (!racing) {
+             try {
+                 std::lock_guard<std::mutex> guard(g_texObjMutex);
+                 TexObjMeta m;
+                 if (TryGetOrExtractTexObjMeta(oa, m) && m.needsUpload && m.dataAddr != 0 &&
++                    !GxWasCopyTexDestination(m.dataAddr) &&
+                     IsReasonableTextureDimensions(m.width, m.height) && IsAuroraLoadableTexFormat(m.format)) {
+                     const uint8_t maxLod = m.mipmap ? static_cast<uint8_t>(ComputeMaxMipLevel(m.width, m.height)) : 0u;
+                     const uint32_t size = GXGetTexBufferSize(m.width, m.height, m.format, (GXBool)m.mipmap, maxLod);
 diff --git a/runtime/src/hle/gx/gx_vertex.cpp b/runtime/src/hle/gx/gx_vertex.cpp
 index 285f1c5..368f1ac 100644
 --- a/runtime/src/hle/gx/gx_vertex.cpp
@@ -1045,11 +1264,60 @@ index 285f1c5..368f1ac 100644
          WriteDisplayListData((u8)(t|vf), 1);
          WriteDisplayListData((u16)nv, 2);
          return;
+diff --git a/runtime/src/hle/storage/nand_async.cpp b/runtime/src/hle/storage/nand_async.cpp
+index 2e11911..ca8d025 100644
+--- a/runtime/src/hle/storage/nand_async.cpp
++++ b/runtime/src/hle/storage/nand_async.cpp
+@@ -6,6 +6,7 @@
+ // Shared state and helpers live in nand_internal.h.
+ 
+ #include "nand_internal.h"
++#include "guest_abi/guest_region.h"
+ 
+ // Guest callback dispatch: host NAND work completes synchronously, so an "async" call just
+ // queues its guest completion callback here and an HLE pump dispatches it later.
+@@ -107,10 +108,18 @@ bool NandProcessPendingCallbacks(CpuContext* cpu, int maxToProcess) {
+ // because the C# translator regex-scans this file as raw text to decide which addresses to leave untranslated.
+ 
+ // Returns the synchronous result verbatim.
++// On the Wii an async call returns OK once the request is queued, and the result reaches the
++// guest only through the callback. Excitebots' save code depends on that: it accepts EXISTS from
++// NANDCreateAsync's callback, but treats any non-OK direct return as a fatal error ("An error
++// occurred while accessing Wii system memory"). Excite Truck keeps returning the result directly,
++// the behaviour it was tested with.
+ #define NAND_ASYNC_FWD_BODY(Name, Sync, params, sync_args)        \
+     extern "C" int32_t Name params {                              \
+         int32_t result = Sync sync_args;                          \
+         InvokeNandCallback(callbackPtr, result, commandBlockPtr); \
++        if (::GuestRegion::IsExcitebots() && callbackPtr != 0) {  \
++            return NAND_RESULT_OK;                                \
++        }                                                         \
+         return result;                                            \
+     }
+ 
+@@ -120,6 +129,9 @@ bool NandProcessPendingCallbacks(CpuContext* cpu, int maxToProcess) {
+     extern "C" int32_t Name params {                              \
+         int32_t result = Sync sync_args;                          \
+         InvokeNandCallback(callbackPtr, result, commandBlockPtr); \
++        if (::GuestRegion::IsExcitebots() && callbackPtr != 0) {  \
++            return NAND_RESULT_OK;                                \
++        }                                                         \
+         return (result < 0) ? result : NAND_RESULT_OK;            \
+     }
+ 
 diff --git a/runtime/src/hle/vi.cpp b/runtime/src/hle/vi.cpp
-index f5a91c1..85349f4 100644
+index f5a91c1..e86c907 100644
 --- a/runtime/src/hle/vi.cpp
 +++ b/runtime/src/hle/vi.cpp
-@@ -601,7 +601,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+@@ -17,6 +17,7 @@
+ #include <aurora/gfx.h>
+ #include "system_bridge.h"
+ #include "hle/excite_truck/et_achievements.h"
++void EbFrameTick(); // hle/excitebots/eb_input.cpp
+ #include <filesystem>
+ #include <sstream>
+ #include <cstdio>
+@@ -601,9 +602,12 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
          // cadence, and zero only happens when production outruns VI. "Kept up" means <=1 retrace
          // elapsed; 2+ means a boundary was missed, so Aurora seals that frame without its interpolated
          // slots (a windowed backstop lowers the slot target only under sustained overload).
@@ -1057,7 +1325,12 @@ index f5a91c1..85349f4 100644
 +        if (::GuestRegion::IsExciteTruck() || ::GuestRegion::IsExcitebots()) {
              EtAchievements::Tick();
          }
++        if (::GuestRegion::IsExcitebots()) {
++            EbFrameTick();
++        }
          // WC_MEMDUMP_REQ=<path>: creating <path> dumps MEM1/MEM2 to <path>_<n>.bin (testing only).
+         if (static const char* s_dumpReq = std::getenv("WC_MEMDUMP_REQ"); s_dumpReq) {
+             static uint32_t s_dumpCheck = 0, s_dumpIndex = 0;
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
 index 739db18..138c67d 100644
 --- a/runtime/src/main.cpp

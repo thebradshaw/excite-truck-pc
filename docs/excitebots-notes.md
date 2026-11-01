@@ -71,12 +71,21 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   vector. Results land in the player controller (pointer at 0x805785D0): +0x28 flick, +0x29 a
   flick up and to the side, +0x2A a hard drop along gravity, +0x30 shake. Crash recovery
   ("SHAKE!!!") and letting go of a bar ("Push") use the flick. Grabbing a bar is automatic.
-- A (pad), C or Space (keyboard) plays one swing per press: three reads with the acceleration
-  thrown against gravity at twice its strength. On the crash prompt the meter fills and the bot
+- Pad layout in a race: RT/RB accelerate (Wii 2), X and LT/LB brake (Wii 1), A turbo, B the Wii
+  A button (weapons), Y also Wii A, left stick steers and tilts. Menus: A OK, B or X back.
+- While the crash prompt or the bar prompt is on screen (spotted by its texture,
+  `EbScreenTextures` in gx_texture.cpp), A (pad), C or Space (keyboard) plays one swing per press
+  instead of turbo: three reads with the acceleration thrown against gravity at twice its strength. On the crash prompt the meter fills and the bot
   boosts out; on a bar it lets go. `WC_EB_AUTOSWING=N` swings every N reads for testing.
 - The remote pictures on the crash prompt (overlays.res `shakecont.art`) and the bar prompt
   ("Push") are replaced by the A button (`tools/prompts/make_eb_pack.py`, installed to
   `prompts/excitebots`; `[excitebots] xbox_prompts` or the F10 Controllers checkbox turns it off).
+- The round button icons shared with Excite Truck (common.res: Wii 1, 2, A, +, -) are redrawn as
+  B, A, B, Menu and View.
+- The Wii Remote / Wii Wheel choice (new profile, Options) is confirmed automatically after
+  about a quarter second, recognised by its picture texture (256x128 CMPR c8c6e66dee7d90cc).
+- The three screens before the title (strap, ESRB, hold) are skipped: the boot step at
+  `0x805A47F0` is set to 11 (done) each frame until the game reaches it (`EbFrameTick`).
 - `-direct_to_track:@mitch5_bar_challenge` (the yellow bar minigame) reaches a bar in about
   40 seconds. Other contests: `@Silver_Finland`, `@Platinum_Fiji`, `@School_Fiji` (yellow bars),
   `@School_Mexico` (red bars). The names come from the `*_eves.val` tables in the res packs.
@@ -92,6 +101,15 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   (saved) and + 0x68 + 4c (this session), 19 categories in the order of the table at 0x804A0BC8.
   The tallies only move in normal races, not in `-direct_to_track` ones, so they are checked
   against the code but not yet in play.
+
+## Rendering and saves
+
+- Excite Truck's fix for the menu videos copies textures to fresh memory at each load outside
+  races. Excitebots reads its own race state for that, and render-to-texture targets (GXCopyTex
+  destinations) are never copied, which caused flickering scenery and white bots.
+- Async NAND calls return OK and report the result through the callback, as on the Wii (for
+  Excitebots only). The save code accepts EXISTS from the callback but treated a direct EXISTS as
+  "An error occurred while accessing Wii system memory" on the second save of a new profile.
 
 ## Developer options
 
@@ -119,5 +137,5 @@ Set them with `WC_EB_ARGS`.
 - Races load and draw (`WC_EB_ARGS=-direct_to_track:China`), with the HUD in 16:9.
 - Xbox layout in races and menus; A swings (checked on crash recovery and on bars).
 - Shader list recorded; local achievements in place.
-- Next: the rest of the Wii prompts (menus, "Press A to Reset" already reads A), play through a
-  normal race to see an achievement unlock.
+- Next: a stick prompt for the bar spin, the tutorial cards (Wii Remote pictures and text), play
+  through a normal race to see an achievement unlock.
