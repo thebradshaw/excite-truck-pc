@@ -21,6 +21,9 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 DISC="${1:-}"
 OUT="${OUT:-$REPO/Excitebots}"
+# Shaders recorded from play, all compiled on the startup screen so races never stutter.
+SEED_CACHE="$REPO/assets/shaders/excitebots/initial_pipeline_cache.db"
+[ -f "$SEED_CACHE" ] || SEED_CACHE=NONE
 WORK="${WORK:-$REPO/build/work-excitebots}"
 JOBS="${JOBS:-$(nproc)}"
 
@@ -142,7 +145,7 @@ step "Configuring" 34
 # shellcheck disable=SC2086
 cmake -S runtime -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DAURORA_SDL3_PROVIDER=vendor \
-    -DMKW_INITIAL_PIPELINE_CACHE=NONE \
+    -DMKW_INITIAL_PIPELINE_CACHE="$SEED_CACHE" \
     -DMKW_TRANSLATED_COMPILE_JOBS="$JOBS" ${ET_CMAKE_ARGS:-} >/dev/null
 step "Compiling (this is the long part: 20 to 60 minutes)" "40 97"
 cmake --build build-linux --target WiiCompiled --parallel "$JOBS"

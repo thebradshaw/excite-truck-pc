@@ -5,8 +5,9 @@ Excite Truck's (make_pack.py: plain shapes and the Inter typeface, no game artwo
 Each file replaces one texture of the US disc (RX3E01) and is named the way aurora's
 Dolphin-style texture replacement expects: tex1_<w>x<h>_<xxh64>_<fmt>.png.
 
-So far it replaces the crash prompt's shaking Wii Remote ("SHAKE!!!", overlays.res
-shakecont.art) with the A button, since A plays a remote swing on the pad.
+It replaces the Wii Remote pictures that ask for a motion with the A button, since A plays a
+remote swing on the pad: the crash prompt's shaking remote ("SHAKE!!!") and the bar prompt's
+pushed remote ("Push", grab and release a bar).
 
 Usage: make_eb_pack.py <out dir> [scale]     (default scale 2: the texture is already 256x256)
 """
@@ -32,6 +33,14 @@ def build(scale):
     top = circle_mask(256, 256, scale, 131 - r, 52.5 - r, 131 + r, 52.5 + r)
     bottom = circle_mask(256, 256, scale, 131 - r, 192.5 - r, 131 + r, 192.5 + r)
     out["tex1_256x256_6f12f80be63edc3c_0.png"] = Image.composite(top, bottom, top.getchannel("A"))
+
+    # The bar prompt ("Push"): a 256x256 colour texture of one remote seen side on, cut out by an
+    # I4 mask whose silhouette spans x 9-245, y 10-75. The A button goes in its middle.
+    cx, cy = 127.5, 43
+    c = Canvas(256, 256, scale, (0, 0, 0, 255))
+    c.face(cx - r, cy - r, cx + r, cy + r, "A")
+    out["tex1_256x256_ddf1c663d39c4ad2_14.png"] = c.result()
+    out["tex1_256x256_aa8407612f74e6ba_0.png"] = circle_mask(256, 256, scale, cx - r, cy - r, cx + r, cy + r)
     return out
 
 

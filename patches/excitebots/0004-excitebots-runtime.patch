@@ -121,6 +121,118 @@ index baed2d3..d5eaefd 100644
  inline int64_t EtDefaultsVersion() {
      return Get().etDefaultsVersion.value_or(0);
  }
+diff --git a/runtime/src/hle/excite_truck/et_achievements.cpp b/runtime/src/hle/excite_truck/et_achievements.cpp
+index e4edc70..0f5450e 100644
+--- a/runtime/src/hle/excite_truck/et_achievements.cpp
++++ b/runtime/src/hle/excite_truck/et_achievements.cpp
+@@ -18,6 +18,7 @@
+ #include <fstream>
+ #include <map>
+ #include <mutex>
++#include <span>
+ #include <sstream>
+ #include <string>
+ #include <vector>
+@@ -33,6 +34,15 @@ struct Definition {
+ };
+ 
+ #include "et_achievement_list.inc"
++#include "../excitebots/eb_achievement_list.inc"
++
++// The list for the running game.
++std::span<const Definition> Defs() {
++    if (::GuestRegion::IsExcitebots()) {
++        return kEbDefinitions;
++    }
++    return kDefinitions;
++}
+ 
+ struct Toast {
+     const Definition* def;
+@@ -82,11 +92,12 @@ void WriteAtomically(const std::filesystem::path& path, const std::string& text)
+ void WriteDefinitions() {
+     std::ostringstream out;
+     out << "[\n";
+-    for (size_t i = 0; i < kDefinitions.size(); ++i) {
+-        const auto& d = kDefinitions[i];
++    const auto defs = Defs();
++    for (size_t i = 0; i < defs.size(); ++i) {
++        const auto& d = defs[i];
+         out << "  {\"id\": \"" << JsonEscape(d.id) << "\", \"title\": \"" << JsonEscape(d.title)
+             << "\", \"description\": \"" << JsonEscape(d.description) << "\", \"points\": " << d.points << "}"
+-            << (i + 1 < kDefinitions.size() ? ",\n" : "\n");
++            << (i + 1 < defs.size() ? ",\n" : "\n");
+     }
+     out << "]\n";
+     WriteAtomically(Directory() / "definitions.json", out.str());
+@@ -149,7 +160,7 @@ std::string NowIso8601() {
+ }
+ 
+ const Definition* Find(const char* id) {
+-    for (const auto& d : kDefinitions) {
++    for (const auto& d : Defs()) {
+         if (std::string_view(d.id) == id) {
+             return &d;
+         }
+@@ -173,12 +184,13 @@ void Unlock(const char* id) {
+ }
+ 
+ #include "et_achievement_rules.inc"
++#include "../excitebots/eb_achievement_rules.inc"
+ 
+ } // namespace
+ 
+ void Init() noexcept {
+     std::lock_guard lock(g_mutex);
+-    if (g_initialized || ::GuestRegion::Current() != ::GuestRegion::Id::ExciteTruck) {
++    if (g_initialized || !(::GuestRegion::IsExciteTruck() || ::GuestRegion::IsExcitebots())) {
+         return;
+     }
+     g_initialized = true;
+@@ -193,7 +205,11 @@ void Tick() noexcept {
+             return;
+         }
+     }
+-    EvaluateRules();
++    if (::GuestRegion::IsExcitebots()) {
++        eb::EvaluateRules();
++    } else {
++        EvaluateRules();
++    }
+ }
+ 
+ void DrawToasts() noexcept {
+@@ -232,15 +248,15 @@ void DrawMenu() noexcept {
+     std::lock_guard lock(g_mutex);
+     int points = 0;
+     int total = 0;
+-    for (const auto& d : kDefinitions) {
++    for (const auto& d : Defs()) {
+         total += d.points;
+         if (g_unlocked.count(d.id) != 0) {
+             points += d.points;
+         }
+     }
+-    ImGui::Text("%zu of %zu unlocked, %d of %d points", g_unlocked.size(), kDefinitions.size(), points, total);
++    ImGui::Text("%zu of %zu unlocked, %d of %d points", g_unlocked.size(), Defs().size(), points, total);
+     ImGui::Separator();
+-    for (const auto& d : kDefinitions) {
++    for (const auto& d : Defs()) {
+         const auto it = g_unlocked.find(d.id);
+         if (it != g_unlocked.end()) {
+             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", d.title);
+diff --git a/runtime/src/hle/excite_truck/et_achievements.h b/runtime/src/hle/excite_truck/et_achievements.h
+index 3e0fe9b..744957b 100644
+--- a/runtime/src/hle/excite_truck/et_achievements.h
++++ b/runtime/src/hle/excite_truck/et_achievements.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-// Local achievements for Excite Truck. Unlocks are kept on this PC only, in
++// Local achievements for Excite Truck and Excitebots (each game has its own list). Unlocks are kept on this PC only, in
+ // <user data>/achievements/unlocks.json; the game also writes the full list to
+ // <user data>/achievements/definitions.json so the launcher can show it.
+ namespace EtAchievements {
 diff --git a/runtime/src/hle/excite_truck/et_prompts.cpp b/runtime/src/hle/excite_truck/et_prompts.cpp
 index c35cfa6..7c3c52d 100644
 --- a/runtime/src/hle/excite_truck/et_prompts.cpp
@@ -144,6 +256,112 @@ index c35cfa6..7c3c52d 100644
      std::error_code ec;
      if (!std::filesystem::is_directory(root, ec)) {
          RT_LOG(RT_TAG_RUNTIME) << "Xbox button prompts: " << root.string() << " is missing, keeping the Wii prompts"
+diff --git a/runtime/src/hle/excitebots/eb_achievement_list.inc b/runtime/src/hle/excitebots/eb_achievement_list.inc
+new file mode 100644
+index 0000000..76c6331
+--- /dev/null
++++ b/runtime/src/hle/excitebots/eb_achievement_list.inc
+@@ -0,0 +1,26 @@
++// Excitebots achievement list. Ids are stable: never rename one, the unlock file keys on it.
++constexpr std::array<Definition, 23> kEbDefinitions{{
++    {"air", "Hang Time", "Pull off an air stunt.", 5},
++    {"air_100", "Frequent Flyer", "Pull off 100 air stunts.", 25},
++    {"drift", "Sideways", "Drift through a corner.", 5},
++    {"drift_100", "Drift King", "Drift 100 times.", 25},
++    {"tree_run", "Tree Runner", "Weave through a row of trees.", 10},
++    {"spin_360", "Spin Cycle", "Land a 360.", 10},
++    {"car_throw", "Heave-Ho", "Throw a rival bot.", 10},
++    {"jump_combo", "Hop Scotch", "Chain jumps into a combo.", 10},
++    {"car_smash", "Demolition Derby", "Smash a rival bot.", 10},
++    {"tokens_100", "Token Hoarder", "Collect 100 tokens.", 15},
++    {"hammer", "Hammer Time", "Flatten a rival with the hammer.", 10},
++    {"bomb", "Bombs Away", "Hit a rival with a bomb.", 10},
++    {"chomp", "Chomp", "Take a bite out of a rival.", 10},
++    {"walk_smash", "Stomper", "Stomp a rival on foot.", 10},
++    {"lumberjack", "Lumberjack", "Knock down a tree.", 10},
++    {"rings", "Ring Leader", "Fly through a ring.", 10},
++    {"yellow_bar", "Monkey Bars", "Swing around a yellow bar.", 10},
++    {"red_bar", "Red Alert", "Swing around a red bar.", 15},
++    {"back_flip", "Head Over Heels", "Land a backflip.", 10},
++    {"sandwich", "Bot Sandwich", "Squash a rival between two bots.", 15},
++    {"victory", "Victory Lap", "Win a race.", 10},
++    {"victory_10", "Champion", "Win 10 races.", 25},
++    {"trick_master", "Trick Master", "Earn every stunt achievement from Hang Time to Bot Sandwich.", 50},
++}};
+diff --git a/runtime/src/hle/excitebots/eb_achievement_rules.inc b/runtime/src/hle/excitebots/eb_achievement_rules.inc
+new file mode 100644
+index 0000000..1411313
+--- /dev/null
++++ b/runtime/src/hle/excitebots/eb_achievement_rules.inc
+@@ -0,0 +1,68 @@
++// Game state read by the rules (Excitebots RX3E01).
++// The game keeps its own stunt tallies for its in-game Achievements screen (achievements.val):
++// *(0x805A1A0C) (r13-0x65D4) points at a block holding, for each of its 19 categories, the
++// count saved on the Wii (+0x1C + 4*c) and the count earned since boot (+0x68 + 4*c). The
++// category order is fixed by the table at 0x804A0BC8 (air, drift, tree_run, 360, car_throw,
++// jump_combo, car_smash, token, hammer, bomb, chomp, walk_smash, lumberjack, rings, yellow_bar,
++// red_bar, back_flip, sandwich, victory1). The function that adds to them is 0x8001C810; its
++// callers (0x80193xxx) also require the player state at +0x1F0 to be 0x50, which the
++// -direct_to_track developer races never reach (they sit at 0x51), so test in a normal race.
++namespace eb {
++constexpr uint32_t kTallyPointer = 0x805A1A0C;
++constexpr int kCategories = 19;
++
++struct Rule {
++    const char* id;
++    int category;
++    int count;
++};
++constexpr Rule kRules[] = {
++    {"air", 0, 1},         {"air_100", 0, 100},  {"drift", 1, 1},       {"drift_100", 1, 100},
++    {"tree_run", 2, 1},    {"spin_360", 3, 1},   {"car_throw", 4, 1},   {"jump_combo", 5, 1},
++    {"car_smash", 6, 1},   {"tokens_100", 7, 100}, {"hammer", 8, 1},    {"bomb", 9, 1},
++    {"chomp", 10, 1},      {"walk_smash", 11, 1}, {"lumberjack", 12, 1}, {"rings", 13, 1},
++    {"yellow_bar", 14, 1}, {"red_bar", 15, 1},   {"back_flip", 16, 1},  {"sandwich", 17, 1},
++    {"victory", 18, 1},    {"victory_10", 18, 10},
++};
++
++int g_frames = 0;
++int g_last[kCategories] = {};
++
++void EvaluateRules() {
++    if (++g_frames % 15 != 0) {
++        return;
++    }
++    const uint32_t block = Memory::Read32(kTallyPointer);
++    if (block < 0x80000000u || block >= 0x817FFF00u || (block & 3) != 0) {
++        return;
++    }
++    int totals[kCategories];
++    for (int c = 0; c < kCategories; ++c) {
++        const int saved = static_cast<int32_t>(Memory::Read32(block + 0x1C + 4 * c));
++        const int session = static_cast<int32_t>(Memory::Read32(block + 0x68 + 4 * c));
++        if (saved < 0 || session < 0 || saved > 10000000 || session > 10000000) {
++            return; // not the tally block (yet)
++        }
++        totals[c] = saved + session;
++    }
++    static const bool trace = std::getenv("WC_EB_TRACE_ACH") != nullptr;
++    for (int c = 0; c < kCategories; ++c) {
++        if (trace && totals[c] != g_last[c]) {
++            std::fprintf(stderr, "[achievements] category %d: %d\n", c, totals[c]);
++        }
++        g_last[c] = totals[c];
++    }
++    for (const Rule& r : kRules) {
++        if (totals[r.category] >= r.count) {
++            Unlock(r.id);
++        }
++    }
++    bool every = true;
++    for (int c = 0; c <= 17; ++c) {
++        every = every && totals[c] >= 1;
++    }
++    if (every) {
++        Unlock("trick_master");
++    }
++}
++} // namespace eb
 diff --git a/runtime/src/hle/excitebots/eb_hooks.cpp b/runtime/src/hle/excitebots/eb_hooks.cpp
 new file mode 100644
 index 0000000..2aa8ac2
@@ -299,7 +517,7 @@ index 0000000..2aa8ac2
 +    (pathPtr, perm, attr, callbackPtr, commandBlockPtr));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..e4996cf
+index 0000000..834ff40
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
 @@ -0,0 +1,373 @@
@@ -402,7 +620,7 @@ index 0000000..e4996cf
 +    uint32_t hold = 0;
 +    float steer = 0.0f; // -1 left .. +1 right
 +    float pitch = 0.0f; // -1 nose down .. +1 nose up
-+    bool swing = false; // this read is part of a swing
++    int swing = -1; // which read of a swing this is, or -1
 +};
 +
 +uint32_t StickAsDpad(SDL_Gamepad* pad)
@@ -459,9 +677,9 @@ index 0000000..e4996cf
 +// Swings. Excitebots reads remote motion through its own detector (0x801E3D50): it keeps a slow
 +// average of the gravity vector and reports a "flick" when the measured acceleration points
 +// against that average, and a "shake" strength from how fast it changes. Crash recovery
-+// ("SHAKE!!!") and bar swings are driven by these. A virtual remote never moves, so each press
-+// of the swing button plays a short swing instead: a few reads with the acceleration thrown
-+// hard against gravity, then back to rest.
++// ("SHAKE!!!") and letting go of a bar ("Push") are driven by these; grabbing a bar is
++// automatic. A virtual remote never moves, so each press of the swing button plays a short swing
++// instead: a few reads with the acceleration thrown hard against gravity, then back to rest.
 +constexpr int kSwingReads = 3;
 +int g_swingReadsLeft = 0;
 +
@@ -541,8 +759,8 @@ index 0000000..e4996cf
 +    if (swingButton && !swingWasDown) g_swingReadsLeft = kSwingReads;
 +    swingWasDown = swingButton;
 +    if (g_swingReadsLeft > 0) {
++        in.swing = kSwingReads - g_swingReadsLeft;
 +        --g_swingReadsLeft;
-+        in.swing = true;
 +    }
 +    return in;
 +}
@@ -652,7 +870,7 @@ index 0000000..e4996cf
 +
 +    float ax = 0.0f, ay = -1.0f, az = 0.0f;
 +    AccelFor(in, ax, ay, az);
-+    if (in.swing) {
++    if (in.swing >= 0) {
 +        // Thrown against gravity, about twice as hard as gravity itself.
 +        ax *= -2.0f;
 +        ay *= -2.0f;
@@ -827,6 +1045,19 @@ index 285f1c5..368f1ac 100644
          WriteDisplayListData((u8)(t|vf), 1);
          WriteDisplayListData((u16)nv, 2);
          return;
+diff --git a/runtime/src/hle/vi.cpp b/runtime/src/hle/vi.cpp
+index f5a91c1..85349f4 100644
+--- a/runtime/src/hle/vi.cpp
++++ b/runtime/src/hle/vi.cpp
+@@ -601,7 +601,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+         // cadence, and zero only happens when production outruns VI. "Kept up" means <=1 retrace
+         // elapsed; 2+ means a boundary was missed, so Aurora seals that frame without its interpolated
+         // slots (a windowed backstop lowers the slot target only under sustained overload).
+-        if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
++        if (::GuestRegion::IsExciteTruck() || ::GuestRegion::IsExcitebots()) {
+             EtAchievements::Tick();
+         }
+         // WC_MEMDUMP_REQ=<path>: creating <path> dumps MEM1/MEM2 to <path>_<n>.bin (testing only).
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
 index 739db18..138c67d 100644
 --- a/runtime/src/main.cpp
@@ -862,7 +1093,7 @@ index 739db18..138c67d 100644
          if (BootRace::Requested()) {
              aurora_set_skip_unready_pipelines(false);
 diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
-index 6cbd761..f116cd0 100644
+index 6cbd761..f9c1872 100644
 --- a/runtime/src/settings_overlay.cpp
 +++ b/runtime/src/settings_overlay.cpp
 @@ -980,6 +980,19 @@ void DrawControllerSettings() {
@@ -885,6 +1116,24 @@ index 6cbd761..f116cd0 100644
      }
      for (uint32_t port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
          DrawPlayerRow(port);
+@@ -1505,7 +1518,7 @@ void DrawTopBar() {
+         ImGui::EndMenu();
+     }
+ 
+-    if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
++    if (::GuestRegion::IsExciteTruck() || ::GuestRegion::IsExcitebots()) {
+         ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f), ImVec2(FLT_MAX, viewport->Size.y * 0.75f));
+         if (ImGui::BeginMenu("Achievements")) {
+             EtAchievements::DrawMenu();
+@@ -1711,7 +1724,7 @@ void Draw() noexcept {
+         DrawShaderCompilationStatus();
+     }
+     DrawFpsOverlay();
+-    if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
++    if (::GuestRegion::IsExciteTruck() || ::GuestRegion::IsExcitebots()) {
+         EtAchievements::DrawToasts();
+     }
+     DrawTopBar();
 diff --git a/runtime/src/system_bridge.cpp b/runtime/src/system_bridge.cpp
 index ad826d4..02751b3 100644
 --- a/runtime/src/system_bridge.cpp

@@ -48,7 +48,7 @@ $Repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 # Setup mode: the launcher's setup\bots folder ships the patched files (payload\overlay) instead of a checkout.
 $Payload = Join-Path $PSScriptRoot 'payload'
 $SetupMode = Test-Path -LiteralPath (Join-Path $Payload 'overlay') -PathType Container
-# Shaders recorded from play, compiled at startup (none recorded for Excitebots yet: then NONE).
+# Shaders recorded from play, all compiled on the startup screen so races never stutter.
 $SeedCache = if ($SetupMode) { Join-Path $Payload 'initial_pipeline_cache.db' } else { Join-Path $Repo 'assets\shaders\excitebots\initial_pipeline_cache.db' }
 if (-not $Out) { $Out = Join-Path $Repo 'Excitebots' }
 # Its own work folder: Excite Truck's (C:\ETBuild) holds a differently patched WiiCompiled.

@@ -67,14 +67,31 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
 - The game's input layer (`rjoy`, 0x803F1450) turns each KPADStatus into a joystick record:
   steering at +4, pitch at +8 and a gravity vector at +0x58..+0x60. A motion detector
   (0x801E3D50) keeps a slow average of that vector and reports a flick when the acceleration points
-  against it, plus a shake strength from how fast it changes. Crash recovery ("SHAKE!!!") reads
-  these, and so do the bars (`controller_swing` in a bar's `hookbar_params`).
+  against it, plus a shake strength from how fast it changes. It only looks at the y and z of the
+  vector. Results land in the player controller (pointer at 0x805785D0): +0x28 flick, +0x29 a
+  flick up and to the side, +0x2A a hard drop along gravity, +0x30 shake. Crash recovery
+  ("SHAKE!!!") and letting go of a bar ("Push") use the flick. Grabbing a bar is automatic.
 - A (pad), C or Space (keyboard) plays one swing per press: three reads with the acceleration
   thrown against gravity at twice its strength. On the crash prompt the meter fills and the bot
-  boosts out. `WC_EB_AUTOSWING=N` swings every N reads for testing.
-- The crash prompt's shaking remote (overlays.res `shakecont.art`) is replaced by the A button
-  (`tools/prompts/make_eb_pack.py`, installed to `prompts/excitebots`; `[excitebots] xbox_prompts`
-  or the F10 Controllers checkbox turns it off).
+  boosts out; on a bar it lets go. `WC_EB_AUTOSWING=N` swings every N reads for testing.
+- The remote pictures on the crash prompt (overlays.res `shakecont.art`) and the bar prompt
+  ("Push") are replaced by the A button (`tools/prompts/make_eb_pack.py`, installed to
+  `prompts/excitebots`; `[excitebots] xbox_prompts` or the F10 Controllers checkbox turns it off).
+- `-direct_to_track:@mitch5_bar_challenge` (the yellow bar minigame) reaches a bar in about
+  40 seconds. Other contests: `@Silver_Finland`, `@Platinum_Fiji`, `@School_Fiji` (yellow bars),
+  `@School_Mexico` (red bars). The names come from the `*_eves.val` tables in the res packs.
+
+## Shaders and achievements
+
+- `assets/shaders/excitebots/initial_pipeline_cache.db` holds the 591 shaders seen in menus and
+  races (Fiji, Finland). The build compiles them on the startup screen. Export more with
+  `scripts/export-shaders.sh <UserData/Cache/pipeline_cache.db>` and copy the result there.
+- Local achievements (23, `runtime/src/hle/excitebots/eb_achievement_*.inc`) share Excite Truck's
+  module and files (`UserData/achievements`, F10 Achievements, pop-ups). They read the game's own
+  stunt tallies, the ones behind its in-game Achievements screen: `*(0x805A1A0C)` + 0x1C + 4c
+  (saved) and + 0x68 + 4c (this session), 19 categories in the order of the table at 0x804A0BC8.
+  The tallies only move in normal races, not in `-direct_to_track` ones, so they are checked
+  against the code but not yet in play.
 
 ## Developer options
 
@@ -100,5 +117,7 @@ Set them with `WC_EB_ARGS`.
 - Boots to "Press 2 to Start" at about 59 fps (container, software renderer), 16:9, creates its
   save file and reaches the profile screen.
 - Races load and draw (`WC_EB_ARGS=-direct_to_track:China`), with the HUD in 16:9.
-- Xbox layout in races and menus; A swings (checked on crash recovery).
-- Next: check a bar swing in play, the rest of the Wii prompts, shader list, achievements.
+- Xbox layout in races and menus; A swings (checked on crash recovery and on bars).
+- Shader list recorded; local achievements in place.
+- Next: the rest of the Wii prompts (menus, "Press A to Reset" already reads A), play through a
+  normal race to see an achievement unlock.
