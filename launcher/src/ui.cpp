@@ -16,8 +16,12 @@
 #include "imgui_internal.h"
 
 #include "achievements.h"
+#include "banner.h"
+#include "games.h"
 #include "launcher_config.h"
 #include "scene.h"
+#include "setup_job.h"
+#include "vehicles.h"
 
 extern const unsigned char et_font_barlow_regular[];
 extern const unsigned int et_font_barlow_regular_size;
@@ -54,8 +58,19 @@ float g_scale = 1.0f;
 float S(float v) { return v * g_scale; }
 
 SDL_Window* g_window = nullptr;
-ImTextureID g_logo = 0;
-ImVec2 g_logoSize;
+SDL_Renderer* g_renderer = nullptr;
+// Each game's logo from its disc (an SDL texture), once the game is installed.
+struct Logo {
+    SDL_Texture* texture = nullptr;
+    ImVec2 size;
+};
+Logo g_logos[kGameCount];
+Logo g_silhouettes[kGameCount];   // traced from the disc's banner art, or drawn (vehicles.cpp)
+
+// Home (choose a game, set games up) or one game's own menu and pages.
+enum class Screen { Home, Game };
+Screen g_screen = Screen::Home;
+GameId g_game = GameId::Truck;
 LauncherSettings g_settings;
 
 enum class Page { Settings, Controls, Music, Mods, Achievements };
@@ -70,7 +85,8 @@ ImGuiID g_helpItem = 0;
 
 // Controller and keyboard focus. Every focusable thing registers itself while it is drawn, with
 // its region (menu or page), row and column; moves are worked out from last frame's list.
-enum Region { kMenuRegion = 0, kPageRegion = 1 };
+// Home: one region per game card, and one for the row under them.
+enum Region { kMenuRegion = 0, kPageRegion = 1, kCardRegion = 2, kHomeBottomRegion = 2 + kGameCount };
 enum class NavCmd { Up, Down, Left, Right, Accept, Back };
 struct NavItem {
     ImGuiID id;
@@ -88,6 +104,7 @@ bool g_scrollToFocus = false;
 bool g_enterPage = false;        // after opening a page with A, put the cursor on it
 bool g_resetPageScroll = false;
 ImGuiID g_menuIds[8] = {};
+void GoHome();
 bool IsPageMenuItem(size_t index);
 Page MenuPage(size_t index);
 
@@ -178,14 +195,48 @@ void FocusPage() {
     }
 }
 
+// The distinct rows of a region, top to bottom.
+std::vector<int> RegionRows(int region) {
+    std::vector<int> rows;
+    for (const NavItem& item : g_navLast) {
+        if (item.region == region && (rows.empty() || rows.back() != item.row)) rows.push_back(item.row);
+    }
+    return rows;
+}
+
+// Moves the cursor into another region, onto its row at the same position (or its last one).
+bool FocusRegion(int region, int rank) {
+    const std::vector<int> rows = RegionRows(region);
+    if (rows.empty()) return false;
+    g_focus = RowEntry(region, rows[size_t(std::clamp(rank, 0, int(rows.size()) - 1))], 0);
+    g_scrollToFocus = true;
+    return true;
+}
+
+ImGuiID FirstItem() {
+    for (const NavItem& item : g_navLast) {
+        if (g_screen == Screen::Game ? item.region == kMenuRegion : item.region != kMenuRegion) return item.id;
+    }
+    return 0;
+}
+
+int g_lastCard = kCardRegion;   // the game card the cursor was last on
+
 void Nav(NavCmd cmd) {
     const NavItem* cur = nullptr;
     for (const NavItem& item : g_navLast) {
         if (item.id == g_focus) cur = &item;
     }
     if (cur == nullptr) {
-        g_focus = g_menuIds[0];
+        g_focus = g_screen == Screen::Game ? g_menuIds[0] : FirstItem();
         return;
+    }
+    const bool onCard = cur->region >= kCardRegion && cur->region < kCardRegion + kGameCount;
+    if (onCard) g_lastCard = cur->region;
+    int rank = 0;
+    {
+        const std::vector<int> rows = RegionRows(cur->region);
+        rank = int(std::find(rows.begin(), rows.end(), cur->row) - rows.begin());
     }
     auto exists = [&](int region, int row) {
         return std::any_of(g_navLast.begin(), g_navLast.end(),
@@ -204,6 +255,10 @@ void Nav(NavCmd cmd) {
             if (exists(cur->region, row)) {
                 g_focus = RowEntry(cur->region, row, cur->col);
                 g_scrollToFocus = true;
+            } else if (onCard && cmd == NavCmd::Down) {
+                FocusRegion(kHomeBottomRegion, 0);
+            } else if (cur->region == kHomeBottomRegion && cmd == NavCmd::Up) {
+                FocusRegion(g_lastCard, 99);
             }
             break;
         }
@@ -214,6 +269,8 @@ void Nav(NavCmd cmd) {
                 g_focus = id;
             } else if (cur->region == kPageRegion) {
                 FocusMenu();
+            } else if (onCard && cur->region > kCardRegion) {
+                FocusRegion(cur->region - 1, rank);
             }
             break;
         case NavCmd::Right:
@@ -223,13 +280,19 @@ void Nav(NavCmd cmd) {
                 g_focus = id;
             } else if (cur->region == kMenuRegion) {
                 FocusPage();
+            } else if (onCard && cur->region + 1 < kCardRegion + kGameCount) {
+                FocusRegion(cur->region + 1, rank);
             }
             break;
         case NavCmd::Accept:
             g_activate = g_focus;
             break;
         case NavCmd::Back:
-            if (cur->region == kPageRegion) FocusMenu();
+            if (cur->region == kPageRegion) {
+                FocusMenu();
+            } else if (cur->region == kMenuRegion) {
+                GoHome();
+            }
             break;
     }
 }
@@ -575,9 +638,10 @@ void SettingsPage() {
     {
         int index = g_settings.frameRate >= 180 ? 2 : g_settings.frameRate >= 120 ? 1 : 0;
         if (ChoiceRow("Frame Rate",
-                "60 is the game's own speed. 120 and 180 draw smooth in-between frames; the game itself still "
-                "runs at its normal speed. Use them with a 120 Hz or faster screen and VSync on.",
-                {"60", "120", "180"}, index)) {
+                "Experimental. 60 is the game's own speed. 120 and 180 draw smooth in-between frames; the game "
+                "itself still runs at its normal speed. They need a fast PC (a handheld like the ROG Ally reaches "
+                "about 90) and a 120 Hz or faster screen with VSync on.",
+                {"60", "120", "180"}, index, true, "EXPERIMENTAL")) {
             static const unsigned rates[] = {0, 120, 180};
             g_settings.frameRate = rates[index];
             cfg::SetFrameRate(g_settings.frameRate);
@@ -592,8 +656,8 @@ void SettingsPage() {
         cfg::SetShowFps(g_settings.showFps);
     }
 
-    Heading("VIEW");
-    {
+    if (g_game == GameId::Truck) {
+        Heading("VIEW");
         static const float values[] = {1.0f, 1.5f, 2.0f, 3.0f};
         int index = 0;
         for (int i = 0; i < 4; ++i) {
@@ -659,7 +723,40 @@ void ControlLine(const char* label, ImU32 color, bool pill, const char* action, 
     ImGui::Dummy(ImVec2(0, rowH));
 }
 
+void BotsControlsPage() {
+    Heading("XBOX CONTROLLER");
+    ImGui::Indent(S(8));
+    ControlLine("RT", 0, true, "Accelerate", "RB");
+    ControlLine("X", IM_COL32(80, 150, 255, 255), false, "Brake", "LT");
+    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Turbo; swing when SHAKE!!! or Push shows");
+    ControlLine("B", IM_COL32(240, 80, 70, 255), false, "Use your weapon");
+    ControlLine("Y", IM_COL32(240, 200, 60, 255), false, "The Wii Remote's A button");
+    ControlLine("LS", 0, true, "Steer, and tilt in the air");
+    ControlLine("MENU", 0, true, "Pause");
+    ControlLine("GUIDE", 0, true, "Quit the game (A to quit, B to stay)");
+    ImGui::Unindent(S(8));
+    Heading("MENUS");
+    ImGui::Indent(S(8));
+    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "OK");
+    ControlLine("B", IM_COL32(240, 80, 70, 255), false, "Back");
+    ImGui::Unindent(S(8));
+    Heading("OPTIONS");
+    if (ToggleRow("Vibration", "Rumble on your controller when you land, crash and boost.", g_settings.rumble)) {
+        cfg::SetRumble(g_settings.rumble);
+    }
+    ImGui::Dummy(ImVec2(0, S(4)));
+    ImGui::Indent(S(8));
+    Paragraph("Your bot grabs bars by itself. Hold A to spin on a bar or to shake in the dentures. The game "
+              "shows the Xbox button for each action. To change which "
+              "button does what, press F10 in the game and open Controllers.");
+    ImGui::Unindent(S(8));
+}
+
 void ControlsPage() {
+    if (g_game == GameId::Bots) {
+        BotsControlsPage();
+        return;
+    }
     Heading("XBOX CONTROLLER");
     ImGui::Indent(S(8));
     ControlLine("RT", 0, true, "Drive", "RB");
@@ -916,29 +1013,18 @@ void AchievementsPage() {
 
 // --- Left column --------------------------------------------------------------------------------
 
-// A small red "PC" tag; (right, top) is its top-right corner.
-void PcTag(ImDrawList* draw, float right, float top, float height) {
-    const ImVec2 text = F.label->CalcTextSizeA(height, FLT_MAX, 0.0f, "PC");
-    const ImVec2 t1(right, top + height * 1.1f);
-    const ImVec2 t0(t1.x - text.x - height * 0.7f, top);
-    draw->AddRectFilled(ImVec2(t0.x + height * 0.08f, t0.y + height * 0.1f), ImVec2(t1.x + height * 0.08f, t1.y + height * 0.1f),
-                        IM_COL32(20, 8, 4, 120), height * 0.25f);
-    draw->AddRectFilled(t0, t1, IM_COL32(220, 40, 30, 255), height * 0.25f);
-    draw->AddText(F.label, height, ImVec2(t0.x + height * 0.35f, t0.y + height * 0.05f), IM_COL32_WHITE, "PC");
-}
-
-void DrawLogo(ImDrawList* draw, ImVec2 min, ImVec2 max) {
+void DrawLogo(ImDrawList* draw, ImVec2 min, ImVec2 max, GameId game, float alpha = 1.0f) {
     const float boxW = max.x - min.x, boxH = max.y - min.y;
-    if (g_logo) {
+    const ImU32 tint = IM_COL32(255, 255, 255, int(255 * alpha));
+    if (const Logo& logo = g_logos[int(game)]; logo.texture) {
         // The logo from the disc's channel banner, as big as fits, centred.
-        const float scale = std::min(boxW * 0.92f / g_logoSize.x, boxH / g_logoSize.y);
-        const ImVec2 size(g_logoSize.x * scale, g_logoSize.y * scale);
+        const float scale = std::min(boxW * 0.92f / logo.size.x, boxH / logo.size.y);
+        const ImVec2 size(logo.size.x * scale, logo.size.y * scale);
         const ImVec2 at(min.x + (boxW - size.x) * 0.5f, min.y + (boxH - size.y) * 0.5f);
-        draw->AddImage(g_logo, at, ImVec2(at.x + size.x, at.y + size.y));
-        // "PC" under the end of TRUCK.
-        PcTag(draw, at.x + size.x * 0.735f, at.y + size.y * 0.80f, size.y * 0.10f);
+        draw->AddImage(ImTextureID(logo.texture), at, ImVec2(at.x + size.x, at.y + size.y), ImVec2(0, 0), ImVec2(1, 1), tint);
         return;
     }
+    const char* second = game == GameId::Truck ? "TRUCK" : "BOTS";
     ImFont* font = F.logo;
     // EXCITE across most of the column, TRUCK smaller under it to the right.
     const float base = font->FontSize;
@@ -946,58 +1032,73 @@ void DrawLogo(ImDrawList* draw, ImVec2 min, ImVec2 max) {
     float size = std::min(base * (boxW * 0.80f) / wideW, boxH * 0.62f);
     const ImVec2 exciteSize = font->CalcTextSizeA(size, FLT_MAX, 0.0f, "EXCITE");
     const float truckSizePx = size * 0.56f;
-    const ImVec2 truckSize = font->CalcTextSizeA(truckSizePx, FLT_MAX, 0.0f, "TRUCK");
+    const ImVec2 truckSize = font->CalcTextSizeA(truckSizePx, FLT_MAX, 0.0f, second);
     const float totalH = exciteSize.y * 0.82f + truckSize.y;
     const ImVec2 excitePos(min.x + (boxW - exciteSize.x) * 0.5f, min.y + (boxH - totalH) * 0.5f);
     const ImVec2 truckPos(excitePos.x + exciteSize.x - truckSize.x - size * 0.04f, excitePos.y + exciteSize.y * 0.80f);
 
     auto outlined = [&](ImVec2 pos, float px, const char* text, ImU32 top, ImU32 bottom, float outline) {
         // Shadow, outline, then the face with a top-to-bottom gradient.
-        draw->AddText(font, px, ImVec2(pos.x + outline * 1.6f, pos.y + outline * 1.8f), IM_COL32(20, 8, 4, 120), text);
+        draw->AddText(font, px, ImVec2(pos.x + outline * 1.6f, pos.y + outline * 1.8f), IM_COL32(20, 8, 4, int(120 * alpha)), text);
         const int steps = 16;
         for (int i = 0; i < steps; ++i) {
             const float a = float(i) / steps * 6.2831853f;
             draw->AddText(font, px, ImVec2(pos.x + std::cos(a) * outline, pos.y + std::sin(a) * outline),
-                          IM_COL32(40, 12, 6, 255), text);
+                          IM_COL32(40, 12, 6, int(255 * alpha)), text);
         }
         const int start = draw->VtxBuffer.Size;
-        draw->AddText(font, px, pos, IM_COL32_WHITE, text);
+        draw->AddText(font, px, pos, tint, text);
         ImGui::ShadeVertsLinearColorGradientKeepAlpha(draw, start, draw->VtxBuffer.Size,
             ImVec2(pos.x, pos.y + px * 0.18f), ImVec2(pos.x, pos.y + px * 0.92f), top, bottom);
     };
-    outlined(excitePos, size, "EXCITE", IM_COL32(255, 236, 90, 255), IM_COL32(236, 54, 28, 255), size * 0.045f);
-    outlined(truckPos, truckSizePx, "TRUCK", IM_COL32(255, 255, 255, 255), IM_COL32(190, 200, 222, 255), size * 0.035f);
-
-    // A small "PC" tag before TRUCK.
-    PcTag(draw, truckPos.x - size * 0.10f, truckPos.y + truckSize.y * 0.30f, truckSize.y * 0.42f);
+    const int a = int(255 * alpha);
+    outlined(excitePos, size, "EXCITE", IM_COL32(255, 236, 90, a), IM_COL32(236, 54, 28, a), size * 0.045f);
+    if (game == GameId::Truck) {
+        outlined(truckPos, truckSizePx, second, IM_COL32(255, 255, 255, a), IM_COL32(190, 200, 222, a), size * 0.035f);
+    } else {
+        outlined(truckPos, truckSizePx, second, IM_COL32(220, 236, 255, a), IM_COL32(110, 150, 210, a), size * 0.035f);
+    }
 }
 
 struct MenuItem {
     const char* label;
     const char* help;
-    Page page;            // the page it opens (Start and Exit open none)
+    Page page;            // the page it opens (Start and All Games open none)
     UiAction action;
+    bool home = false;    // back to the game chooser
 };
 
-const MenuItem kMenu[] = {
-    {"Start Game", "Start racing. Your settings are already saved.", Page::Settings, UiAction::Launch},
-    {"Achievements", "The achievements you have unlocked in the game, and the ones still to get.", Page::Achievements, UiAction::None},
-    {"Controls", "The Xbox controller layout, air control and vibration.", Page::Controls, UiAction::None},
-    {"Settings", "Window, resolution, frame rate and sound.", Page::Settings, UiAction::None},
-    {"Music", "Race to your own MP3s.", Page::Music, UiAction::None},
-    {"Mods", "Texture packs.", Page::Mods, UiAction::None},
-    {"Exit", "Close the launcher.", Page::Settings, UiAction::Quit},
-};
+std::vector<MenuItem> g_menu;
 
-bool IsPageItem(const MenuItem& item) { return item.action == UiAction::None; }
-bool IsPageMenuItem(size_t index) { return index < std::size(kMenu) && IsPageItem(kMenu[index]); }
-Page MenuPage(size_t index) { return kMenu[index].page; }
+void BuildMenu() {
+    g_menu.clear();
+    const bool truck = g_game == GameId::Truck;
+    g_menu.push_back({"Start Game", truck ? "Start racing. Your settings are already saved."
+                                          : "Start Excitebots. Your settings are already saved.",
+                      Page::Settings, UiAction::Launch});
+    g_menu.push_back({"Achievements", "The achievements you have unlocked in the game, and the ones still to get.",
+                      Page::Achievements, UiAction::None});
+    g_menu.push_back({"Controls", truck ? "The Xbox controller layout, air control and vibration."
+                                        : "The Xbox controller layout and vibration.",
+                      Page::Controls, UiAction::None});
+    g_menu.push_back({"Settings", "Window, resolution, frame rate and sound.", Page::Settings, UiAction::None});
+    if (truck) {
+        g_menu.push_back({"Music", "Race to your own MP3s.", Page::Music, UiAction::None});
+    }
+    g_menu.push_back({"Mods", "Texture packs.", Page::Mods, UiAction::None});
+    g_menu.push_back({"All Games", "Back to the game list, to pick the other game or set it up.", Page::Settings,
+                      UiAction::None, true});
+}
+
+bool IsPageItem(const MenuItem& item) { return item.action == UiAction::None && !item.home; }
+bool IsPageMenuItem(size_t index) { return index < g_menu.size() && IsPageItem(g_menu[index]); }
+Page MenuPage(size_t index) { return g_menu[index].page; }
 
 void DrawMenu() {
     ImDrawList* draw = ImGui::GetWindowDrawList();
     const float itemH = F.menu->FontSize * 1.18f;
-    for (size_t i = 0; i < std::size(kMenu); ++i) {
-        const MenuItem& item = kMenu[i];
+    for (size_t i = 0; i < g_menu.size(); ++i) {
+        const MenuItem& item = g_menu[i];
         const bool current = IsPageItem(item) && item.page == g_page;
         NavRow();
         ImGui::PushID(int(i));
@@ -1015,7 +1116,9 @@ void DrawMenu() {
         SpacedText(draw, F.menu, F.menu->FontSize, ImVec2(p0.x + S(14), p0.y + (itemH - F.menu->FontSize) * 0.5f),
                    color, item.label, S(1.5f));
         if (pressed) {
-            if (item.action != UiAction::None) {
+            if (item.home) {
+                GoHome();
+            } else if (item.action != UiAction::None) {
                 g_action = item.action;
             } else {
                 g_page = item.page;
@@ -1068,20 +1171,520 @@ void ControllerHints(ImDrawList* draw, ImVec2 rightBottom) {
     }
 }
 
+
+// --- Home: choose a game, and set games up -------------------------------------------------------
+
+const ImU32 kGood = IM_COL32(130, 220, 120, 255);
+
+fs::path g_disc[kGameCount];          // the disc image chosen for setup
+std::string g_discNote[kGameCount];   // what the launcher could tell about it
+int g_discNoteKind[kGameCount] = {};  // 1 good, 0 neutral, -1 wrong disc
+bool g_installed[kGameCount] = {};
+std::mutex g_discMutex;
+std::string g_pickedDisc[kGameCount];
+bool g_discPicked[kGameCount] = {};
+double g_quitArmedAt = -100.0;
+
+void RefreshInstalled() {
+    for (int i = 0; i < kGameCount; ++i) g_installed[i] = IsInstalled(GameAt(i));
+}
+
+void MakeTexture(Logo& logo, const Image& image) {
+    if (logo.texture) SDL_DestroyTexture(logo.texture);
+    logo = Logo{};
+    if (!g_renderer || image.width <= 0) return;
+    logo.texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, image.width,
+                                     image.height);
+    if (logo.texture) {
+        SDL_UpdateTexture(logo.texture, nullptr, image.rgba.data(), image.width * 4);
+        SDL_SetTextureBlendMode(logo.texture, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureScaleMode(logo.texture, SDL_SCALEMODE_LINEAR);
+        logo.size = ImVec2(float(image.width), float(image.height));
+    }
+}
+
+// The logos, and the vehicle silhouettes behind them, from each set-up game's disc banner.
+void LoadLogos() {
+    for (int i = 0; i < kGameCount; ++i) {
+        const GameId id = GameAt(i);
+        const fs::path banner = cfg::DiscFolder(id) / "files" / "opening.bnr";
+        Image logo, source, silhouette;
+        if (!LoadBannerTexture(banner, Game(id).logoTexture, logo)) logo = Image{};
+        MakeTexture(g_logos[i], logo);
+        if (!LoadBannerTexture(banner, SilhouetteSource(id), source) || !TraceSilhouette(id, source, silhouette)) {
+            silhouette = Image{};
+        }
+        MakeTexture(g_silhouettes[i], silhouette);
+    }
+}
+
+void EnterGame(GameId id) {
+    g_game = id;
+    cfg::SelectGame(id);
+    g_settings = cfg::Load();
+    BuildMenu();
+    g_page = Page::Settings;
+    g_screen = Screen::Game;
+    g_resetPageScroll = true;
+    g_focus = 0;
+    g_musicNotice.clear();
+    ScanMusic(true);
+    ScanAchievements(true);
+    SetHelp(Game(id).title, "Pick Start Game to play. Every change here is saved straight away.");
+}
+
+void GoHome() {
+    g_screen = Screen::Home;
+    g_focus = 0;
+    RefreshInstalled();
+    SetHelp("Choose a game", "Pick a game to play or change its settings, or set up one you haven't yet.");
+}
+
+void SetDisc(int slot, const fs::path& path) {
+    const GameDef& game = Game(GameAt(slot));
+    std::string id;
+    const int which = IdentifyDisc(path, &id);
+    g_disc[slot] = path;
+    if (which == slot) {
+        g_discNote[slot] = id.empty() ? std::string("Looks like ") + game.title + " (going by its name)."
+                                      : std::string(game.title) + " disc found.";
+        g_discNoteKind[slot] = 1;
+    } else if (which >= 0) {
+        g_discNote[slot] = std::string("That's the ") + Game(GameAt(which)).title + " disc, not " + game.title + ".";
+        g_discNoteKind[slot] = -1;
+    } else if (!id.empty()) {
+        g_discNote[slot] = "This disc (" + id + ") isn't " + game.title + " (USA, " + game.discId + ").";
+        g_discNoteKind[slot] = -1;
+    } else {
+        g_discNote[slot] = "Setup checks this file when it starts.";
+        g_discNoteKind[slot] = 0;
+    }
+    SetupClear(GameAt(slot));
+}
+
+void SDLCALL OnDiscPicked(void* user, const char* const* files, int) {
+    if (files == nullptr || files[0] == nullptr) return;
+    const int slot = int(reinterpret_cast<intptr_t>(user));
+    std::lock_guard<std::mutex> lock(g_discMutex);
+    g_pickedDisc[slot] = files[0];
+    g_discPicked[slot] = true;
+}
+
+void ApplyPickedDiscs() {
+    for (int i = 0; i < kGameCount; ++i) {
+        std::string picked;
+        {
+            std::lock_guard<std::mutex> lock(g_discMutex);
+            if (!g_discPicked[i]) continue;
+            g_discPicked[i] = false;
+            picked = g_pickedDisc[i];
+        }
+        SetDisc(i, cfg::PathFromUtf8(picked));
+    }
+}
+
+void ChooseDisc(int slot) {
+    static const SDL_DialogFileFilter filters[] = {
+        {"Wii disc images", "wbfs;iso;rvz;wia;ciso;gcz;zip;001"},
+        {"All files", "*"},
+    };
+    SDL_ShowOpenFileDialog(OnDiscPicked, reinterpret_cast<void*>(intptr_t(slot)), g_window, filters, 2, nullptr, false);
+}
+
+// Text with a soft shadow, so it reads over the sky and the desert.
+void ShadowText(ImDrawList* draw, ImFont* font, float size, ImVec2 pos, ImU32 color, const char* begin,
+                const char* end = nullptr) {
+    const ImU32 shadow = IM_COL32(10, 6, 4, int(((color >> IM_COL32_A_SHIFT) & 0xFF) * 0.7f));
+    draw->AddText(font, size, ImVec2(pos.x + S(1.5f), pos.y + S(2)), shadow, begin, end);
+    draw->AddText(font, size, pos, color, begin, end);
+}
+
+// Wrapped text centred on cx; returns the y under it.
+float CenteredText(ImDrawList* draw, ImFont* font, float cx, float y, float maxW, ImU32 color, const std::string& text) {
+    const float size = font->FontSize;
+    const char* p = text.c_str();
+    const char* end = p + text.size();
+    while (p < end) {
+        const char* lineEnd = font->CalcWordWrapPositionA(1.0f, p, end, maxW);
+        if (lineEnd == p) lineEnd = NextChar(p);
+        const ImVec2 lineSize = font->CalcTextSizeA(size, FLT_MAX, 0.0f, p, lineEnd);
+        ShadowText(draw, font, size, ImVec2(std::round(cx - lineSize.x * 0.5f), y), color, p, lineEnd);
+        y += size * 1.25f;
+        p = lineEnd;
+        while (p < end && (*p == ' ' || *p == '\n')) ++p;
+    }
+    return y;
+}
+
+// Spaced capitals centred on cx, like the game's menus; returns the y under them.
+float CenteredCaps(ImDrawList* draw, float cx, float y, ImU32 color, const char* text, float scale = 1.0f) {
+    ImFont* font = F.small;
+    const float size = font->FontSize * scale;
+    const ImVec2 textSize = SpacedTextSize(font, size, text, S(3));
+    const ImVec2 pos(std::round(cx - textSize.x * 0.5f), y);
+    SpacedText(draw, font, size, ImVec2(pos.x + S(1.5f), pos.y + S(2)), IM_COL32(10, 6, 4, 170), text, S(3));
+    SpacedText(draw, font, size, pos, color, text, S(3));
+    return y + textSize.y + S(6);
+}
+
+// A plain text button: no box, it turns amber and underlined under the cursor.
+float TextLinkWidth(const char* label) {
+    return F.label->CalcTextSizeA(F.label->FontSize, FLT_MAX, 0.0f, label).x + S(16);
+}
+
+bool TextLink(const char* label, const char* help, ImVec2 pos) {
+    ImFont* font = F.label;
+    const ImVec2 text = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0.0f, label);
+    ImGui::SetCursorScreenPos(pos);
+    const bool clicked = ImGui::InvisibleButton(label, ImVec2(text.x + S(16), text.y + S(12)));
+    const bool pressed = NavItemDone(clicked, label, help);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const bool hot = ItemHasFocus();
+    const ImVec2 at(pos.x + S(8), pos.y + S(4));
+    ShadowText(draw, font, font->FontSize, at, hot ? kAmber : kText, label);
+    if (hot) {
+        const float y = at.y + text.y + S(1);
+        draw->AddRectFilled(ImVec2(at.x, y), ImVec2(at.x + text.x, y + S(2.5f)), kAmber, S(1));
+    }
+    return pressed;
+}
+
+// A row of text links centred on cx.
+struct Link {
+    const char* label;
+    std::string help;
+    bool pressed = false;
+};
+
+float LinkRow(std::vector<Link>& links, float cx, float y) {
+    if (links.empty()) return y;
+    const float gap = S(18);
+    float total = -gap;
+    for (const Link& link : links) total += TextLinkWidth(link.label) + gap;
+    float x = cx - total * 0.5f;
+    NavRow();
+    for (size_t i = 0; i < links.size(); ++i) {
+        if (i > 0) {
+            // A dot between links.
+            ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(x - gap * 0.5f, y + F.label->FontSize * 0.5f + S(5)), S(2),
+                                                        IM_COL32(255, 255, 255, 120));
+        }
+        links[i].pressed = TextLink(links[i].label, links[i].help.c_str(), ImVec2(x, y));
+        x += TextLinkWidth(links[i].label) + gap;
+    }
+    return y + F.label->FontSize + S(18);
+}
+
+void ThinProgressBar(ImDrawList* draw, float cx, float y, float width, float progress) {
+    const float h = S(6);
+    const ImVec2 min(cx - width * 0.5f, y), max(cx + width * 0.5f, y + h);
+    draw->AddRectFilled(ImVec2(min.x, min.y + S(1.5f)), ImVec2(max.x, max.y + S(1.5f)), IM_COL32(10, 6, 4, 110), h * 0.5f);
+    draw->AddRectFilled(min, max, IM_COL32(255, 255, 255, 60), h * 0.5f);
+    if (progress > 0.0f) {
+        draw->AddRectFilled(min, ImVec2(min.x + std::max(h, width * std::min(progress, 1.0f)), max.y), kAmber, h * 0.5f);
+    }
+}
+
+std::string Elapsed(double seconds) {
+    const int minutes = int(seconds / 60.0);
+    if (minutes < 1) return "under a minute";
+    if (minutes < 60) return std::to_string(minutes) + (minutes == 1 ? " minute" : " minutes");
+    char text[32];
+    std::snprintf(text, sizeof text, "%d h %02d min", minutes / 60, minutes % 60);
+    return text;
+}
+
+// --- Vehicles behind the home screen's logos ----------------------------------------------------
+
+SDL_Texture* g_drawnVehicles[kGameCount] = {};   // until the game is set up (vehicles.cpp)
+
+// A one-colour silhouette of the game's vehicle, as big as fits in the box, centred on `centre`.
+// Traced from the disc's banner art once the game is set up; before that, a drawn stand-in.
+void DrawSilhouette(ImDrawList* draw, GameId game, ImVec2 centre, ImVec2 box, ImU32 color) {
+    SDL_Texture* texture = g_silhouettes[int(game)].texture;
+    ImVec2 size = g_silhouettes[int(game)].size;
+    if (!texture) {
+        SDL_Texture*& drawn = g_drawnVehicles[int(game)];
+        if (!drawn && g_renderer) {
+            std::vector<uint32_t> pixels;
+            const int w = 720, h = RenderVehicle(game, game == GameId::Bots, w, pixels, true);
+            drawn = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
+            if (drawn) {
+                SDL_UpdateTexture(drawn, nullptr, pixels.data(), w * 4);
+                SDL_SetTextureBlendMode(drawn, SDL_BLENDMODE_BLEND);
+                SDL_SetTextureScaleMode(drawn, SDL_SCALEMODE_LINEAR);
+            }
+        }
+        texture = drawn;
+        size = ImVec2(720.0f, 720.0f * kVehicleHeight);
+    }
+    if (!texture) return;
+    const float scale = std::min(box.x / size.x, box.y / size.y);
+    const ImVec2 half(size.x * scale * 0.5f, size.y * scale * 0.5f);
+    draw->AddImage(ImTextureID(texture), ImVec2(centre.x - half.x, centre.y - half.y),
+                   ImVec2(centre.x + half.x, centre.y + half.y), ImVec2(0, 0), ImVec2(1, 1), color);
+}
+
+float g_logoHot[kGameCount] = {};   // 0..1, eases in while the cursor is on that game
+
+// One game on the home screen: its logo is the button, with its state and a few text links under it.
+void DrawGameColumn(int slot, float cx, float colW, float top, float logoH, double now) {
+    const GameId id = GameAt(slot);
+    const GameDef& game = Game(id);
+    const SetupStatus status = SetupGet(id);
+    const bool installed = g_installed[slot];
+    const bool canSetUp = !SetupScript(id).empty();
+    const bool busy = status.state == SetupState::Running || status.state == SetupState::Queued;
+    const bool haveDisc = !g_disc[slot].empty() && g_discNoteKind[slot] >= 0;
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const int region = kCardRegion + slot;
+    g_navRegion = region;
+    ImGui::PushID(slot);
+
+    const bool focused = std::any_of(g_navLast.begin(), g_navLast.end(),
+                                     [&](const NavItem& i) { return i.id == g_focus && i.region == region; });
+    if (focused) g_lastCard = region;
+    float& hot = g_logoHot[slot];
+    hot += ((focused ? 1.0f : 0.0f) - hot) * std::min(1.0f, ImGui::GetIO().DeltaTime * 12.0f);
+
+    // The logo, as the button. What a click does depends on where the game is at.
+    const float logoW = colW * 0.92f;
+    const ImVec2 boxMin(cx - logoW * 0.5f, top), boxMax(cx + logoW * 0.5f, top + logoH);
+    std::string help;
+    if (installed && !busy) {
+        help = std::string("Start ") + game.title + ", or change its settings and see your achievements.";
+    } else if (busy) {
+        help = std::string(game.title) + " is being set up. It can be played when the bar is full.";
+    } else if (!canSetUp) {
+        help = std::string("The ") + game.title + " port is still being made. A later version of this launcher sets "
+               "it up the same way.";
+    } else if (haveDisc) {
+        help = std::string("Builds ") + game.title + " on this PC from your disc. It takes 30 to 90 minutes and needs "
+               "about 20 GB of free space while it runs; you can use the PC meanwhile.";
+    } else {
+        help = std::string("Pick your ") + game.title + " (USA) disc image: .wbfs, .iso, .rvz, or a .zip holding one "
+               "(you can also drop it on this side of the window). Setup needs about 20 GB free and 30 to 90 minutes; "
+               "nothing of Nintendo's is downloaded.";
+    }
+    NavRow();
+    ImGui::SetCursorScreenPos(boxMin);
+    const bool clicked = ImGui::InvisibleButton("logo", ImVec2(boxMax.x - boxMin.x, boxMax.y - boxMin.y));
+    if (NavItemDone(clicked, game.title, help.c_str())) {
+        if (installed && !busy) {
+            EnterGame(id);
+        } else if (!busy && canSetUp) {
+            if (haveDisc) {
+                SetupStart(id, g_disc[slot]);
+            } else {
+                ChooseDisc(slot);
+            }
+        }
+    }
+    if (ImGui::IsItemHovered() && (installed || canSetUp) && !busy) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+    // Under the cursor the logo lifts a little and a warm light comes up behind it.
+    const ImVec2 centre((boxMin.x + boxMax.x) * 0.5f, (boxMin.y + boxMax.y) * 0.5f);
+    if (hot > 0.01f) {
+        for (int i = 0; i < 16; ++i) {
+            const float k = 1.0f - i * 0.05f;
+            draw->AddEllipseFilled(ImVec2(centre.x, centre.y + logoH * 0.04f), ImVec2(logoW * 0.50f * k, logoH * 0.52f * k),
+                                   IM_COL32(255, 200, 120, int(6 * hot)), 0.0f, 64);
+        }
+    }
+    // A grey silhouette of the game's vehicle behind its logo, facing the middle of the screen.
+    const float vehicleScale = id == GameId::Truck ? 0.8f : 1.0f;   // the truck reads big next to its logo
+    DrawSilhouette(draw, id, centre, ImVec2(logoW * 1.02f * vehicleScale, logoH * 1.3f * vehicleScale),
+                   IM_COL32(58, 60, 72, int(135 + 40 * hot)));
+    const float scale = 1.0f + 0.06f * hot;
+    const ImVec2 half(logoW * 0.5f * scale, logoH * 0.5f * scale);
+    const float lift = S(6) * hot;
+    const float alpha = (installed || busy ? 1.0f : 0.62f) * (0.82f + 0.18f * std::max(hot, focused ? 1.0f : 0.0f));
+    DrawLogo(draw, ImVec2(centre.x - half.x, centre.y - half.y - lift), ImVec2(centre.x + half.x, centre.y + half.y - lift), id,
+             alpha);
+
+    // State, then what can be done.
+    const float textW = std::min(colW * 0.86f, S(520));
+    float y = boxMax.y + S(18);
+    std::vector<Link> links;
+    if (busy) {
+        y = CenteredCaps(draw, cx, y, kAmber, status.state == SetupState::Queued ? "WAITING TO SET UP" : "SETTING UP");
+        y = CenteredText(draw, F.body, cx, y, textW, kText, status.step);
+        ThinProgressBar(draw, cx, y + S(6), textW * 0.8f, status.progress);
+        y += S(20);
+        if (status.state == SetupState::Running) {
+            char line[96];
+            std::snprintf(line, sizeof line, "%d%%  \xC2\xB7  running for %s", int(status.progress * 100.0f),
+                          Elapsed(now - status.startedAt).c_str());
+            y = CenteredText(draw, F.small, cx, y, textW, kText, line);
+        }
+        y += S(4);
+        links.push_back({"Stop Setup", "Stops the setup. Setting the game up again later picks up where it stopped."});
+        LinkRow(links, cx, y);
+        if (links[0].pressed) SetupCancel(id);
+    } else if (installed) {
+        if (hot > 0.5f) {
+            // "(A) PLAY" under the logo with the cursor.
+            const char* label = "PLAY";
+            const ImVec2 size = SpacedTextSize(F.small, F.small->FontSize * 1.25f, label, S(3));
+            const float total = S(30) + S(10) + size.x;
+            Glyph(draw, ImVec2(cx - total * 0.5f + S(15), y + size.y * 0.5f), "A", IM_COL32(110, 200, 80, 255), false);
+            const ImVec2 pos(cx - total * 0.5f + S(40), y);
+            SpacedText(draw, F.small, F.small->FontSize * 1.25f, ImVec2(pos.x + S(1.5f), pos.y + S(2)), IM_COL32(10, 6, 4, 170),
+                       label, S(3));
+            SpacedText(draw, F.small, F.small->FontSize * 1.25f, pos, kAmber, label, S(3));
+            y += size.y + S(6);
+        } else {
+            y = CenteredCaps(draw, cx, y, kGood, "READY", 1.25f);
+        }
+        if (status.state == SetupState::Done) {
+            y = CenteredText(draw, F.small, cx, y, textW, kGood, "Setup finished.");
+        } else if (status.state == SetupState::Failed) {
+            y = CenteredText(draw, F.small, cx, y, textW, kError, "The last setup stopped: " + status.step);
+        }
+        y += S(8);
+        if (canSetUp) {
+            links.push_back({"Set Up Again", "Builds the game again from its disc, for example after an update to this "
+                                             "launcher. Your settings, saves and music are kept."});
+        }
+        links.push_back({"Open Game Folder", "Where the game, its settings and saves (UserData) live: " +
+                                                 cfg::PathToUtf8(InstallDir(id))});
+        LinkRow(links, cx, y);
+        if (canSetUp && links[0].pressed) SetupStart(id, cfg::DiscFolder(id));
+        if (links.back().pressed) SDL_OpenURL(cfg::PathToUtf8(InstallDir(id)).c_str());
+    } else if (!canSetUp) {
+        y = CenteredCaps(draw, cx, y, IM_COL32(220, 220, 232, 255), "COMING SOON", 1.25f);
+        CenteredText(draw, F.body, cx, y, textW, kText, std::string("The ") + game.title + " port is still being made.");
+    } else {
+        const bool failed = status.state == SetupState::Failed;
+        y = CenteredCaps(draw, cx, y, failed ? kError : IM_COL32(220, 220, 232, 255),
+                         failed || status.state == SetupState::Cancelled ? "SETUP STOPPED" : "NOT SET UP YET", 1.25f);
+        if (failed) y = CenteredText(draw, F.body, cx, y, textW, kError, status.step);
+        if (g_disc[slot].empty()) {
+            y = CenteredText(draw, F.body, cx, y, textW, kText,
+                             std::string("Click the logo to choose your ") + game.title + " disc image, or drop it here.");
+        } else {
+            y = CenteredText(draw, F.body, cx, y, textW, kText, cfg::PathToUtf8(g_disc[slot].filename()));
+            y = CenteredText(draw, F.small, cx, y, textW,
+                             g_discNoteKind[slot] > 0 ? kGood : g_discNoteKind[slot] < 0 ? kError : kText,
+                             g_discNote[slot] + (haveDisc ? " Click the logo to set it up." : ""));
+        }
+        y += S(8);
+        if (haveDisc) {
+            links.push_back({failed ? "Try Again" : "Set Up",
+                             std::string("Builds ") + game.title + " on this PC from your disc. It takes 30 to 90 minutes "
+                             "and needs about 20 GB of free space while it runs; you can use the PC meanwhile."});
+        }
+        links.push_back({g_disc[slot].empty() ? "Choose Disc Image..." : "Change Disc...",
+                         std::string("Pick your ") + game.title + " (USA) disc image: .wbfs, .iso, .rvz, or a .zip "
+                         "holding one. You can also drop it on this side of the window."});
+        if (failed && !status.log.empty()) {
+            links.push_back({"Open Log", "The setup's full output. Send it over so the problem can be fixed."});
+        }
+        LinkRow(links, cx, y);
+        for (const Link& link : links) {
+            if (!link.pressed) continue;
+            if (link.label[0] == 'S' || link.label[0] == 'T') SetupStart(id, g_disc[slot]);
+            else if (link.label[0] == 'O') SDL_OpenURL(cfg::PathToUtf8(status.log).c_str());
+            else ChooseDisc(slot);
+        }
+    }
+    ImGui::PopID();
+}
+
+void DrawHome(float W, float H, float margin, float footer, double now) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const bool none = std::none_of(std::begin(g_installed), std::end(g_installed), [](bool b) { return b; });
+
+    // A soft dark fade along the bottom so the help text reads; no boxes.
+    const float bandH = std::max(S(150), H * 0.26f);
+    draw->AddRectFilledMultiColor(ImVec2(0, H - bandH), ImVec2(W, H), IM_COL32(12, 8, 6, 0), IM_COL32(12, 8, 6, 0),
+                                  IM_COL32(12, 8, 6, 200), IM_COL32(12, 8, 6, 200));
+
+    // Heading, and on the first run a short welcome.
+    float y = margin;
+    const char* heading = none ? "WELCOME TO EXCITE PC" : "CHOOSE A GAME";
+    const ImVec2 headingSize = SpacedTextSize(F.small, F.small->FontSize * 1.15f, heading, S(3));
+    SpacedText(draw, F.small, F.small->FontSize * 1.15f, ImVec2(margin + S(7.5f), y + S(2)), IM_COL32(10, 6, 4, 170), heading, S(3));
+    SpacedText(draw, F.small, F.small->FontSize * 1.15f, ImVec2(margin + S(6), y), kAmber, heading, S(3));
+    y += headingSize.y + S(8);
+    if (none) {
+        const char* intro = "Each game is built on this PC from your own disc. Click a logo to add its disc image, then "
+                            "set it up: 30 to 90 minutes per game, one game at a time.";
+        const float wrap = W - margin * 2.0f - S(12);
+        draw->AddText(F.body, F.body->FontSize, ImVec2(margin + S(7.5f), y + S(2)), IM_COL32(10, 6, 4, 170), intro, nullptr, wrap);
+        draw->AddText(F.body, F.body->FontSize, ImVec2(margin + S(6), y), kText, intro, nullptr, wrap);
+        y += F.body->CalcTextSizeA(F.body->FontSize, FLT_MAX, wrap, intro).y;
+    }
+
+    // Help text and Exit along the bottom.
+    const float helpTop = H - footer - S(76);
+    ShadowText(draw, F.title, F.title->FontSize, ImVec2(margin + S(6), helpTop), g_helpError ? kError : kAmber,
+               g_helpTitle.c_str());
+    const float exitW = TextLinkWidth("Exit");
+    {
+        const float wrap = W - margin * 2.0f - exitW - S(40);
+        const ImVec2 pos(margin + S(6), helpTop + F.title->FontSize + S(4));
+        draw->AddText(F.body, F.body->FontSize, ImVec2(pos.x + S(1.5f), pos.y + S(2)), IM_COL32(10, 6, 4, 170),
+                      g_helpText.c_str(), nullptr, wrap);
+        draw->AddText(F.body, F.body->FontSize, pos, kText, g_helpText.c_str(), nullptr, wrap);
+    }
+    g_navRegion = kHomeBottomRegion;
+    NavRow();
+    if (TextLink("Exit", SetupBusy() ? "Close the launcher. A setup is running: closing stops it." : "Close the launcher.",
+                 ImVec2(W - margin - exitW, helpTop + F.title->FontSize * 0.5f))) {
+        if (SetupBusy() && now - g_quitArmedAt > 6.0) {
+            g_quitArmedAt = now;
+            SetHelp("Setup is still running", "Closing the launcher stops it. Choose Exit again to close anyway; "
+                    "setting up again later picks up where it stopped.", true);
+            g_helpItem = g_focus;
+        } else {
+            g_action = UiAction::Quit;
+        }
+    }
+
+    // The two games side by side, Excite Truck on the left: each logo is its button.
+    const float areaTop = y + S(10), areaBottom = helpTop - S(20);
+    const float colW = (W - margin * 2.0f) / kGameCount;
+    const float logoH = std::min(colW * 0.46f, (areaBottom - areaTop) * 0.46f);
+    // Logos centred a little above the middle of the window, with room for the lines under them.
+    const float groupH = logoH + S(140);
+    const float logoTop = std::max(areaTop, std::min(H * 0.42f - logoH * 0.5f, areaBottom - groupH));
+    {
+        // A thin line between the two games that fades out at both ends.
+        const float x = std::round(W * 0.5f), top = logoTop - S(10), bottom = logoTop + groupH - S(10);
+        const float mid = (top + bottom) * 0.5f, w = S(1.5f);
+        const ImU32 clear = IM_COL32(255, 240, 220, 0), solid = IM_COL32(255, 240, 220, 230);
+        const ImU32 shadowClear = IM_COL32(10, 6, 4, 0), shadow = IM_COL32(10, 6, 4, 120);
+        draw->AddRectFilledMultiColor(ImVec2(x - w + S(1.5f), top + S(2)), ImVec2(x + w + S(1.5f), mid + S(2)), shadowClear,
+                                      shadowClear, shadow, shadow);
+        draw->AddRectFilledMultiColor(ImVec2(x - w + S(1.5f), mid + S(2)), ImVec2(x + w + S(1.5f), bottom + S(2)), shadow, shadow,
+                                      shadowClear, shadowClear);
+        draw->AddRectFilledMultiColor(ImVec2(x - w, top), ImVec2(x + w, mid), clear, clear, solid, solid);
+        draw->AddRectFilledMultiColor(ImVec2(x - w, mid), ImVec2(x + w, bottom), solid, solid, clear, clear);
+    }
+    for (int i = 0; i < kGameCount; ++i) {
+        DrawGameColumn(i, margin + colW * (i + 0.5f), colW, logoTop, logoH, now);
+    }
+}
+
+void DrawGameScreen(float W, float H, float margin, float footer);
+
 } // namespace
 
 // --- Public -------------------------------------------------------------------------------------
 
-void UiSetLogo(void* texture, int width, int height) {
-    g_logo = reinterpret_cast<ImTextureID>(texture);
-    g_logoSize = ImVec2(float(width), float(height));
-}
-
-void UiInit(SDL_Window* window) {
+void UiInit(SDL_Window* window, SDL_Renderer* renderer) {
     g_window = window;
-    g_settings = cfg::Load();
-    ScanMusic(true);
-    // For screenshots: ET_LAUNCHER_PAGE=settings|controls|music|mods|achievements.
+    g_renderer = renderer;
+    RefreshInstalled();
+    LoadLogos();
+    GoHome();
+    // For screenshots: ET_LAUNCHER_SCREEN=truck|bots opens that game's menu, and
+    // ET_LAUNCHER_PAGE=settings|controls|music|mods|achievements one of its pages.
+    if (const char* screen = SDL_getenv("ET_LAUNCHER_SCREEN")) {
+        const std::string name = screen;
+        if (name == "truck" || name == "bots") EnterGame(name == "truck" ? GameId::Truck : GameId::Bots);
+    }
     if (const char* page = SDL_getenv("ET_LAUNCHER_PAGE")) {
         const std::string name = page;
         g_page = name == "controls" ? Page::Controls : name == "music" ? Page::Music : name == "mods" ? Page::Mods
@@ -1146,8 +1749,32 @@ bool UiUpdateFonts(float windowWidth, float windowHeight) {
     return true;
 }
 
+void UiShutdown() {
+    for (SDL_Texture*& texture : g_drawnVehicles) {
+        if (texture) SDL_DestroyTexture(texture);
+        texture = nullptr;
+    }
+    for (Logo& logo : g_silhouettes) {
+        if (logo.texture) SDL_DestroyTexture(logo.texture);
+        logo = Logo{};
+    }
+    for (Logo& logo : g_logos) {
+        if (logo.texture) SDL_DestroyTexture(logo.texture);
+        logo = Logo{};
+    }
+}
+
+GameId UiSelectedGame() { return g_game; }
+
 void UiFrame(float seconds) {
     ApplyPickedFolder();
+    ApplyPickedDiscs();
+    if (SetupPump()) {
+        // A game finished setting up (or stopped): show it as installed, with its logo.
+        RefreshInstalled();
+        LoadLogos();
+        g_helpItem = 0;   // what the logo does has changed: show its new help
+    }
     const ImGuiIO& io = ImGui::GetIO();
     const float W = io.DisplaySize.x, H = io.DisplaySize.y;
 
@@ -1162,7 +1789,12 @@ void UiFrame(float seconds) {
         FocusPage();
     }
     if (std::none_of(g_navLast.begin(), g_navLast.end(), [](const NavItem& i) { return i.id == g_focus; })) {
-        g_focus = g_menuIds[0];   // start on Start Game, or after the focused item went away
+        // Start on Start Game (or the first card's button), or after the focused item went away.
+        // On the game list, stay on the same card (its buttons change as setup goes).
+        const std::vector<int> rows = RegionRows(g_lastCard);
+        g_focus = g_screen == Screen::Game ? g_menuIds[0]
+                : !rows.empty()            ? RowEntry(g_lastCard, rows.front(), 0)
+                                           : FirstItem();
     }
     ReadNavInput();
 
@@ -1178,14 +1810,39 @@ void UiFrame(float seconds) {
 
     const float margin = S(22);
     const float footer = S(26);
+    if (g_screen == Screen::Home) {
+        DrawHome(W, H, margin, footer, seconds);
+    } else {
+        DrawGameScreen(W, H, margin, footer);
+    }
+
+    // Footer: version on the left, controller hints on the right.
+    draw->AddText(F.small, F.small->FontSize, ImVec2(margin + S(4), H - footer + S(2)), IM_COL32(255, 255, 255, 170),
+                  "Excite PC  \xC2\xB7  launcher " ET_LAUNCHER_VERSION);
+    ControllerHints(draw, ImVec2(W - margin, H - S(2)));
+
+    ImGui::End();
+    if (SDL_getenv("ET_LAUNCHER_DEBUG")) {
+        static ImGuiID last = 0;
+        if (g_focus != last) {
+            last = g_focus;
+            SDL_Log("frame %d focus=%08x help=%s", ImGui::GetFrameCount(), g_focus, g_helpTitle.c_str());
+        }
+    }
+}
+
+namespace {
+
+void DrawGameScreen(float W, float H, float margin, float footer) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
     const float leftW = std::min(W * 0.44f, S(600));
     const float rightX = std::max(margin + leftW + S(28), W * 0.47f);
 
     // Logo, help and menu on the left.
     const ImVec2 logoMin(margin, margin), logoMax(margin + leftW, H * 0.31f);
-    DrawLogo(draw, logoMin, logoMax);
+    DrawLogo(draw, logoMin, logoMax, g_game);
 
-    const float menuH = F.menu->FontSize * 1.18f * float(std::size(kMenu)) + S(28);
+    const float menuH = F.menu->FontSize * 1.18f * float(g_menu.size()) + S(28);
     const ImVec2 menuMin(margin, H - footer - margin * 0.5f - menuH), menuMax(margin + leftW, H - footer - margin * 0.5f);
     const ImVec2 helpMin(margin, std::max(logoMax.y + S(8), H * 0.33f)), helpMax(margin + leftW, menuMin.y - S(14));
     Panel(draw, helpMin, helpMax);
@@ -1224,21 +1881,9 @@ void UiFrame(float seconds) {
     ImGui::Dummy(ImVec2(0, S(12)));
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
-
-    // Footer: version on the left, controller hints on the right.
-    draw->AddText(F.small, F.small->FontSize, ImVec2(margin + S(4), H - footer + S(2)), IM_COL32(255, 255, 255, 170),
-                  "Excite Truck PC  \xC2\xB7  launcher " ET_LAUNCHER_VERSION);
-    ControllerHints(draw, ImVec2(W - margin, H - S(2)));
-
-    ImGui::End();
-    if (SDL_getenv("ET_LAUNCHER_DEBUG")) {
-        static ImGuiID last = 0;
-        if (g_focus != last) {
-            last = g_focus;
-            SDL_Log("frame %d focus=%08x help=%s", ImGui::GetFrameCount(), g_focus, g_helpTitle.c_str());
-        }
-    }
 }
+
+} // namespace
 
 UiAction UiTakeAction() {
     const UiAction action = g_action;
@@ -1248,8 +1893,26 @@ UiAction UiTakeAction() {
 
 const char* UiMusicFolderForGame() { return g_musicFolderForGame.c_str(); }
 
-void UiDropFile(const char* path) {
+void UiDropFile(const char* path, float mouseX) {
     const fs::path source = cfg::PathFromUtf8(path);
+    if (LooksLikeDiscImage(source)) {
+        // A disc image: hand it to its game's card (or the card it was dropped on).
+        int slot = IdentifyDisc(source);
+        if (slot < 0) {
+            slot = mouseX >= 0.0f ? std::clamp(int(mouseX / std::max(1.0f, ImGui::GetIO().DisplaySize.x) * kGameCount), 0,
+                                               kGameCount - 1)
+                                  : g_lastCard - kCardRegion;
+        }
+        if (g_screen != Screen::Home) GoHome();
+        SetDisc(slot, source);
+        return;
+    }
+    if (g_screen != Screen::Game || g_game != GameId::Truck) {
+        SetHelp("Can't use that file", "Drop a disc image (.wbfs, .iso, .rvz or .zip) on a game, or MP3s on "
+                "Excite Truck's Music page.", true);
+        g_helpItem = g_focus;
+        return;
+    }
     std::vector<fs::path> files;
     std::error_code ec;
     if (fs::is_directory(source, ec)) {
@@ -1283,8 +1946,11 @@ void UiDropFile(const char* path) {
 }
 
 void UiRefresh() {
-    ScanMusic(true);
-    ScanAchievements(true);
+    RefreshInstalled();
+    if (g_screen == Screen::Game) {
+        ScanMusic(true);
+        ScanAchievements(true);
+    }
 }
 
 void UiShowError(const char* title, const char* text) {

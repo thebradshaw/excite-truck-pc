@@ -1,156 +1,124 @@
-// ExciteTruckSetup.exe: drag your Excite Truck disc image onto it.
-// It unpacks the build script and the Excite Truck changes, then builds the game on this PC
-// from your own disc (the finished game can't be shipped: it is translated from Nintendo's code).
+// ExciteSetup.exe: installs the Excite PC launcher and opens it.
+//
+// The launcher does the rest: it asks for your Excite Truck and Excitebots disc images and builds
+// each game on this PC from your own disc, with a progress bar (the finished games can't be
+// shipped: they are translated from Nintendo's code). A disc image dropped on this exe is handed
+// to the launcher.
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Reflection;
-using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 
 static class Setup
 {
-    static readonly string[] DiscExtensions = { ".wbfs", ".iso", ".rvz", ".ciso", ".wia", ".gcz", ".zip" };
+    const string Title = "Excite PC Setup";
 
     static readonly string LocalAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-    static readonly string SetupLog = Path.Combine(LocalAppData, "ExciteTruckSetup", "setup-log.txt");
-    static readonly string BuildLog = Path.Combine(Path.GetPathRoot(Environment.SystemDirectory) ?? "C:\\", "ETBuild", "build-log.txt");
+    static readonly string InstallDir = Path.Combine(LocalAppData, "Programs", "ExcitePC");
+    static readonly string LogFile = Path.Combine(LocalAppData, "ExcitePC", "setup-log.txt");
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int MessageBoxW(IntPtr owner, string text, string caption, uint type);
+    const uint MB_OK = 0, MB_RETRYCANCEL = 5, MB_ICONERROR = 0x10, MB_ICONWARNING = 0x30;
+    const int IDRETRY = 4;
+
+    [STAThread]
     static int Main(string[] args)
     {
-        // Everything this window prints also goes to setup-log.txt, and a crash is logged and
-        // waits for Enter instead of closing the window.
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(SetupLog)!);
-            var log = new StreamWriter(SetupLog, append: true) { AutoFlush = true };
-            log.WriteLine($"--- {DateTime.Now:yyyy-MM-dd HH:mm:ss} setup started: {string.Join(" ", args)}");
-            Console.SetOut(new Tee(Console.Out, log));
-        }
-        catch { }
-        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-        {
-            Console.WriteLine($"Setup crashed: {e.ExceptionObject}");
-            Finish(1);
-        };
-        try { Console.Title = "Excite Truck Setup"; } catch { }
-        Console.WriteLine("Excite Truck PC setup");
-        Console.WriteLine("=====================");
-        Console.WriteLine();
-        try
-        {
-            return Run(args);
+            Log($"setup {Assembly.GetExecutingAssembly().GetName().Version} started: {string.Join(" ", args)}");
+            WaitForLauncherToClose();
+            Install();
+            MakeShortcuts();
+            var start = new ProcessStartInfo(Path.Combine(InstallDir, "ExcitePC.exe"))
+            {
+                UseShellExecute = false,
+                WorkingDirectory = InstallDir,
+            };
+            if (args.Length > 0) start.ArgumentList.Add(Path.GetFullPath(args[0]));
+            Process.Start(start);
+            Log("done");
+            return 0;
         }
         catch (Exception e)
         {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"Setup failed: {e.Message}");
-            Console.ResetColor();
-            Console.WriteLine(e.ToString());
-            Console.WriteLine($"Log: {SetupLog}");
-            return Finish(1);
+            Log(e.ToString());
+            MessageBoxW(IntPtr.Zero, $"Setup failed: {e.Message}\n\nLog: {LogFile}", Title, MB_OK | MB_ICONERROR);
+            return 1;
         }
     }
 
-    static int Run(string[] args)
+    // The launcher's files can't be replaced while it runs.
+    static void WaitForLauncherToClose()
     {
-        string disc = args.Length > 0 ? args[0] : "";
-        while (!IsDisc(disc))
+        while (Process.GetProcessesByName("ExcitePC").Length > 0)
         {
-            if (disc.Length > 0) Console.WriteLine($"That isn't a disc image: {disc}");
-            Console.WriteLine("Drag your Excite Truck (USA) disc image (.wbfs, .iso, .rvz or .zip) onto this window,");
-            Console.WriteLine("then press Enter:");
-            disc = (Console.ReadLine() ?? "").Trim().Trim('"');
-            if (disc.Length == 0) return Finish(1);
+            int answer = MessageBoxW(IntPtr.Zero,
+                "Excite PC is open. Close it (if a game is being set up, wait for it to finish first), then choose Retry.",
+                Title, MB_RETRYCANCEL | MB_ICONWARNING);
+            if (answer != IDRETRY) throw new OperationCanceledException("Excite PC was still open");
         }
-        disc = Path.GetFullPath(disc);
-        string localAppData = LocalAppData;
-        string gameDir = Path.Combine(localAppData, "Programs", "ExciteTruck");
-        Console.WriteLine($"Disc:  {disc}");
-        Console.WriteLine($"Game:  {gameDir}");
-        Console.WriteLine($"Log:   {BuildLog}");
-        Console.WriteLine();
-        Console.WriteLine("The first build takes roughly 30 to 90 minutes and needs about 20 GB free on");
-        Console.WriteLine($"{Path.GetPathRoot(Environment.SystemDirectory)} while it runs. You can use the PC meanwhile.");
-        Console.WriteLine();
-
-        string payloadDir = UnpackPayload(localAppData);
-        string script = Path.Combine(payloadDir, "build-windows.ps1");
-        var start = new ProcessStartInfo("powershell.exe")
-        {
-            UseShellExecute = false,
-        };
-        foreach (string a in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script,
-                                     "-Disc", disc, "-Out", gameDir, "-Shortcut" })
-            start.ArgumentList.Add(a);
-        Console.WriteLine("Starting the build...");
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("could not start PowerShell");
-        process.WaitForExit();
-        Console.WriteLine($"Build finished with exit code {process.ExitCode}.");
-        if (process.ExitCode != 0)
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine();
-            Console.WriteLine("The build stopped. Send over the log so it can be fixed:");
-            Console.WriteLine($"  {BuildLog}");
-            Console.WriteLine($"Running setup again resumes where it stopped.");
-            Console.ResetColor();
-            return Finish(process.ExitCode);
-        }
-
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine();
-        Console.WriteLine("All set. Start the game from the \"Excite Truck\" shortcut on your desktop.");
-        Console.ResetColor();
-        Console.WriteLine("Put your own MP3s in the \"Excite Truck Music\" folder (also on the desktop).");
-        try { Process.Start(new ProcessStartInfo("explorer.exe", $"\"{gameDir}\"") { UseShellExecute = true }); } catch { }
-        return Finish(0);
     }
 
-    static bool IsDisc(string path)
-    {
-        if (path.Length == 0) return false;
-        if (Directory.Exists(path)) return File.Exists(Path.Combine(path, "sys", "main.dol"));
-        if (!File.Exists(path)) return false;
-        string name = path.ToLowerInvariant();
-        return DiscExtensions.Any(name.EndsWith) || System.Text.RegularExpressions.Regex.IsMatch(name, @"\.zip\.\d{3}$");
-    }
-
-    // Unpacks the embedded build script and Excite Truck changes once per setup version.
-    static string UnpackPayload(string localAppData)
+    // Unpacks the launcher and the games' build files into %LOCALAPPDATA%\Programs\ExcitePC.
+    // The games themselves are installed next to it (Programs\ExciteTruck, Programs\Excitebots)
+    // by the launcher and are left alone here.
+    static void Install()
     {
         using Stream resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("payload.zip")
             ?? throw new InvalidOperationException("the setup is incomplete (no payload)");
-        using var buffer = new MemoryStream();
-        resource.CopyTo(buffer);
-        string hash = Convert.ToHexString(SHA256.HashData(buffer.ToArray()))[..12].ToLowerInvariant();
-        string dir = Path.Combine(localAppData, "ExciteTruckSetup", hash);
-        if (!File.Exists(Path.Combine(dir, ".complete")))
+        Directory.CreateDirectory(InstallDir);
+        string setupDir = Path.Combine(InstallDir, "setup");
+        if (Directory.Exists(setupDir)) Directory.Delete(setupDir, true);   // old build files
+        using var zip = new ZipArchive(resource, ZipArchiveMode.Read);
+        zip.ExtractToDirectory(InstallDir, overwriteFiles: true);
+        Log($"installed to {InstallDir}");
+    }
+
+    static void MakeShortcuts()
+    {
+        string exe = Path.Combine(InstallDir, "ExcitePC.exe");
+        string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        string startMenu = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
+        // WScript.Shell makes .lnk files. Older setups put an "Excite Truck" shortcut to a launcher
+        // inside the game folder, which is gone now: remove that one.
+        string script = string.Join("; ", new[]
         {
-            if (Directory.Exists(dir)) Directory.Delete(dir, true);
-            buffer.Position = 0;
-            using (var zip = new ZipArchive(buffer, ZipArchiveMode.Read))
-                zip.ExtractToDirectory(dir);
-            File.WriteAllText(Path.Combine(dir, ".complete"), hash);
+            "$ErrorActionPreference = 'Stop'",
+            "$shell = New-Object -ComObject WScript.Shell",
+            $"foreach ($path in @('{Quote(Path.Combine(desktop, "Excite PC.lnk"))}', '{Quote(Path.Combine(startMenu, "Excite PC.lnk"))}')) {{ " +
+                "$link = $shell.CreateShortcut($path); " +
+                $"$link.TargetPath = '{Quote(exe)}'; $link.WorkingDirectory = '{Quote(InstallDir)}'; " +
+                $"$link.IconLocation = '{Quote(exe)},0'; $link.Description = 'Excite Truck and Excitebots'; $link.Save() }}",
+            $"$old = '{Quote(Path.Combine(desktop, "Excite Truck.lnk"))}'",
+            "if (Test-Path -LiteralPath $old) { if ($shell.CreateShortcut($old).TargetPath -like '*ExciteTruckLauncher.exe') { Remove-Item -LiteralPath $old -Force } }",
+        });
+        var start = new ProcessStartInfo("powershell.exe")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (string a in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script })
+            start.ArgumentList.Add(a);
+        using var process = Process.Start(start);
+        if (process == null) return;
+        string output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Log($"shortcuts: exit {process.ExitCode} {output.Trim()}");
+    }
+
+    static string Quote(string text) => text.Replace("'", "''");
+
+    static void Log(string text)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LogFile)!);
+            File.AppendAllText(LogFile, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {text}{Environment.NewLine}");
         }
-        return dir;
-    }
-
-    static int Finish(int code)
-    {
-        Console.WriteLine();
-        Console.WriteLine("Press Enter to close.");
-        try { Console.ReadLine(); } catch { }
-        return code;
-    }
-
-    // Writes to the console and the log file at once.
-    sealed class Tee : TextWriter
-    {
-        readonly TextWriter a, b;
-        public Tee(TextWriter a, TextWriter b) { this.a = a; this.b = b; }
-        public override System.Text.Encoding Encoding => a.Encoding;
-        public override void Write(char value) { a.Write(value); try { b.Write(value); } catch { } }
-        public override void Write(string? value) { a.Write(value); try { b.Write(value); } catch { } }
-        public override void WriteLine(string? value) { a.WriteLine(value); try { b.WriteLine(value); } catch { } }
-        public override void Flush() { a.Flush(); try { b.Flush(); } catch { } }
+        catch { }
     }
 }

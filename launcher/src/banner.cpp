@@ -74,16 +74,20 @@ bool Unpack(const Bytes& in, Bytes& out) {
     return out.size() == size;
 }
 
-// First image of a TPL, in RGBA8 (format 6) or RGB5A3 (format 5), both in 4x4 tiles.
+// First image of a TPL: RGBA8 (format 6) or RGB5A3 (5) in 4x4 tiles, or the grey formats I4 (0),
+// I8 (1), IA4 (2) and IA8 (3), whose tiles are 8x8, 8x4, 8x4 and 4x4.
 bool DecodeTpl(const Bytes& d, Image& out) {
     if (Be32(d, 0) != 0x0020AF30 || Be32(d, 4) == 0) return false;
     const size_t header = Be32(d, Be32(d, 8));
     const int h = Be16(d, header), w = Be16(d, header + 2);
     const uint32_t format = Be32(d, header + 4);
     size_t src = Be32(d, header + 8);
-    if (w <= 0 || h <= 0 || w > 2048 || h > 2048) return false;
-    const size_t tiles = size_t((w + 3) / 4) * size_t((h + 3) / 4);
-    if ((format != 5 && format != 6) || src + tiles * (format == 6 ? 64 : 32) > d.size()) return false;
+    if (w <= 0 || h <= 0 || w > 2048 || h > 2048 || format > 6 || format == 4) return false;
+    const int tileW = format == 0 || format == 1 || format == 2 ? 8 : 4;
+    const int tileH = format == 0 ? 8 : 4;
+    const size_t tileBytes = format == 6 ? 64 : 32;
+    const size_t tiles = size_t((w + tileW - 1) / tileW) * size_t((h + tileH - 1) / tileH);
+    if (src + tiles * tileBytes > d.size()) return false;
     out.width = w;
     out.height = h;
     out.rgba.assign(size_t(w) * h * 4, 0);
@@ -92,22 +96,38 @@ bool DecodeTpl(const Bytes& d, Image& out) {
         unsigned char* p = &out.rgba[(size_t(y) * w + x) * 4];
         p[0] = (unsigned char)r; p[1] = (unsigned char)g; p[2] = (unsigned char)b; p[3] = (unsigned char)a;
     };
-    for (int ty = 0; ty < h; ty += 4) {
-        for (int tx = 0; tx < w; tx += 4) {
-            for (int k = 0; k < 16; ++k) {
-                const int x = tx + k % 4, y = ty + k / 4;
-                if (format == 6) {   // AR pairs, then GB pairs
-                    put(x, y, d[src + k * 2 + 1], d[src + 32 + k * 2], d[src + 32 + k * 2 + 1], d[src + k * 2]);
-                } else {
-                    const unsigned v = d[src + k * 2] << 8 | d[src + k * 2 + 1];
-                    if (v & 0x8000) {
-                        put(x, y, ((v >> 10) & 31) * 255 / 31, ((v >> 5) & 31) * 255 / 31, (v & 31) * 255 / 31, 255);
-                    } else {
-                        put(x, y, ((v >> 8) & 15) * 17, ((v >> 4) & 15) * 17, (v & 15) * 17, ((v >> 12) & 7) * 255 / 7);
+    for (int ty = 0; ty < h; ty += tileH) {
+        for (int tx = 0; tx < w; tx += tileW) {
+            for (int k = 0; k < tileW * tileH; ++k) {
+                const int x = tx + k % tileW, y = ty + k / tileW;
+                switch (format) {
+                    case 0: {
+                        const unsigned v = (k % 2 == 0 ? d[src + k / 2] >> 4 : d[src + k / 2] & 15) * 17;
+                        put(x, y, v, v, v, v);
+                        break;
                     }
+                    case 1: put(x, y, d[src + k], d[src + k], d[src + k], d[src + k]); break;
+                    case 2: {
+                        const unsigned l = (d[src + k] & 15) * 17;
+                        put(x, y, l, l, l, (d[src + k] >> 4) * 17);
+                        break;
+                    }
+                    case 3: put(x, y, d[src + k * 2 + 1], d[src + k * 2 + 1], d[src + k * 2 + 1], d[src + k * 2]); break;
+                    case 5: {
+                        const unsigned v = d[src + k * 2] << 8 | d[src + k * 2 + 1];
+                        if (v & 0x8000) {
+                            put(x, y, ((v >> 10) & 31) * 255 / 31, ((v >> 5) & 31) * 255 / 31, (v & 31) * 255 / 31, 255);
+                        } else {
+                            put(x, y, ((v >> 8) & 15) * 17, ((v >> 4) & 15) * 17, (v & 15) * 17, ((v >> 12) & 7) * 255 / 7);
+                        }
+                        break;
+                    }
+                    default:   // 6: AR pairs, then GB pairs
+                        put(x, y, d[src + k * 2 + 1], d[src + 32 + k * 2], d[src + 32 + k * 2 + 1], d[src + k * 2]);
+                        break;
                 }
             }
-            src += format == 6 ? 64 : 32;
+            src += tileBytes;
         }
     }
     return true;
