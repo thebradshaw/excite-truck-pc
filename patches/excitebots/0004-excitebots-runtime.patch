@@ -122,21 +122,56 @@ index baed2d3..d5eaefd 100644
      return Get().etDefaultsVersion.value_or(0);
  }
 diff --git a/runtime/src/audio_backend.cpp b/runtime/src/audio_backend.cpp
-index f5df903..8cea928 100644
+index f5df903..6010d8e 100644
 --- a/runtime/src/audio_backend.cpp
 +++ b/runtime/src/audio_backend.cpp
-@@ -151,7 +151,7 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+@@ -134,16 +134,20 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+     const uint32_t maxQueued = QueueLimitBytesLocked();
+     static const bool trace = std::getenv("WC_TRACE_AUDIOQ") != nullptr;
+     if (trace) {
+-        static int minQ = 1 << 30, maxQ = 0, pushes = 0, empties = 0; ++m_traceCalls;
++        static int minQ = 1 << 30, maxQ = 0, pushes = 0, empties = 0, lows = 0; ++m_traceCalls;
+         static auto last = std::chrono::steady_clock::now();
+         minQ = std::min(minQ, queued); maxQ = std::max(maxQ, queued); ++pushes;
+         if (queued == 0) ++empties;
++        if (queued < 768) ++lows;
++        // "in": audio made so far, as a share of real time (1.0 = keeping up).
++        static double totalIn = 0; static const auto t0 = std::chrono::steady_clock::now(); totalIn += incomingBytes;
+         const auto now = std::chrono::steady_clock::now();
+         if (now - last > std::chrono::seconds(1)) {
+-            std::fprintf(stderr, "[audioq] pushes %d queued min %d max %d (limit %u) empty %d drops %d rate %.4f\n", pushes, minQ, maxQ,
+-                         maxQueued, empties, m_drops, m_rate);
++            std::fprintf(stderr, "[audioq] pushes %d queued min %d max %d (limit %u) empty %d low %d drops %d rate %.4f in %.4f\n", pushes, minQ, maxQ,
++                         maxQueued, empties, lows, m_drops, m_rate,
++                         totalIn / (std::chrono::duration<double>(now - t0).count() * m_spec.freq * m_spec.channels * 2.0));
+             m_drops = 0;
+-            minQ = 1 << 30; maxQ = 0; pushes = 0; empties = 0; last = now;
++            minQ = 1 << 30; maxQ = 0; pushes = 0; empties = 0; lows = 0; last = now;
+         }
+     }
+     // The output ran dry (the game stalled, e.g. while loading a track). Put back a short
+@@ -151,7 +155,7 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
      // again on every block, which sounds like crackling.
      if (queued == 0 && m_hadAudio) {
          const uint64_t bytesPerSecond = static_cast<uint64_t>(m_spec.freq) * m_spec.channels * sizeof(int16_t);
 -        const uint32_t cushion = static_cast<uint32_t>(bytesPerSecond * 40 / 1000) & ~3u;
-+        const uint32_t cushion = static_cast<uint32_t>(bytesPerSecond * 80 / 1000) & ~3u;
++        const uint32_t cushion = static_cast<uint32_t>(bytesPerSecond * 120 / 1000) & ~3u;
          m_silence.assign(cushion, 0);
          SDL_PutAudioStreamData(m_stream, m_silence.data(), static_cast<int>(cushion));
          m_fadeInNext = true;
-@@ -167,8 +167,11 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+@@ -159,16 +163,19 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+     m_hadAudio = true;
+     // The game makes audio by the CPU clock and the sound card plays it by its own clock, so the
+     // queue slowly fills up (and blocks get dropped: clicks) or runs dry (crackle). Nudge the
+-    // playback speed by at most 0.5% to keep the queue around 90 ms. The game hands over audio in
++    // playback speed slightly to keep the queue around 120 ms (room for a slow frame). The game hands over audio in
+     // bursts, so the queue level is averaged over about a third of a second and small errors are
+     // ignored; reacting to every burst (as the first version did) wobbled the pitch.
+     {
+         const double bytesPerMs = static_cast<double>(m_spec.freq) * m_spec.channels * sizeof(int16_t) / 1000.0;
          m_smoothQueued += (static_cast<double>(queued) - m_smoothQueued) * 0.01;
-         const double targetBytes = 90.0 * bytesPerMs;
+-        const double targetBytes = 90.0 * bytesPerMs;
++        const double targetBytes = 120.0 * bytesPerMs;
          const double error = (m_smoothQueued - targetBytes) / targetBytes;
 -        const double target = std::fabs(error) < 0.4 ? 1.0 : 1.0 + std::clamp(error * 0.005, -0.005, 0.005);
 -        m_rate += (target - m_rate) * 0.002;
@@ -148,7 +183,7 @@ index f5df903..8cea928 100644
          // Only hand SDL a new ratio in 0.1% steps: every change restarts its resampler, and
          // changing it on every block (hundreds of times a second) is itself audible as static.
          static const bool noRate = std::getenv("WC_AUDIO_NO_RATE") != nullptr;
-@@ -227,6 +230,10 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
+@@ -227,6 +234,10 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
      }
  
      const int lenBytes = static_cast<int>(frameCount * 2 * sizeof(int16_t));
@@ -160,7 +195,7 @@ index f5df903..8cea928 100644
          return true;
      }
 diff --git a/runtime/src/hle/audio/audio.cpp b/runtime/src/hle/audio/audio.cpp
-index fd19215..697a01d 100644
+index fd19215..6c63a91 100644
 --- a/runtime/src/hle/audio/audio.cpp
 +++ b/runtime/src/hle/audio/audio.cpp
 @@ -29,6 +29,7 @@ const uint32_t kAIDmaCallbackAddr = MKW_GADDR(80386480);
@@ -201,6 +236,22 @@ index fd19215..697a01d 100644
      {
          std::lock_guard<std::mutex> lock(g_ai.mutex);
          if (g_ai.length != 0) {
+@@ -514,7 +524,14 @@ int64_t ConsumeAudioPollDeltaMicros()
+     // Cap the catch-up interval after a debugger pause or host stall; backlog drains via
+     // kMaxBlocksPerTick per pass. Never return early on a zero delta: two scheduler passes
+     // can land in the same microsecond and the backlog still needs servicing.
+-    constexpr int64_t kMaxPollDeltaMicros = 100'000;
++    // Up to the output queue's length (250 ms): a longer cap keeps a slow frame from losing
++    // audio time, which left the output short until the rate control slowly refilled it.
++    constexpr int64_t kMaxPollDeltaMicros = 250'000;
++    static const bool trace = std::getenv("WC_TRACE_AUDIOQ") != nullptr;
++    if (trace && elapsed > 50'000) {
++        static int64_t lost = 0; lost += std::max<int64_t>(0, elapsed - kMaxPollDeltaMicros);
++        std::fprintf(stderr, "[audiopoll] gap %lld ms, lost total %lld ms\n", (long long)elapsed / 1000, (long long)lost / 1000);
++    }
+     return std::min(elapsed, kMaxPollDeltaMicros);
+ }
+ 
 diff --git a/runtime/src/hle/excite_truck/et_achievements.cpp b/runtime/src/hle/excite_truck/et_achievements.cpp
 index e4edc70..0f5450e 100644
 --- a/runtime/src/hle/excite_truck/et_achievements.cpp
@@ -1373,7 +1424,7 @@ index 49be121..1f0e12f 100644
  
  void DeliverDrawSyncToken(CpuContext* ctx, uint16_t token)
 diff --git a/runtime/src/hle/gx/gx_texture.cpp b/runtime/src/hle/gx/gx_texture.cpp
-index b644a42..f7970eb 100644
+index b644a42..8fc6738 100644
 --- a/runtime/src/hle/gx/gx_texture.cpp
 +++ b/runtime/src/hle/gx/gx_texture.cpp
 @@ -1,5 +1,9 @@
@@ -1386,7 +1437,15 @@ index b644a42..f7970eb 100644
  #include "runtime_log.h"
  
  #include <algorithm>
-@@ -554,6 +558,7 @@ struct Scope {
+@@ -7,6 +11,7 @@
+ #include <cstring>
+ #include <vector>
+ #include <mutex>
++#include <unordered_set>
+ #include <memory>
+ #include <array>
+ #include <cstdlib>
+@@ -554,6 +559,7 @@ struct Scope {
  } // namespace EtTexSnapshots
  
  bool EtRaceRunningForGx();
@@ -1394,7 +1453,24 @@ index b644a42..f7970eb 100644
  extern "C" int g_gxFrameCount;
  
  static void* TexDataHostPtr(uint32_t addr, uint32_t size) {
-@@ -750,7 +755,133 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+@@ -710,7 +716,15 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+         }
+ 
+         const void* dp = TexDataHostPtr(meta.dataAddr, size);
+-        if (dp && meta.needsUpload) {
++        // A texture handed over from a copy (see EtTexSnapshots) is uploaded again whenever the
++        // object switches between the copy and guest memory, though the guest data is unchanged.
++        static std::unordered_set<uint32_t> s_fromCopy;
++        const bool fromCopy = EtTexSnapshots::t_overridePtr != nullptr && dp == EtTexSnapshots::t_overridePtr;
++        const bool copySwitched = dp && fromCopy != (s_fromCopy.count(oa) != 0);
++        if (copySwitched) {
++            if (fromCopy) s_fromCopy.insert(oa); else s_fromCopy.erase(oa);
++        }
++        if (dp && (meta.needsUpload || copySwitched)) {
+             GXInitTexObjData(obj, dp);
+             meta.needsUpload = false;
+             textureDataUploaded = true;
+@@ -750,7 +764,170 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
      }
  }
  
@@ -1443,25 +1519,25 @@ index b644a42..f7970eb 100644
 +    return kNone;
 +}
 +
-+void Note(uint32_t oa) {
++Kind Note(uint32_t oa, uint32_t* dataAddr = nullptr) {
 +    TexObjMeta m;
 +    {
 +        std::lock_guard<std::mutex> guard(g_texObjMutex);
 +        try {
-+            if (!TryGetOrExtractTexObjMeta(oa, m)) return;
++            if (!TryGetOrExtractTexObjMeta(oa, m)) return kNone;
 +        } catch (...) {
-+            return;
++            return kNone;
 +        }
 +    }
 +    const bool large = m.width == 256 && (m.height == 256 || m.height == 128);
 +    const bool icon = m.width == 64 && m.height == 64;
 +    if (!(large || icon) || m.format != GX_TF_CMPR || m.dataAddr == 0) {
-+        return;
++        return kNone;
 +    }
 +    const uint32_t bytes = uint32_t(m.width) * m.height / 2u; // CMPR base level
-+    if (!Memory::Contains(m.dataAddr, bytes)) return;
++    if (!Memory::Contains(m.dataAddr, bytes)) return kNone;
 +    const auto* data = static_cast<const uint8_t*>(GuestToHostPtr(m.dataAddr, bytes));
-+    if (data == nullptr) return;
++    if (data == nullptr) return kNone;
 +    uint64_t head;
 +    std::memcpy(&head, data, sizeof(head));
 +    Kind kind;
@@ -1490,6 +1566,35 @@ index b644a42..f7970eb 100644
 +        }
 +        g_lastControllerType.store(now, std::memory_order_relaxed);
 +    }
++    if (dataAddr) *dataAddr = m.dataAddr;
++    return kind;
++}
++
++// Crash recovery keeps the A button on the shaking-remote prompt, while a bar spin or the
++// dentures (same texture) show the left stick. While the crash meter is up the shake texture is
++// handed to aurora from a copy whose first 4x4 block (hidden by the prompt's mask) is changed, so
++// it hashes differently and the prompt pack gives it the A button.
++const uint8_t* CrashShakeVariant(uint32_t dataAddr) {
++    constexpr uint32_t kBytes = 256u * 256u / 2u;
++    static std::unique_ptr<uint8_t[]> variant;
++    static uint32_t variantAddr = 0;
++    static uint64_t sourceHead = 0;
++    if (!Memory::Contains(dataAddr, kBytes)) return nullptr;
++    const auto* src = static_cast<const uint8_t*>(GuestToHostPtr(dataAddr, kBytes));
++    if (src == nullptr) return nullptr;
++    uint64_t head;
++    std::memcpy(&head, src + 8, sizeof(head));
++    if (!variant || variantAddr != dataAddr || sourceHead != head) {
++        variant.reset(new uint8_t[kBytes]);
++        std::memcpy(variant.get(), src, kBytes);
++        static const uint8_t kMark[8] = {'E', 'B', 'c', 'r', 'a', 's', 'h', 'A'};
++        std::memcpy(variant.get(), kMark, sizeof(kMark));
++        variantAddr = dataAddr;
++        sourceHead = head;
++        RT_LOGF(RT_TAG_GX, "Excitebots crash shake prompt variant %016llx\n",
++                static_cast<unsigned long long>(XXH64(variant.get(), kBytes, 0)));
++    }
++    return variant.get();
 +}
 +} // namespace EbScreenTextures
 +
@@ -1522,20 +1627,32 @@ index b644a42..f7970eb 100644
 +}
 +
  extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
++    uint32_t crashShakeAddr = 0;
++    const void* crashShakePtr = nullptr;
 +    if (::GuestRegion::IsExcitebots()) {
-+        EbScreenTextures::Note(oa);
++        uint32_t dataAddr = 0;
++        if (EbScreenTextures::Note(oa, &dataAddr) == EbScreenTextures::kShake && EbCrashMeterShown()) {
++            if (const uint8_t* v = EbScreenTextures::CrashShakeVariant(dataAddr)) {
++                crashShakeAddr = dataAddr;
++                crashShakePtr = v;
++            }
++        }
 +    }
      if (g_gxTraceFrame) {
          TexObjMeta m; bool ok = false;
          { std::lock_guard<std::mutex> guard(g_texObjMutex); try { ok = TryGetOrExtractTexObjMeta(oa, m); } catch (...) {} }
-@@ -765,11 +896,14 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+@@ -763,13 +940,16 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+             bytes = CaptureTexObjBytes(oa);
+         } catch (...) {
          }
-         uint32_t snapAddr = 0;
-         const void* snapPtr = nullptr;
+-        uint32_t snapAddr = 0;
+-        const void* snapPtr = nullptr;
 -        if (!EtRaceRunningForGx()) {
++        uint32_t snapAddr = crashShakeAddr;
++        const void* snapPtr = crashShakePtr;
 +        // Only outside races (menus play video); Excitebots has its own race state.
 +        const bool racing = ::GuestRegion::IsExcitebots() ? EbRaceRunningForGx() : EtRaceRunningForGx();
-+        if (!racing) {
++        if (!racing && snapPtr == nullptr) {
              try {
                  std::lock_guard<std::mutex> guard(g_texObjMutex);
                  TexObjMeta m;
@@ -1544,6 +1661,14 @@ index b644a42..f7970eb 100644
                      IsReasonableTextureDimensions(m.width, m.height) && IsAuroraLoadableTexFormat(m.format)) {
                      const uint8_t maxLod = m.mipmap ? static_cast<uint8_t>(ComputeMaxMipLevel(m.width, m.height)) : 0u;
                      const uint32_t size = GXGetTexBufferSize(m.width, m.height, m.format, (GXBool)m.mipmap, maxLod);
+@@ -793,6 +973,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+             }
+         });
+     } else {
++        EtTexSnapshots::Scope texData(crashShakeAddr, crashShakePtr);
+         LoadTexObjImpl(oa, tid);
+     }
+     try { uint32_t gd = Memory::Read32(kGXDataPtrAddr); if (gd) { Memory::Write32(gd + 0x5FCu, Memory::Read32(gd + 0x5FCu) | 1u); Memory::Write16(gd + 2, 0); } } catch (...) {}
 diff --git a/runtime/src/hle/gx/gx_vertex.cpp b/runtime/src/hle/gx/gx_vertex.cpp
 index 285f1c5..368f1ac 100644
 --- a/runtime/src/hle/gx/gx_vertex.cpp

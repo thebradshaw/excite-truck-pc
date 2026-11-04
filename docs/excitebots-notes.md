@@ -79,7 +79,8 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   strength. On the crash meter (256x256 CMPR fcf8a1191fd23f9c) each change of side while shaking
   the stick left and right plays a swing. On the shaking remote without the crash meter (bar
   spin, dentures) the stick rocks the remote as it steers. A (pad), C or Space (keyboard) still
-  work: a swing per press, or held on a bar spin, a rocking remote.
+  work: a swing per press, or held on a bar spin, a rocking remote. A is the main way out of a
+  crash, so the crash prompt shows A (the stick shake is the backup).
 - Any menu's Back / OK icons on screen (pause, Training cards, results) switch the pad to the
   menu layout, even while the race clock runs.
 - The "SHAKE!!!" text over the crash meter is cut to an empty string in guest memory as each race
@@ -89,7 +90,10 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   boosts out; on a bar it lets go. `WC_EB_AUTOSWING=N` swings every N reads for testing.
 - The remote pictures on the shake prompt (overlays.res `shakecont.art`: crash, bar spin,
   dentures) and the bar prompt ("Push") are replaced by the left stick, pushed left and right or
-  flicked up (`tools/prompts/make_eb_pack.py`, installed to
+  flicked up. While the crash meter is up, `GX__LoadTexObj` hands aurora a copy of the shake
+  texture with its first 8 bytes (hidden by the mask) marked `EBcrashA`, so it hashes as
+  e15dafb8e52aaa7e and the pack draws the A button there instead, up and pressed
+  (`tools/prompts/make_eb_pack.py`, installed to
   `prompts/excitebots`; `[excitebots] xbox_prompts` or the F10 Controllers checkbox turns it off).
 - The round button icons shared with Excite Truck (common.res: Wii 1, 2, A, +, -) are redrawn as
   B, A, B, Menu and View.
@@ -100,8 +104,13 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
 - Audio at 60 FPS: the race leaves the guest thread little idle time, so the 3 ms audio blocks
   arrived in bursts and the output queue sat near empty (about 5 ms), crackling. A tick now
   catches up the whole backlog (up to 40 blocks) once 4 are due, the output controller corrects
-  by up to 1.5% (was 0.5%), and a dry queue is refilled with 80 ms of silence (was 40).
-  `WC_TRACE_AUDIOQ=1` prints the queue each second; `WC_AUDIO_DUMP=<file>` writes the raw output.
+  by up to 1.5% (was 0.5%), and a dry queue is refilled with 120 ms of silence (was 40). The
+  queue is kept around 120 ms (was 90) so a slow frame does not empty it, and a gap between audio
+  services of up to 250 ms (was 100) is caught up instead of lost. The made audio itself is clean
+  at 30 and 60 FPS (checked with the dump). `WC_TRACE_AUDIOQ=1` prints the queue each second
+  ("low": pushes that found under 2 blocks queued, "in": audio made so far over real time) and
+  each gap over 50 ms; `Excitebots-audio-log.bat` in the install folder runs the game with it into
+  `audio-log.txt`. `WC_AUDIO_DUMP=<file>` writes the raw output.
 - The three screens before the title (strap, ESRB, hold) are skipped: the boot step at
   `0x805A47F0` is set to 11 (done) each frame until the game reaches it (`EbFrameTick`).
 - `-direct_to_track:@mitch5_bar_challenge` (the yellow bar minigame) reaches a bar in about

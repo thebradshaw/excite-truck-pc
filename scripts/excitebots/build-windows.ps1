@@ -455,6 +455,9 @@ if (Test-Path -LiteralPath $prompts -PathType Container) {
 } else {
     Write-Host "Warning: $prompts is missing, so the game will show the Wii Remote's buttons."
 }
+# Runs the game with sound-output stats logged to audio-log.txt (for tracking down crackle).
+[IO.File]::WriteAllText((Join-Path $Out 'Excitebots-audio-log.bat'),
+    "@echo off`r`ncd /d `"%~dp0`"`r`nset WC_TRACE_AUDIOQ=1`r`nExcitebots.exe > audio-log.txt 2>&1`r`n")
 # portable.txt keeps settings, saves and caches in UserData next to the game.
 New-Item -ItemType File -Force -Path (Join-Path $Out 'portable.txt') | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $Out 'UserData\achievements')) | Out-Null

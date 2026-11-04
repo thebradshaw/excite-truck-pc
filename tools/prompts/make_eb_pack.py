@@ -6,8 +6,8 @@ Each file replaces one texture of the US disc (RX3E01) and is named the way auro
 Dolphin-style texture replacement expects: tex1_<w>x<h>_<xxh64>_<fmt>.png.
 
 It replaces the Wii Remote pictures that ask for a motion with the left stick, which plays the
-motion on the pad: the shaking remote (crash recovery, bar spin, dentures) becomes a stick pushed
-left and right, and the bar prompt's pushed remote ("Push", let go of a bar) a stick flicked up.
+motion on the pad: the shaking remote (bar spin, dentures) becomes a stick pushed left and right
+(but the A button during crash recovery, where A is the main way back up), and the bar prompt's pushed remote ("Push", let go of a bar) a stick flicked up.
 
 It also redraws the round button icons Excitebots shares with Excite Truck (common.res, same
 hashes): Wii 2 becomes A (OK / accelerate), Wii 1 becomes B (back) and Wii A becomes B, since B
@@ -69,6 +69,13 @@ def build(scale):
     for cy, dx in ((52.5, -1), (192.5, 1)):
         stick(c, 131, cy, r, dx, 0)
     out["tex1_256x256_f2965209f9cff340_14.png"] = c.result()
+    # The same prompt during crash recovery, where A is the main way back up (the stick shake
+    # still works). The runtime hands aurora a copy of the texture with a marked head while the
+    # crash meter is shown, so it hashes differently: A up in one frame, pressed in the other.
+    c = Canvas(256, 256, scale, (0, 0, 0, 255))
+    for cy, pressed in ((52.5, False), (192.5, True)):
+        c.face(131 - r, cy - r, 131 + r, cy + r, "A", pressed=pressed)
+    out["tex1_256x256_e15dafb8e52aaa7e_14.png"] = c.result()
     top = circle_mask(256, 256, scale, 131 - r, 52.5 - r, 131 + r, 52.5 + r)
     bottom = circle_mask(256, 256, scale, 131 - r, 192.5 - r, 131 + r, 192.5 + r)
     out["tex1_256x256_6f12f80be63edc3c_0.png"] = Image.composite(top, bottom, top.getchannel("A"))
