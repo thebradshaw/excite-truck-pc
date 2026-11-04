@@ -728,10 +728,12 @@ void BotsControlsPage() {
     ImGui::Indent(S(8));
     ControlLine("RT", 0, true, "Accelerate", "RB");
     ControlLine("X", IM_COL32(80, 150, 255, 255), false, "Brake", "LT");
-    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Turbo; swing when SHAKE!!! or Push shows");
+    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Turbo");
     ControlLine("B", IM_COL32(240, 80, 70, 255), false, "Use your weapon");
     ControlLine("Y", IM_COL32(240, 200, 60, 255), false, "The Wii Remote's A button");
     ControlLine("LS", 0, true, "Steer, and tilt in the air");
+    ControlLine("LS", 0, true, "Flick it to let go of a bar");
+    ControlLine("LS", 0, true, "Shake it left and right on SHAKE!!! or Push");
     ControlLine("MENU", 0, true, "Pause");
     ControlLine("GUIDE", 0, true, "Quit the game (A to quit, B to stay)");
     ImGui::Unindent(S(8));
@@ -746,8 +748,10 @@ void BotsControlsPage() {
     }
     ImGui::Dummy(ImVec2(0, S(4)));
     ImGui::Indent(S(8));
-    Paragraph("Your bot grabs bars by itself. Hold A to spin on a bar or to shake in the dentures. The game "
-              "shows the Xbox button for each action. To change which "
+    Paragraph("Your bot grabs bars by itself. Where the Wii game had you swing the remote, use the left stick in "
+              "the same rhythm: flick it to let go of a bar, and shake it left and right when SHAKE!!! or Push "
+              "shows (crash recovery, bar spins, dentures). A works there too. The game shows the button for each "
+              "action. To change which "
               "button does what, press F10 in the game and open Controllers.");
     ImGui::Unindent(S(8));
 }
