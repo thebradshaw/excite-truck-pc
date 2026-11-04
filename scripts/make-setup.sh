@@ -37,6 +37,9 @@ patch_tree() {
     cat "$REPO/tools/sdk_map/et_versions.inc" >> "$ws/runtime/include/guest_abi/guest_versions.inc"
     if [ "$game" = bots ]; then
         git -C "$ws" apply --whitespace=nowarn "$REPO/patches/excitebots/0004-excitebots-runtime.patch"
+        for p in "$REPO"/patches/excitebots/aurora/*.patch; do
+            [ -f "$p" ] && git -C "$ws/aurora-main" apply --whitespace=nowarn "$p"
+        done
         cat "$REPO/tools/sdk_map/eb_versions.inc" >> "$ws/runtime/include/guest_abi/guest_versions.inc"
     fi
 }
