@@ -1149,6 +1149,8 @@ void Panel(ImDrawList* draw, ImVec2 min, ImVec2 max) {
     draw->AddRect(min, max, kPanelBorder, S(12), 0, S(1));
 }
 
+// The (A) Select and (B) Back hints in the bottom right. They work as buttons too: Select presses
+// whatever has the cursor, Back goes back to the game list from a game's menu.
 void ControllerHints(ImDrawList* draw, ImVec2 rightBottom) {
     struct Hint { const char* glyph; ImU32 color; const char* text; };
     const Hint hints[] = {
@@ -1159,13 +1161,34 @@ void ControllerHints(ImDrawList* draw, ImVec2 rightBottom) {
     const float y = rightBottom.y - S(14);
     for (int i = int(std::size(hints)) - 1; i >= 0; --i) {
         const ImVec2 size = F.small->CalcTextSizeA(F.small->FontSize, FLT_MAX, 0.0f, hints[i].text);
+        const float right = x;
         x -= size.x;
-        draw->AddText(F.small, F.small->FontSize, ImVec2(x, y - size.y * 0.5f), kText, hints[i].text);
+        const float textX = x;
         x -= S(22);
         const float r = S(10);
-        draw->AddCircleFilled(ImVec2(x + r - S(8), y), r, hints[i].color, 24);
+        const ImVec2 circle(x + r - S(8), y);
+        const ImVec2 min(circle.x - r - S(4), y - S(13)), max(right + S(4), y + S(13));
+        ImGui::SetCursorScreenPos(min);
+        ImGui::PushID(i);
+        const bool clicked = ImGui::InvisibleButton("hint", ImVec2(max.x - min.x, max.y - min.y));
+        const bool hovered = ImGui::IsItemHovered();
+        ImGui::PopID();
+        if (hovered) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            draw->AddRectFilled(min, max, IM_COL32(255, 255, 255, 30), S(13));
+        }
+        if (clicked) {
+            if (i == 0) {
+                Nav(NavCmd::Accept);
+            } else if (g_screen == Screen::Game) {
+                GoHome();
+            }
+        }
+        draw->AddText(F.small, F.small->FontSize, ImVec2(textX, y - size.y * 0.5f), hovered ? kAmber : kText,
+                      hints[i].text);
+        draw->AddCircleFilled(circle, r, hints[i].color, 24);
         const ImVec2 g = F.small->CalcTextSizeA(F.small->FontSize * 0.85f, FLT_MAX, 0.0f, hints[i].glyph);
-        draw->AddText(F.small, F.small->FontSize * 0.85f, ImVec2(x + r - S(8) - g.x * 0.5f, y - g.y * 0.5f),
+        draw->AddText(F.small, F.small->FontSize * 0.85f, ImVec2(circle.x - g.x * 0.5f, y - g.y * 0.5f),
                       IM_COL32(20, 20, 20, 255), hints[i].glyph);
         x -= S(24);
     }
@@ -1532,6 +1555,10 @@ void DrawGameColumn(int slot, float cx, float colW, float top, float logoH, doub
             SpacedText(draw, F.small, F.small->FontSize * 1.25f, ImVec2(pos.x + S(1.5f), pos.y + S(2)), IM_COL32(10, 6, 4, 170),
                        label, S(3));
             SpacedText(draw, F.small, F.small->FontSize * 1.25f, pos, kAmber, label, S(3));
+            // Clicking "(A) PLAY" opens the game, like the logo.
+            ImGui::SetCursorScreenPos(ImVec2(cx - total * 0.5f - S(6), y - S(6)));
+            if (ImGui::InvisibleButton("play", ImVec2(total + S(12), size.y + S(12)))) EnterGame(id);
+            if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
             y += size.y + S(6);
         } else {
             y = CenteredCaps(draw, cx, y, kGood, "READY", 1.25f);
