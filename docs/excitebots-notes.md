@@ -73,11 +73,13 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   ("SHAKE!!!") and letting go of a bar ("Push") use the flick. Grabbing a bar is automatic.
 - Pad layout in a race: RT/RB accelerate (Wii 2), X and LT/LB brake (Wii 1), A turbo, B the Wii
   A button (weapons), Y also Wii A, left stick steers and tilts. Menus: A OK, B or X back.
-- Motion prompts are spotted by their textures (`EbScreenTextures` in gx_texture.cpp). On "Push"
-  (let go of a bar) and on the crash meter (256x256 CMPR fcf8a1191fd23f9c), A (pad), C or Space
-  (keyboard) plays one swing per press: three reads with the acceleration thrown against gravity
-  at twice its strength. On the shaking remote without the crash meter (bar spin, dentures),
-  holding A rocks the remote left and right, like shaking the stick.
+- Motion prompts are spotted by their textures (`EbScreenTextures` in gx_texture.cpp) and played
+  with the left stick. On "Push" (let go of a bar) each flick of the stick (past 70% from under
+  30%) plays one swing: three reads with the acceleration thrown against gravity at twice its
+  strength. On the crash meter (256x256 CMPR fcf8a1191fd23f9c) each change of side while shaking
+  the stick left and right plays a swing. On the shaking remote without the crash meter (bar
+  spin, dentures) the stick rocks the remote as it steers. A (pad), C or Space (keyboard) still
+  work: a swing per press, or held on a bar spin, a rocking remote.
 - Any menu's Back / OK icons on screen (pause, Training cards, results) switch the pad to the
   menu layout, even while the race clock runs.
 - The "SHAKE!!!" text over the crash meter is cut to an empty string in guest memory as each race
@@ -85,13 +87,21 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
 - The Guide button opens the runtime's "Quit the game?" prompt (A exits, B cancels) instead of
   the Wii HOME menu. On the crash prompt the meter fills and the bot
   boosts out; on a bar it lets go. `WC_EB_AUTOSWING=N` swings every N reads for testing.
-- The remote pictures on the crash prompt (overlays.res `shakecont.art`) and the bar prompt
-  ("Push") are replaced by the A button (`tools/prompts/make_eb_pack.py`, installed to
+- The remote pictures on the shake prompt (overlays.res `shakecont.art`: crash, bar spin,
+  dentures) and the bar prompt ("Push") are replaced by the left stick, pushed left and right or
+  flicked up (`tools/prompts/make_eb_pack.py`, installed to
   `prompts/excitebots`; `[excitebots] xbox_prompts` or the F10 Controllers checkbox turns it off).
 - The round button icons shared with Excite Truck (common.res: Wii 1, 2, A, +, -) are redrawn as
   B, A, B, Menu and View.
-- The Wii Remote / Wii Wheel choice (new profile, Options) is confirmed automatically after
-  about a quarter second, recognised by its picture texture (256x128 CMPR c8c6e66dee7d90cc).
+- The "how to" cards after a race's intro screen (red bar, yellow bar, leg run, glide: Wii Remote
+  instructions) are not queued: 0x800113C0 picks them by comparing the event's `howto_guide`
+  against names at 0x80477511, 0x80477567, 0x804775CC and 0x80477623, which `EbFrameTick`
+  breaks once at boot (`DisableHowToCards`). Minigame how-to cards are left alone.
+- Audio at 60 FPS: the race leaves the guest thread little idle time, so the 3 ms audio blocks
+  arrived in bursts and the output queue sat near empty (about 5 ms), crackling. A tick now
+  catches up the whole backlog (up to 40 blocks) once 4 are due, the output controller corrects
+  by up to 1.5% (was 0.5%), and a dry queue is refilled with 80 ms of silence (was 40).
+  `WC_TRACE_AUDIOQ=1` prints the queue each second; `WC_AUDIO_DUMP=<file>` writes the raw output.
 - The three screens before the title (strap, ESRB, hold) are skipped: the boot step at
   `0x805A47F0` is set to 11 (done) each frame until the game reaches it (`EbFrameTick`).
 - `-direct_to_track:@mitch5_bar_challenge` (the yellow bar minigame) reaches a bar in about
@@ -161,7 +171,7 @@ Set them with `WC_EB_ARGS`.
 - Boots to "Press 2 to Start" at about 59 fps (container, software renderer), 16:9, creates its
   save file and reaches the profile screen.
 - Races load and draw (`WC_EB_ARGS=-direct_to_track:China`), with the HUD in 16:9.
-- Xbox layout in races and menus; A swings (checked on crash recovery and on bars).
+- Xbox layout in races and menus; the left stick plays the motion prompts.
 - Shader list recorded; local achievements in place.
-- Next: a stick prompt for the bar spin, the tutorial cards (Wii Remote pictures and text), play
-  through a normal race to see an achievement unlock.
+- Next: Training's lesson cards (Wii Remote pictures and text), play through a normal race to
+  see an achievement unlock.

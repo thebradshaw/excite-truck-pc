@@ -121,6 +121,86 @@ index baed2d3..d5eaefd 100644
  inline int64_t EtDefaultsVersion() {
      return Get().etDefaultsVersion.value_or(0);
  }
+diff --git a/runtime/src/audio_backend.cpp b/runtime/src/audio_backend.cpp
+index f5df903..8cea928 100644
+--- a/runtime/src/audio_backend.cpp
++++ b/runtime/src/audio_backend.cpp
+@@ -151,7 +151,7 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+     // again on every block, which sounds like crackling.
+     if (queued == 0 && m_hadAudio) {
+         const uint64_t bytesPerSecond = static_cast<uint64_t>(m_spec.freq) * m_spec.channels * sizeof(int16_t);
+-        const uint32_t cushion = static_cast<uint32_t>(bytesPerSecond * 40 / 1000) & ~3u;
++        const uint32_t cushion = static_cast<uint32_t>(bytesPerSecond * 80 / 1000) & ~3u;
+         m_silence.assign(cushion, 0);
+         SDL_PutAudioStreamData(m_stream, m_silence.data(), static_cast<int>(cushion));
+         m_fadeInNext = true;
+@@ -167,8 +167,11 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+         m_smoothQueued += (static_cast<double>(queued) - m_smoothQueued) * 0.01;
+         const double targetBytes = 90.0 * bytesPerMs;
+         const double error = (m_smoothQueued - targetBytes) / targetBytes;
+-        const double target = std::fabs(error) < 0.4 ? 1.0 : 1.0 + std::clamp(error * 0.005, -0.005, 0.005);
+-        m_rate += (target - m_rate) * 0.002;
++        // Outside +-40% of the target, pull back toward it: gently at first, up to 1.5% when the
++        // queue is nearly empty or full. A 0.5% cap could not hold a 60 fps Excitebots race,
++        // whose audio arrives about 0.6% slow, so the queue sat near empty and crackled.
++        const double target = std::fabs(error) < 0.4 ? 1.0 : 1.0 + std::clamp(error * 0.02, -0.015, 0.015);
++        m_rate += (target - m_rate) * 0.004;
+         // Only hand SDL a new ratio in 0.1% steps: every change restarts its resampler, and
+         // changing it on every block (hundreds of times a second) is itself audible as static.
+         static const bool noRate = std::getenv("WC_AUDIO_NO_RATE") != nullptr;
+@@ -227,6 +230,10 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
+     }
+ 
+     const int lenBytes = static_cast<int>(frameCount * 2 * sizeof(int16_t));
++    if (static const char* dumpPath = std::getenv("WC_AUDIO_DUMP"); dumpPath) {
++        static FILE* dump = std::fopen(dumpPath, "wb");
++        if (dump) { std::fwrite(m_convertBuffer.data(), 1, lenBytes, dump); std::fflush(dump); }
++    }
+     if (!QueueHasCapacityLocked(lenBytes)) {
+         return true;
+     }
+diff --git a/runtime/src/hle/audio/audio.cpp b/runtime/src/hle/audio/audio.cpp
+index fd19215..697a01d 100644
+--- a/runtime/src/hle/audio/audio.cpp
++++ b/runtime/src/hle/audio/audio.cpp
+@@ -29,6 +29,7 @@ const uint32_t kAIDmaCallbackAddr = MKW_GADDR(80386480);
+ // Max completed 3 ms DMA blocks delivered per tick. Draining several at once catches up
+ // backlog from a long frame without letting a large stall spiral into an unbounded loop.
+ constexpr int kMaxBlocksPerTick = 4;
++constexpr int kMaxCatchUpBlocksPerTick = 40; // 120 ms of 3 ms blocks
+ // Backlog (in blocks) tolerated before a catch-up block waits on an in-flight mix.
+ constexpr double kMaxDeferredBlocks = 2.0;
+ 
+@@ -407,6 +408,16 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
+     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
+     CpuContextScope scope(cpu);
+ 
++    // Normally a few blocks per service point. When the guest thread went a long stretch without
++    // one (a 60 fps race leaves little idle time, and a frame can block on presentation), catch
++    // up the whole backlog instead: at 4 blocks per point the output fell behind and crackled.
++    int maxBlocks = kMaxBlocksPerTick;
++    {
++        std::lock_guard<std::mutex> lock(g_ai.mutex);
++        if (g_ai.accumulatorSeconds >= blockDuration * kMaxBlocksPerTick) {
++            maxBlocks = kMaxCatchUpBlocksPerTick;
++        }
++    }
+     int blocksCompleted = 0;
+     while (true) {
+         // A block due while the previous mix is still running would block on it; leave it for the
+@@ -475,11 +486,10 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
+             g_ai.bytesLeft = g_ai.length;
+         }
+ 
+-        if (++blocksCompleted >= kMaxBlocksPerTick) {
++        if (++blocksCompleted >= maxBlocks) {
+             break;
+         }
+     }
+-
+     {
+         std::lock_guard<std::mutex> lock(g_ai.mutex);
+         if (g_ai.length != 0) {
 diff --git a/runtime/src/hle/excite_truck/et_achievements.cpp b/runtime/src/hle/excite_truck/et_achievements.cpp
 index e4edc70..0f5450e 100644
 --- a/runtime/src/hle/excite_truck/et_achievements.cpp
@@ -534,10 +614,12 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..9b65a1b
+index 0000000..e14fa0c
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,502 @@
+@@ -0,0 +1,545 @@
++#include <utility>
++#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
 +// keyboard, answered at the KPAD level like Excite Truck (see et_input.cpp).
 +//   - KPADSetConnectCallback (0x8004E984) is recorded; the first KPADRead reports channel 0 as
@@ -723,6 +805,7 @@ index 0000000..9b65a1b
 +    const bool invertAir = RuntimeConfigFile::InvertAirControl(true);
 +    bool swingButton = false;
 +    bool actionButton = false; // A on the pad, C or Space: turbo, or the motion a prompt asks for
++    float stickX = 0.0f, stickY = 0.0f; // the left stick in a race, for the motion prompts
 +    // The exit prompt or the F10 bar has the controls.
 +    if (InputBindings::InputBlocked()) {
 +        return in;
@@ -754,7 +837,8 @@ index 0000000..9b65a1b
 +            }
 +            if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= kWpadA;
 +            in.steer = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
-+            const float stickY = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
++            stickX = in.steer;
++            stickY = StickAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
 +            in.pitch = invertAir ? stickY : -stickY;
 +        } else {
 +            // Menus: A is OK (2), B/X back (1), the stick moves the cursor and the remote stays
@@ -797,16 +881,35 @@ index 0000000..9b65a1b
 +        in.steer = 0.0f; // keep the remote level in the menus
 +        in.pitch = 0.0f;
 +    }
-+    // The motion prompts. Push (let go of a bar) and the crash recovery's shake take one swing per
-+    // press. The shake prompt on a bar spin or in the dentures wants a real shake: holding A
-+    // rocks the remote left and right, like shaking the stick.
-+    if (racing && actionButton) {
++    // The motion prompts, played with the left stick (the prompt pack draws a stick there).
++    // Push (let go of a bar): flick the stick, one swing per flick. The crash recovery's shake:
++    // shake the stick, one swing per change of side. The shake on a bar spin or in the dentures
++    // wants a real shake, and the stick already rocks the remote as it steers. A still works:
++    // a swing per press, or held, a rocking remote.
++    if (racing) {
 +        const bool shake = EbShakePromptShown();
-+        if (EbPushPromptShown() || (shake && EbCrashMeterShown())) {
-+            swingButton = true;
-+        } else if (shake) {
-+            static int rock = 0;
-+            in.steer = ((++rock / 3) % 2) != 0 ? 1.0f : -1.0f;
++        const bool push = EbPushPromptShown();
++        const bool crashShake = shake && EbCrashMeterShown();
++        static bool flicked = false;
++        static int lastSide = 0;
++        const float mag = std::sqrt(stickX * stickX + stickY * stickY);
++        if (push) {
++            if (!flicked && mag > 0.7f) swingButton = true;
++            if (mag > 0.7f) flicked = true;
++            if (mag < 0.3f) flicked = false;
++        } else {
++            flicked = mag > 0.7f;
++        }
++        const int side = stickX > 0.5f ? 1 : stickX < -0.5f ? -1 : 0;
++        if (crashShake && side != 0 && side != lastSide) swingButton = true;
++        if (side != 0) lastSide = side;
++        if (actionButton) {
++            if (push || crashShake) {
++                swingButton = true;
++            } else if (shake) {
++                static int rock = 0;
++                in.steer = ((++rock / 3) % 2) != 0 ? 1.0f : -1.0f;
++            }
 +        }
 +    }
 +    // Developer aid for testing swings without a pad: WC_EB_AUTOSWING=N swings every N reads.
@@ -996,6 +1099,25 @@ index 0000000..9b65a1b
 +}
 +} // namespace
 +
++// The "how to" cards shown after a race's intro screen (0x800113C0 queues them when the event's
++// howto_guide is red_bar, yellow_bar, leg_run or glide) explain Wii Remote motions. Break the
++// four names it compares against so no card is queued.
++static void DisableHowToCards()
++{
++    static const std::pair<uint32_t, const char*> kGuides[] = {
++        {0x80477511u, "red_bar"}, {0x80477567u, "yellow_bar"}, {0x804775CCu, "leg_run"}, {0x80477623u, "glide"},
++    };
++    for (const auto& [addr, name] : kGuides) {
++        bool match = true;
++        for (size_t i = 0; name[i] != 0 && match; ++i) match = Memory::Read8(addr + i) == static_cast<uint8_t>(name[i]);
++        if (match) {
++            Memory::Write8(addr, '#');
++        } else {
++            std::fprintf(stderr, "[hle] EB how-to name %s not found at %08x\n", name, addr);
++        }
++    }
++}
++
 +void EbFrameTick()
 +{
 +    constexpr uint32_t kBootStep = 0x805A47F0u;
@@ -1005,6 +1127,7 @@ index 0000000..9b65a1b
 +    if (!saveChecked) {
 +        saveChecked = true;
 +        EbRepairBrokenSave();
++        DisableHowToCards();
 +    }
 +    // 60 FPS races. The engine simulates in 1/59.94 s ticks, but a race start (0x800096C0) asks the
 +    // frame pacer (0x803D0C00) for one frame every 2 retraces, i.e. 30 FPS with two ticks a frame;
