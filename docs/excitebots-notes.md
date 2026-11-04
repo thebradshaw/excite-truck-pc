@@ -120,8 +120,19 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   cannot answer.
 - WiiConnect24: the KD "try suspend scheduler" probe answers success for Excitebots (Mario Kart's
   two failing boot probes made Excitebots show error 109042 when loading a profile).
-- Races use a fixed 1/30 s step (`0x805A2CE4`), so they run at 30 FPS. Aurora's frame
-  interpolation assumes a 60 FPS game (one retrace per frame), so it does not help yet.
+- 60 FPS races: the frame pacer (`0x803D0C00`) waits for the number of retraces requested at
+  `0x805A1768` (`-0x6878(r13)`). Race start (`0x800096C0`) asks for 2 (30 FPS);
+  `EbFrameTick` sets it back to 1 while a race runs, and the engine's per-frame step
+  (`0x805A2CE4`) follows, so the race clock stays in real time. `WC_EB_30FPS=1` keeps 30.
+- Sky streaks: some effect meshes (arrays in a per-frame MEM2 arena, `0x900Fxxxx`/`0x901Fxxxx`)
+  are still being written after their draw is queued; the Wii GPU fetches them later. Aurora
+  copied them at draw time, so stale or unwritten vertices (`0xE3E3E3E3` fill) made long thin
+  triangles. `patches/excitebots/aurora/0001-late-vertex-arrays.patch` adds
+  `aurora_set_late_array_window`: indexed arrays from guest RAM are copied again at frame end
+  (unless the same source was staged twice that frame). Excitebots turns it on in
+  `GxGuestWrite::InstallAuroraHooks`; `WC_EB_EARLY_ARRAYS=1` turns it off for comparison.
+- The Wii Remote / Wii Wheel screen (`0x80326930` new profile, `0x80326A80` Options) is replaced
+  by native overrides that answer "chosen" at once, so the default controls are used.
 - Async NAND calls return OK and report the result through the callback, as on the Wii (for
   Excitebots only). The save code accepts EXISTS from the callback but treated a direct EXISTS as
   "An error occurred while accessing Wii system memory" on the second save of a new profile.

@@ -364,10 +364,10 @@ index 0000000..1411313
 +} // namespace eb
 diff --git a/runtime/src/hle/excitebots/eb_hooks.cpp b/runtime/src/hle/excitebots/eb_hooks.cpp
 new file mode 100644
-index 0000000..2aa8ac2
+index 0000000..618e902
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_hooks.cpp
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,164 @@
 +// Excitebots: Trick Racing (RX3E01) specific hooks.
 +//
 +// Addresses here use the 0x8E000000 alias: guest_versions.inc maps 0x8E000000 + (EB address
@@ -515,12 +515,29 @@ index 0000000..2aa8ac2
 +PPC_NATIVE_OVERRIDE(8E0AF900, EB_NANDCreateDirAsync_800af900, int32_t,
 +    (uint32_t pathPtr, uint32_t perm, uint32_t attr, uint32_t callbackPtr, uint32_t commandBlockPtr),
 +    (pathPtr, perm, attr, callbackPtr, commandBlockPtr));
++
++// The Wii Remote / Wii Wheel choice (controller.lyt). 0x80326930 runs it for a new profile and
++// 0x80326A80 from Options; each returns 1 once a choice is made (the screen's result -2) and 0
++// when the player backs out, which shows the previous screen again. A pad plays the same either
++// way, so answer "chosen" without showing the screen: the profile keeps its default, the Wii
++// Remote.
++extern "C" void EB_ControllerTypeScreen_80326930(CpuContext* ctx)
++{
++    ctx->gpr[3] = 1;
++}
++PPC_NATIVE_OVERRIDE_VOID(8E326930, EB_ControllerTypeScreen_80326930, (CpuContext* ctx), (ctx));
++
++extern "C" void EB_ControllerTypeOptions_80326a80(CpuContext* ctx)
++{
++    ctx->gpr[3] = 1;
++}
++PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..e40bac7
+index 0000000..9b65a1b
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,493 @@
+@@ -0,0 +1,502 @@
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
 +// keyboard, answered at the KPAD level like Excite Truck (see et_input.cpp).
 +//   - KPADSetConnectCallback (0x8004E984) is recorded; the first KPADRead reports channel 0 as
@@ -989,6 +1006,15 @@ index 0000000..e40bac7
 +        saveChecked = true;
 +        EbRepairBrokenSave();
 +    }
++    // 60 FPS races. The engine simulates in 1/59.94 s ticks, but a race start (0x800096C0) asks the
++    // frame pacer (0x803D0C00) for one frame every 2 retraces, i.e. 30 FPS with two ticks a frame;
++    // the menus run at 1. Ask for 1 while a race is loaded: the game then draws every tick and its
++    // race clock still follows real time. WC_EB_30FPS=1 keeps the original rate.
++    constexpr uint32_t kFrameIntervalRequest = 0x805A1768u; // -0x6878(r13), 0x803D0800 sets it
++    static const bool keep30 = std::getenv("WC_EB_30FPS") != nullptr;
++    if (!keep30 && ReadF32(kRaceTimeStep) > 0.0f && Memory::Read32(kFrameIntervalRequest) == 2) {
++        Memory::Write32(kFrameIntervalRequest, 1);
++    }
 +    // Once per race, as it starts (the text is loaded with the race): when the race step appears,
 +    // or the race clock goes back (the next race).
 +    static bool wasRacing = false;
@@ -1109,6 +1135,44 @@ index e49a831..05dad31 100644
  }
  
  void GxRestoreVtxStateAfterDisplayList() {
+diff --git a/runtime/src/hle/gx/gx_guest_write_hooks.cpp b/runtime/src/hle/gx/gx_guest_write_hooks.cpp
+index 315526c..c490894 100644
+--- a/runtime/src/hle/gx/gx_guest_write_hooks.cpp
++++ b/runtime/src/hle/gx/gx_guest_write_hooks.cpp
+@@ -2,10 +2,13 @@
+ 
+ #include "memory.h"
+ #include "runtime_log.h"
++#include "guest_abi/guest_region.h"
+ 
+ #include <aurora/gfx.h>
+ 
++#include <algorithm>
+ #include <array>
++#include <cstdlib>
+ #include <cstdio>
+ 
+ namespace GxGuestWrite {
+@@ -78,6 +81,19 @@ void InstallAuroraHooks() {
+         return;
+     }
+     aurora_set_guest_write_hooks(&GuestWriteGenerationHook, &GuestWriteNotifyHook);
++
++    // Excitebots fills some vertex arrays (effect ribbons) after queueing the draws that use
++    // them; the Wii GPU reads them later, so let aurora read guest RAM arrays at frame end.
++    if (::GuestRegion::IsExcitebots() && std::getenv("WC_EB_EARLY_ARRAYS") == nullptr) {
++        const auto* lo = static_cast<const uint8_t*>(g_aliases[0].hostBase);
++        const auto* hi = lo + g_aliases[0].size;
++        for (const auto& alias : g_aliases) {
++            const auto* base = static_cast<const uint8_t*>(alias.hostBase);
++            lo = std::min(lo, base);
++            hi = std::max(hi, base + alias.size);
++        }
++        aurora_set_late_array_window(lo, hi);
++    }
+ }
+ 
+ } // namespace GxGuestWrite
 diff --git a/runtime/src/hle/gx/gx_init.cpp b/runtime/src/hle/gx/gx_init.cpp
 index e890b8b..e2e7e7e 100644
 --- a/runtime/src/hle/gx/gx_init.cpp

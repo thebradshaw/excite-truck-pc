@@ -94,7 +94,7 @@ echo "$DOL_SHA256  $DATA/sys/main.dol" | sha256sum -c --quiet ||
 
 # --- WiiCompiled, patched for Excite Truck and then Excitebots ----------------------------
 WS="$WORK/wiicompiled"
-PATCH_STAMP="$( (cat "$REPO"/patches/*.patch "$REPO"/patches/excitebots/*.patch "$REPO/tools/sdk_map/et_versions.inc" \
+PATCH_STAMP="$( (cat "$REPO"/patches/*.patch "$REPO"/patches/excitebots/*.patch "$REPO"/patches/excitebots/aurora/*.patch "$REPO/tools/sdk_map/et_versions.inc" \
     "$REPO/tools/sdk_map/eb_versions.inc" "$REPO"/projects/excitebots/*) | sha256sum | cut -c1-16)"
 if [ "$(cat "$WS/.eb-patched" 2>/dev/null)" != "$PATCH_STAMP" ]; then
     step "Fetching WiiCompiled (the recompiler and runtime this port is built on)" 12
@@ -114,6 +114,7 @@ if [ "$(cat "$WS/.eb-patched" 2>/dev/null)" != "$PATCH_STAMP" ]; then
     git -C "$WS/aurora-main" apply --whitespace=nowarn "$REPO/patches/0002-aurora-channel-colors.patch"
     git -C "$WS" apply --whitespace=nowarn "$REPO/patches/0003-xbox-button-prompts.patch"
     for p in "$REPO"/patches/excitebots/*.patch; do git -C "$WS" apply --whitespace=nowarn "$p"; done
+    for p in "$REPO"/patches/excitebots/aurora/*.patch; do git -C "$WS/aurora-main" apply --whitespace=nowarn "$p"; done
     cat "$REPO/tools/sdk_map/et_versions.inc" "$REPO/tools/sdk_map/eb_versions.inc" \
         >> "$WS/runtime/include/guest_abi/guest_versions.inc"
     mkdir -p "$WS/projects/excitebots"

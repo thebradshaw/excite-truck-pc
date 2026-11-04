@@ -284,6 +284,7 @@ if ($SetupMode) {
 } else {
 $stampInputs = @(Get-ChildItem -LiteralPath (Join-Path $Repo 'patches') -Filter '*.patch' -File) +
     @(Get-ChildItem -LiteralPath (Join-Path $Repo 'patches\excitebots') -Filter '*.patch' -File) +
+    @(Get-ChildItem -LiteralPath (Join-Path $Repo 'patches\excitebots\aurora') -Filter '*.patch' -File) +
     @(Get-Item -LiteralPath (Join-Path $Repo 'tools\sdk_map\et_versions.inc')) +
     @(Get-Item -LiteralPath (Join-Path $Repo 'tools\sdk_map\eb_versions.inc')) +
     @(Get-ChildItem -LiteralPath (Join-Path $Repo 'projects\excitebots') -File)
@@ -311,6 +312,9 @@ if ($current -ne $stamp) {
     Run $git.Source @('-C', $ws, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0003-xbox-button-prompts.patch'))
     foreach ($patch in Get-ChildItem -LiteralPath (Join-Path $Repo 'patches\excitebots') -Filter '*.patch' -File | Sort-Object Name) {
         Run $git.Source @('-C', $ws, 'apply', '--whitespace=nowarn', $patch.FullName)
+    }
+    foreach ($patch in Get-ChildItem -LiteralPath (Join-Path $Repo 'patches\excitebots\aurora') -Filter '*.patch' -File | Sort-Object Name) {
+        Run $git.Source @('-C', $aurora, 'apply', '--whitespace=nowarn', $patch.FullName)
     }
     $versions = Join-Path $ws 'runtime\include\guest_abi\guest_versions.inc'
     [IO.File]::AppendAllText($versions, [IO.File]::ReadAllText((Join-Path $Repo 'tools\sdk_map\et_versions.inc')))
