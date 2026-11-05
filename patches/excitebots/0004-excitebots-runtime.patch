@@ -759,10 +759,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..7d9be5f
+index 0000000..f110275
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,621 @@
+@@ -0,0 +1,626 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -1046,14 +1046,19 @@ index 0000000..7d9be5f
 +        static bool pushWasShown = false;
 +        static int heldReads = 0;
 +        static int lastDir = 0; // 1 forward, 2 back, 3 left, 4 right
-+        // Bars play themselves (Chris, round 9: automated and fast): while the Push prompt is up a
-+        // swing plays every 6 reads (3 swinging, 3 at rest, the quickest the game's detector takes
-+        // as separate flicks), and the bar spin's shake rocks the remote at full speed, whatever
-+        // the stick does. WC_EB_MANUAL_BARS=1 goes back to the stick and A.
++        // Bars play themselves (Chris, round 9: automated and fast): while the Push prompt is up the
++        // remote rocks forward and back, and the bar spin's shake rocks it side to side at full
++        // speed, whatever the stick does. WC_EB_MANUAL_BARS=1 goes back to the stick and A.
 +        static const bool autoBars = std::getenv("WC_EB_MANUAL_BARS") == nullptr;
 +        static int autoReads = 0;
++        // What spins the bot round a bar is rocking the remote forward and back (its pitch), not
++        // a flick or a push (a push lets go of the bar). Rocking a full tilt each way every 0.25 s
++        // of race time took the bar challenge's bar from 3.8 s to 1.7 s here. WC_EB_PUMP_HALF
++        // sets the half period in seconds.
++        static const float pumpHalf = std::getenv("WC_EB_PUMP_HALF") ? float(std::atof(std::getenv("WC_EB_PUMP_HALF"))) : 0.25f;
 +        if (autoBars && push) {
-+            if (autoReads++ % 6 == 0) swingButton = true;
++            ++autoReads;
++            in.pitch = (int(ReadF32(kRaceClock) / pumpHalf) % 2) ? 1.0f : -1.0f;
 +        } else {
 +            autoReads = 0;
 +        }

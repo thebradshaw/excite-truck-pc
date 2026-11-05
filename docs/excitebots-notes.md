@@ -75,8 +75,13 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   A button (weapons), Y also Wii A, left stick steers and tilts. Menus: A OK, B or X back.
 - Motion prompts are spotted by their textures (`EbScreenTextures` in gx_texture.cpp) and played
   with the left stick. Bars play themselves (round 9, Chris: "automated and fast"): while "Push"
-  is up a swing plays every 6 reads (3 swinging, 3 at rest), and the bar spin's shake rocks the
-  remote at full speed, whatever the stick does. `WC_EB_MANUAL_BARS=1` restores the manual
+  is up the remote's pitch rocks a full tilt forward and back every 0.25 s of race time
+  (`WC_EB_PUMP_HALF`), and the bar spin's shake rocks it side to side at full speed, whatever
+  the stick does. What spins the bot round a bar is that pitch rocking: on the bar challenge's
+  bar it cut the hang from 3.8 s (no input, or flicks) to 1.1 s (0.5 s rocking: 1.8 s; 0.12 s
+  aliases at the container's 4 fps). A flick does nothing there, and a push (acceleration along
+  the remote's x, which the motion detector reports as controller +0x34, flag 0x10 in the input
+  record built at 0x801EC250) lets go of the bar. `WC_EB_MANUAL_BARS=1` restores the manual
   controls below. Manual: on "Push" (swinging on a bar) every stroke of the stick plays a swing:
   each time it reaches a new direction past 50% (forward, back, left or right), so a fast
   forward-back flip is two swings even when it skips the centre between reads (round 8: waiting
