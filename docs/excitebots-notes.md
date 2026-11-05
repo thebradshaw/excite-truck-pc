@@ -81,7 +81,12 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   bar it cut the hang from 3.8 s (no input, or flicks) to 1.1 s (0.5 s rocking: 1.8 s; 0.12 s
   aliases at the container's 4 fps). A flick does nothing there, and a push (acceleration along
   the remote's x, which the motion detector reports as controller +0x34, flag 0x10 in the input
-  record built at 0x801EC250) lets go of the bar. `WC_EB_MANUAL_BARS=1` restores the manual
+  record built at 0x801EC250) lets go of the bar. Red (horizontal) bars are the exception
+  (round 10): their meter fills only from those x thrusts, forward then back, so while the red
+  bar's own texture (256x256 CMPR 78583d305e906e63, never drawn on a yellow bar) is up the remote
+  also thrusts each way every 0.5 s of race time (`WC_EB_REDBAR_THRUST`). On School_Mexico that
+  filled the meter to the top in one swing and launched a record jump; pitch rocking alone had
+  reached two stars. `WC_EB_MANUAL_BARS=1` restores the manual
   controls below. Manual: on "Push" (swinging on a bar) every stroke of the stick plays a swing:
   each time it reaches a new direction past 50% (forward, back, left or right), so a fast
   forward-back flip is two swings even when it skips the centre between reads (round 8: waiting

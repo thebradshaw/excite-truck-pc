@@ -759,10 +759,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..f110275
+index 0000000..56da241
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,626 @@
+@@ -0,0 +1,641 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -805,6 +805,7 @@ index 0000000..f110275
 +
 +bool EbShakePromptShown(); // gx_texture.cpp: the shaking remote (crash, bar spin, dentures)
 +bool EbPushPromptShown();  // gx_texture.cpp: the pushed remote (let go of a bar)
++bool EbRedBarShown();      // gx_texture.cpp: a red (horizontal) bar's meter
 +bool EbCrashMeterShown();  // gx_texture.cpp: the crash recovery meter
 +bool EbMenuButtonsShown(); // gx_texture.cpp: a menu's Back / OK icons are on screen
 +int EbControllerTypeScreenFrames(); // gx_texture.cpp: the Wii Remote / Wii Wheel choice, -1 if not shown
@@ -874,6 +875,7 @@ index 0000000..f110275
 +    float steer = 0.0f; // -1 left .. +1 right
 +    float pitch = 0.0f; // -1 nose down .. +1 nose up
 +    int swing = -1; // which read of a swing this is, or -1
++    int thrust = 0; // on a red bar: thrust the remote forward (1) or back (-1)
 +};
 +
 +uint32_t StickAsDpad(SDL_Gamepad* pad)
@@ -1056,8 +1058,20 @@ index 0000000..f110275
 +        // of race time took the bar challenge's bar from 3.8 s to 1.7 s here. WC_EB_PUMP_HALF
 +        // sets the half period in seconds.
 +        static const float pumpHalf = std::getenv("WC_EB_PUMP_HALF") ? float(std::atof(std::getenv("WC_EB_PUMP_HALF"))) : 0.25f;
++        // A red (horizontal) bar fills its meter from thrusts of the remote along its length,
++        // forward then back (the hint's side-on remote), not from the pitch rocking: a thrust each
++        // way every 0.5 s of race time filled it to four stars in one swing here. Thrusts would
++        // let go of a yellow bar, so they only happen while the red bar's texture is drawn.
++        // WC_EB_REDBAR_THRUST sets the time between thrusts in seconds.
++        static const float thrustPeriod = std::getenv("WC_EB_REDBAR_THRUST") ? float(std::atof(std::getenv("WC_EB_REDBAR_THRUST"))) : 0.5f;
 +        if (autoBars && push) {
 +            ++autoReads;
++            if (EbRedBarShown() && thrustPeriod > 0.0f) {
++                static int lastSlot = -1, readsLeft = 0, dir = 1;
++                const int slot = int(ReadF32(kRaceClock) / thrustPeriod);
++                if (slot != lastSlot) { lastSlot = slot; readsLeft = 3; dir = (slot % 2) ? -1 : 1; }
++                if (readsLeft > 0) { --readsLeft; in.thrust = dir; }
++            }
 +            in.pitch = (int(ReadF32(kRaceClock) / pumpHalf) % 2) ? 1.0f : -1.0f;
 +        } else {
 +            autoReads = 0;
@@ -1097,7 +1111,7 @@ index 0000000..f110275
 +        static const bool traceShake = std::getenv("WC_EB_TRACE_SHAKE") != nullptr;
 +        if (traceShake && (push != pushWasShown || push)) {
 +            const uint32_t ctrl = Memory::Read32(0x805785D0u);
-+            RT_LOGF(RT_TAG_HLE, "EB push %d clock %.3f flick %d swing %d\n", int(push), ReadF32(kRaceClock), ctrl ? Memory::Read8(ctrl + 0x28) : -1, g_swingReadsLeft);
++            RT_LOGF(RT_TAG_HLE, "EB push %d red %d clock %.3f flick %d swing %d\n", int(push), int(EbRedBarShown()), ReadF32(kRaceClock), ctrl ? Memory::Read8(ctrl + 0x28) : -1, g_swingReadsLeft);
 +        }
 +        pushWasShown = push;
 +        // On a bar (spinning to charge, then Push to let go) and while shaking something off,
@@ -1262,6 +1276,7 @@ index 0000000..f110275
 +
 +    float ax = 0.0f, ay = -1.0f, az = 0.0f;
 +    AccelFor(in, ax, ay, az);
++    if (in.thrust != 0) ax -= 2.0f * float(in.thrust);
 +    if (in.swing >= 0) {
 +        // Thrown against gravity, about twice as hard as gravity itself.
 +        ax *= -2.0f;
@@ -1840,7 +1855,7 @@ index 49be121..1f0e12f 100644
  
  void DeliverDrawSyncToken(CpuContext* ctx, uint16_t token)
 diff --git a/runtime/src/hle/gx/gx_texture.cpp b/runtime/src/hle/gx/gx_texture.cpp
-index b644a42..8fc6738 100644
+index b644a42..ef4e6f0 100644
 --- a/runtime/src/hle/gx/gx_texture.cpp
 +++ b/runtime/src/hle/gx/gx_texture.cpp
 @@ -1,5 +1,9 @@
@@ -1886,7 +1901,7 @@ index b644a42..8fc6738 100644
              GXInitTexObjData(obj, dp);
              meta.needsUpload = false;
              textureDataUploaded = true;
-@@ -750,7 +764,170 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+@@ -750,7 +764,180 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
      }
  }
  
@@ -1900,7 +1915,7 @@ index b644a42..8fc6738 100644
 +// the Wii Remote / Wii Wheel choice, which input skips, and the Back / OK button icons of any
 +// menu, which switch the pad to the menu layout even mid-race (eb_input.cpp).
 +namespace EbScreenTextures {
-+enum Kind : uint8_t { kNone, kShake, kPush, kCrashMeter, kControllerType, kMenuButton };
++enum Kind : uint8_t { kNone, kShake, kPush, kCrashMeter, kControllerType, kMenuButton, kRedBar };
 +std::mutex g_mutex;
 +struct Seen {
 +    uint64_t head = 0;
@@ -1910,6 +1925,7 @@ index b644a42..8fc6738 100644
 +std::atomic<int> g_lastShake{-1000};
 +std::atomic<int> g_lastPush{-1000};
 +std::atomic<int> g_lastCrashMeter{-1000};
++std::atomic<int> g_lastRedBar{-1000};
 +std::atomic<int> g_lastControllerType{-1000};
 +std::atomic<int> g_firstControllerType{0};
 +std::atomic<int> g_lastMenuButton{-1000};
@@ -1923,6 +1939,9 @@ index b644a42..8fc6738 100644
 +    }
 +    if (w == 256 && h == 256 && hash == 0xfcf8a1191fd23f9cull) {  // the crash meter's chevrons
 +        return kCrashMeter;
++    }
++    if (w == 256 && h == 256 && hash == 0x78583d305e906e63ull) {  // drawn only on a red bar
++        return kRedBar;
 +    }
 +    if (w == 256 && h == 128 && hash == 0xc8c6e66dee7d90ccull) {  // the remote and wheel pictures
 +        return kControllerType;
@@ -1975,6 +1994,7 @@ index b644a42..8fc6738 100644
 +    }
 +    if (kind == kPush) g_lastPush.store(g_gxFrameCount, std::memory_order_relaxed);
 +    if (kind == kCrashMeter) g_lastCrashMeter.store(g_gxFrameCount, std::memory_order_relaxed);
++    if (kind == kRedBar) g_lastRedBar.store(g_gxFrameCount, std::memory_order_relaxed);
 +    if (kind == kControllerType) {
 +        const int now = g_gxFrameCount;
 +        if (now - g_lastControllerType.load(std::memory_order_relaxed) > 3) {
@@ -2029,6 +2049,11 @@ index b644a42..8fc6738 100644
 +    return g_gxFrameCount - EbScreenTextures::g_lastPush.load(std::memory_order_relaxed) <= 3;
 +}
 +
++// A red (horizontal) bar: the racer swings round it and thrusts fill its meter.
++bool EbRedBarShown() {
++    return g_gxFrameCount - EbScreenTextures::g_lastRedBar.load(std::memory_order_relaxed) <= 3;
++}
++
 +// A menu's button bar (Back / OK) is on screen: pause, tutorial cards, results.
 +bool EbMenuButtonsShown() {
 +    return g_gxFrameCount - EbScreenTextures::g_lastMenuButton.load(std::memory_order_relaxed) <= 3;
@@ -2057,7 +2082,7 @@ index b644a42..8fc6738 100644
      if (g_gxTraceFrame) {
          TexObjMeta m; bool ok = false;
          { std::lock_guard<std::mutex> guard(g_texObjMutex); try { ok = TryGetOrExtractTexObjMeta(oa, m); } catch (...) {} }
-@@ -763,13 +940,16 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+@@ -763,13 +950,16 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
              bytes = CaptureTexObjBytes(oa);
          } catch (...) {
          }
@@ -2077,7 +2102,7 @@ index b644a42..8fc6738 100644
                      IsReasonableTextureDimensions(m.width, m.height) && IsAuroraLoadableTexFormat(m.format)) {
                      const uint8_t maxLod = m.mipmap ? static_cast<uint8_t>(ComputeMaxMipLevel(m.width, m.height)) : 0u;
                      const uint32_t size = GXGetTexBufferSize(m.width, m.height, m.format, (GXBool)m.mipmap, maxLod);
-@@ -793,6 +973,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+@@ -793,6 +983,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
              }
          });
      } else {
