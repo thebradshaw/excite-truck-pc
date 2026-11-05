@@ -759,10 +759,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..937c42a
+index 0000000..7d9be5f
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,610 @@
+@@ -0,0 +1,621 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -1046,7 +1046,18 @@ index 0000000..937c42a
 +        static bool pushWasShown = false;
 +        static int heldReads = 0;
 +        static int lastDir = 0; // 1 forward, 2 back, 3 left, 4 right
-+        if (push) {
++        // Bars play themselves (Chris, round 9: automated and fast): while the Push prompt is up a
++        // swing plays every 6 reads (3 swinging, 3 at rest, the quickest the game's detector takes
++        // as separate flicks), and the bar spin's shake rocks the remote at full speed, whatever
++        // the stick does. WC_EB_MANUAL_BARS=1 goes back to the stick and A.
++        static const bool autoBars = std::getenv("WC_EB_MANUAL_BARS") == nullptr;
++        static int autoReads = 0;
++        if (autoBars && push) {
++            if (autoReads++ % 6 == 0) swingButton = true;
++        } else {
++            autoReads = 0;
++        }
++        if (push && !autoBars) {
 +            static const bool testStroke = std::getenv("WC_EB_TEST_STICK") != nullptr;
 +            if (testStroke) {
 +                static int t = 0;
@@ -1101,7 +1112,7 @@ index 0000000..937c42a
 +        static const bool stickRock = std::getenv("WC_EB_STICK_STEER_SHAKE") == nullptr;
 +        // Developer aid: WC_EB_TEST_STICK=1 acts as if the stick were held over during the shake.
 +        static const bool testStick = std::getenv("WC_EB_TEST_STICK") != nullptr;
-+        if (shake && !crashShake && !push && (actionButton || (stickRock && (testStick || mag > 0.4f)))) {
++        if (shake && !crashShake && !push && (autoBars || actionButton || (stickRock && (testStick || mag > 0.4f)))) {
 +            static int rock = 0;
 +            in.steer = ((++rock / 3) % 2) != 0 ? 1.0f : -1.0f;
 +            in.pitch = 0.0f;

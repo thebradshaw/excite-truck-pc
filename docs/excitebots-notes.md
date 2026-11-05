@@ -74,7 +74,10 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
 - Pad layout in a race: RT/RB accelerate (Wii 2), X and LT/LB brake (Wii 1), A turbo, B the Wii
   A button (weapons), Y also Wii A, left stick steers and tilts. Menus: A OK, B or X back.
 - Motion prompts are spotted by their textures (`EbScreenTextures` in gx_texture.cpp) and played
-  with the left stick. On "Push" (swinging on a bar) every stroke of the stick plays a swing:
+  with the left stick. Bars play themselves (round 9, Chris: "automated and fast"): while "Push"
+  is up a swing plays every 6 reads (3 swinging, 3 at rest), and the bar spin's shake rocks the
+  remote at full speed, whatever the stick does. `WC_EB_MANUAL_BARS=1` restores the manual
+  controls below. Manual: on "Push" (swinging on a bar) every stroke of the stick plays a swing:
   each time it reaches a new direction past 50% (forward, back, left or right), so a fast
   forward-back flip is two swings even when it skips the centre between reads (round 8: waiting
   for the centre missed most strokes). Held in one direction, or with A held, it swings again
