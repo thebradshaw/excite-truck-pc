@@ -127,6 +127,12 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
 - Audio after a stall: the game side only makes as much audio as fits in about 200 ms of output
   queue (the rest of a stall is skipped); catching a long stall up at once overfilled the queue,
   which dropped blocks (clicks), mostly in the stage intro. The queue limit is 400 ms.
+- Audio clock (round 7): the audio poll's wall-clock cursor was set to `now` each time while only
+  whole microseconds were handed out. A race polls about 100,000 times a second, so the dropped
+  fractions lost about 5% of the time; the game made too little sound and the output sat nearly
+  empty (scratchy, worst in the stage intro). The cursor now advances by what it hands out.
+  `WC_TRACE_AUDIOTIME=1` prints wall time, polled time and blocks per second. The fix is in the
+  shared runtime, so Excite Truck gets it too once its patch carries it.
 - The three screens before the title (strap, ESRB, hold) are skipped: the boot step at
   `0x805A47F0` is set to 11 (done) each frame until the game reaches it (`EbFrameTick`).
 - `-direct_to_track:@mitch5_bar_challenge` (the yellow bar minigame) reaches a bar in about

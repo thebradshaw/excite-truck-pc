@@ -230,7 +230,7 @@ index f5df903..2bdb400 100644
          return true;
      }
 diff --git a/runtime/src/hle/audio/audio.cpp b/runtime/src/hle/audio/audio.cpp
-index fd19215..867cfa3 100644
+index fd19215..ecabd1e 100644
 --- a/runtime/src/hle/audio/audio.cpp
 +++ b/runtime/src/hle/audio/audio.cpp
 @@ -29,6 +29,9 @@ const uint32_t kAIDmaCallbackAddr = MKW_GADDR(80386480);
@@ -251,7 +251,36 @@ index fd19215..867cfa3 100644
      bool tickActive = false;
      bool loggedBackendFailure = false;
      bool loggedMissingCallback = false;
-@@ -407,6 +411,28 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
+@@ -353,6 +357,7 @@ PPC_NATIVE_OVERRIDE(8015D57C, DSPAssertTask_8015d57c, uint32_t, (uint32_t taskPt
+ 
+ // Each delivered block runs the AI DMA callback and deferred AX task callbacks before the
+ // next block, preserving the SoundThread/DSP interleave order real hardware provides.
++static int g_traceBlocks = 0;
+ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
+ {
+     uint32_t startAddr = 0;
+@@ -361,6 +366,20 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
+     uint32_t sampleRate = kDefaultSampleRate;
+     bool enabled = false;
+ 
++    static const bool traceTime = std::getenv("WC_TRACE_AUDIOTIME") != nullptr;
++    if (traceTime) {
++        static auto t0 = std::chrono::steady_clock::now();
++        static double polled = 0, added = 0; static int blocksAtLast = 0;
++        polled += deltaMicros / 1e6;
++        if (g_ai.enabled && g_ai.startAddr && g_ai.length) added += deltaMicros / 1e6;
++        const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
++        static double lastPrint = 0;
++        if (wall - lastPrint > 1.0) {
++            lastPrint = wall;
++            std::fprintf(stderr, "[audiotime] wall %.3f polled %.3f added %.3f acc %.1f ms len %u blocks %d\n", wall, polled, added, g_ai.accumulatorSeconds * 1000.0, g_ai.length, g_traceBlocks - blocksAtLast);
++            blocksAtLast = g_traceBlocks;
++        }
++    }
+     {
+         std::lock_guard<std::mutex> lock(g_ai.mutex);
+         enabled = g_ai.enabled;
+@@ -407,6 +426,28 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
      CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
      CpuContextScope scope(cpu);
  
@@ -280,7 +309,15 @@ index fd19215..867cfa3 100644
      int blocksCompleted = 0;
      while (true) {
          // A block due while the previous mix is still running would block on it; leave it for the
-@@ -475,11 +501,10 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
+@@ -422,6 +463,7 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
+             }
+             g_ai.accumulatorSeconds -= blockDuration;
+             g_ai.bytesLeft = 0;
++            ++g_traceBlocks;
+         }
+ 
+         // Everything below reads what the AX mix wrote (PushAudioBlock) or runs guest code
+@@ -475,11 +517,10 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
              g_ai.bytesLeft = g_ai.length;
          }
  
@@ -293,7 +330,20 @@ index fd19215..867cfa3 100644
      {
          std::lock_guard<std::mutex> lock(g_ai.mutex);
          if (g_ai.length != 0) {
-@@ -514,7 +539,14 @@ int64_t ConsumeAudioPollDeltaMicros()
+@@ -504,8 +545,11 @@ int64_t ConsumeAudioPollDeltaMicros()
+     static thread_local Clock::time_point lastPoll = Clock::now();
+ 
+     const Clock::time_point now = Clock::now();
++    // Advance the cursor by the whole microseconds handed out, not to `now`: a busy race polls
++    // ~100,000 times a second, and dropping each poll's leftover fraction of a microsecond lost
++    // about 5% of the time, so the game made too little sound and the output kept running dry.
+     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - lastPoll).count();
+-    lastPoll = now;
++    lastPoll += std::chrono::microseconds(elapsed);
+ 
+     if (elapsed < 0) {
+         elapsed = 0;
+@@ -514,7 +558,14 @@ int64_t ConsumeAudioPollDeltaMicros()
      // Cap the catch-up interval after a debugger pause or host stall; backlog drains via
      // kMaxBlocksPerTick per pass. Never return early on a zero delta: two scheduler passes
      // can land in the same microsecond and the backlog still needs servicing.
