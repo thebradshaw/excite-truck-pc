@@ -722,10 +722,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..9012ae5
+index 0000000..7e30327
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,550 @@
+@@ -0,0 +1,564 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -1001,13 +1001,27 @@ index 0000000..9012ae5
 +        static bool flicked = false;
 +        static int lastSide = 0;
 +        const float mag = std::sqrt(stickX * stickX + stickY * stickY);
++        // Push: a flick of the stick plays a swing, and so does the stick held forward (a swing
++        // as the prompt appears, then again every 12 reads), so a player already leaning the stick
++        // forward when the prompt comes up is not ignored until they let go of it.
++        static bool pushWasShown = false;
++        static int forwardReads = 0;
 +        if (push) {
-+            if (!flicked && mag > 0.7f) swingButton = true;
++            const bool forward = stickY < -0.6f;
++            if (forward) {
++                if (!pushWasShown || forwardReads % 12 == 0) swingButton = true;
++                ++forwardReads;
++            } else {
++                forwardReads = 0;
++                if (!flicked && mag > 0.7f) swingButton = true;
++            }
 +            if (mag > 0.7f) flicked = true;
 +            if (mag < 0.3f) flicked = false;
 +        } else {
 +            flicked = mag > 0.7f;
++            forwardReads = 0;
 +        }
++        pushWasShown = push;
 +        // On a bar (spinning to charge, then Push to let go) and while shaking something off,
 +        // holding the gas (RT, R, X) kept some of the swings from registering, so it is ignored
 +        // there. Crash recovery keeps it.

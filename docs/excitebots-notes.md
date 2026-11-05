@@ -74,8 +74,9 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
 - Pad layout in a race: RT/RB accelerate (Wii 2), X and LT/LB brake (Wii 1), A turbo, B the Wii
   A button (weapons), Y also Wii A, left stick steers and tilts. Menus: A OK, B or X back.
 - Motion prompts are spotted by their textures (`EbScreenTextures` in gx_texture.cpp) and played
-  with the left stick. On "Push" (let go of a bar) each flick of the stick (past 70% from under
-  30%) plays one swing: three reads with the acceleration thrown against gravity at twice its
+  with the left stick. On "Push" (let go of a bar) the stick held forward plays a swing at once
+  and again every 12 reads, and each other flick of the stick (past 70% from under 30%) plays one
+  swing: three reads with the acceleration thrown against gravity at twice its
   strength. On the crash meter (256x256 CMPR fcf8a1191fd23f9c) each change of side while shaking
   the stick left and right plays a swing. On the shaking remote without the crash meter (bar
   spin, dentures) the stick rocks the remote as it steers. A (pad), C or Space (keyboard) still
