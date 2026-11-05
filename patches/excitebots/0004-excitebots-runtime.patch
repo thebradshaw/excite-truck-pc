@@ -230,7 +230,7 @@ index f5df903..2bdb400 100644
          return true;
      }
 diff --git a/runtime/src/hle/audio/audio.cpp b/runtime/src/hle/audio/audio.cpp
-index fd19215..ecabd1e 100644
+index ef52360..ecabd1e 100644
 --- a/runtime/src/hle/audio/audio.cpp
 +++ b/runtime/src/hle/audio/audio.cpp
 @@ -29,6 +29,9 @@ const uint32_t kAIDmaCallbackAddr = MKW_GADDR(80386480);
@@ -330,20 +330,7 @@ index fd19215..ecabd1e 100644
      {
          std::lock_guard<std::mutex> lock(g_ai.mutex);
          if (g_ai.length != 0) {
-@@ -504,8 +545,11 @@ int64_t ConsumeAudioPollDeltaMicros()
-     static thread_local Clock::time_point lastPoll = Clock::now();
- 
-     const Clock::time_point now = Clock::now();
-+    // Advance the cursor by the whole microseconds handed out, not to `now`: a busy race polls
-+    // ~100,000 times a second, and dropping each poll's leftover fraction of a microsecond lost
-+    // about 5% of the time, so the game made too little sound and the output kept running dry.
-     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - lastPoll).count();
--    lastPoll = now;
-+    lastPoll += std::chrono::microseconds(elapsed);
- 
-     if (elapsed < 0) {
-         elapsed = 0;
-@@ -514,7 +558,14 @@ int64_t ConsumeAudioPollDeltaMicros()
+@@ -517,7 +558,14 @@ int64_t ConsumeAudioPollDeltaMicros()
      // Cap the catch-up interval after a debugger pause or host stall; backlog drains via
      // kMaxBlocksPerTick per pass. Never return early on a zero delta: two scheduler passes
      // can land in the same microsecond and the backlog still needs servicing.
@@ -772,10 +759,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..7e30327
+index 0000000..937c42a
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,564 @@
+@@ -0,0 +1,610 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -1041,9 +1028,9 @@ index 0000000..7e30327
 +    }
 +    // The motion prompts, played with the left stick (the prompt pack draws a stick there).
 +    // Push (let go of a bar): flick the stick, one swing per flick. The crash recovery's shake:
-+    // shake the stick, one swing per change of side. The shake on a bar spin or in the dentures
-+    // wants a real shake, and the stick already rocks the remote as it steers. A still works:
-+    // a swing per press, or held, a rocking remote.
++    // shake the stick, one swing per change of side. The shake on a bar spin or in the dentures:
++    // the stick pushed any way rocks the remote at full speed. A still works: a swing per press,
++    // or held, a rocking remote.
 +    if (racing) {
 +        const bool shake = EbShakePromptShown();
 +        const bool push = EbPushPromptShown();
@@ -1051,25 +1038,50 @@ index 0000000..7e30327
 +        static bool flicked = false;
 +        static int lastSide = 0;
 +        const float mag = std::sqrt(stickX * stickX + stickY * stickY);
-+        // Push: a flick of the stick plays a swing, and so does the stick held forward (a swing
-+        // as the prompt appears, then again every 12 reads), so a player already leaning the stick
-+        // forward when the prompt comes up is not ignored until they let go of it.
++        // Push (swinging on a bar): every stroke of the stick plays a swing, forward or back, or
++        // any other way. A stroke is the stick reaching a new direction (past 50%): forward, then
++        // back, then forward again is three swings, even when it never stops in the middle (a fast
++        // forward-back flip skips the centre between two reads, so waiting for the centre missed
++        // most of them). The stick held in one direction, or A held, swings again every 12 reads.
 +        static bool pushWasShown = false;
-+        static int forwardReads = 0;
++        static int heldReads = 0;
++        static int lastDir = 0; // 1 forward, 2 back, 3 left, 4 right
 +        if (push) {
-+            const bool forward = stickY < -0.6f;
-+            if (forward) {
-+                if (!pushWasShown || forwardReads % 12 == 0) swingButton = true;
-+                ++forwardReads;
-+            } else {
-+                forwardReads = 0;
-+                if (!flicked && mag > 0.7f) swingButton = true;
++            static const bool testStroke = std::getenv("WC_EB_TEST_STICK") != nullptr;
++            if (testStroke) {
++                static int t = 0;
++                stickX = 0.0f;
++                stickY = ((++t / 8) % 2) ? -1.0f : 1.0f;
 +            }
-+            if (mag > 0.7f) flicked = true;
-+            if (mag < 0.3f) flicked = false;
++            const float mag = std::sqrt(stickX * stickX + stickY * stickY);
++            int dir = 0;
++            if (mag > 0.5f) {
++                if (std::fabs(stickY) >= std::fabs(stickX)) dir = stickY < 0.0f ? 1 : 2;
++                else dir = stickX < 0.0f ? 3 : 4;
++            }
++            static bool actionWasDown = false;
++            const bool actionPressed = actionButton && !actionWasDown;
++            actionWasDown = actionButton;
++            if ((dir != 0 && (dir != lastDir || !pushWasShown)) || actionPressed) {
++                swingButton = true;
++                heldReads = 0;
++            } else if (dir != 0 || actionButton) {
++                if (++heldReads % 12 == 0) swingButton = true;
++            } else {
++                heldReads = 0;
++            }
++            if (dir != 0) lastDir = dir;
++            if (mag < 0.3f) lastDir = 0;
++            flicked = mag > 0.7f;
 +        } else {
 +            flicked = mag > 0.7f;
-+            forwardReads = 0;
++            heldReads = 0;
++            lastDir = 0;
++        }
++        static const bool traceShake = std::getenv("WC_EB_TRACE_SHAKE") != nullptr;
++        if (traceShake && (push != pushWasShown || push)) {
++            const uint32_t ctrl = Memory::Read32(0x805785D0u);
++            RT_LOGF(RT_TAG_HLE, "EB push %d clock %.3f flick %d swing %d\n", int(push), ReadF32(kRaceClock), ctrl ? Memory::Read8(ctrl + 0x28) : -1, g_swingReadsLeft);
 +        }
 +        pushWasShown = push;
 +        // On a bar (spinning to charge, then Push to let go) and while shaking something off,
@@ -1080,13 +1092,24 @@ index 0000000..7e30327
 +        const int side = stickX > 0.5f ? 1 : stickX < -0.5f ? -1 : 0;
 +        if (crashShake && side != 0 && side != lastSide) swingButton = true;
 +        if (side != 0) lastSide = side;
-+        if (actionButton) {
-+            if (push || crashShake) {
-+                swingButton = true;
-+            } else if (shake) {
-+                static int rock = 0;
-+                in.steer = ((++rock / 3) % 2) != 0 ? 1.0f : -1.0f;
-+            }
++        if (actionButton && crashShake) swingButton = true;
++        // Spinning on a bar to charge (and shaking off the dentures): the game wants the remote
++        // rocked hard and fast. Steering the stick left and right rocked it, but only as fast as
++        // the player could wiggle, and forward and back did nothing, so the charge barely moved.
++        // Now the stick held in any direction (or A held) rocks the remote at full speed, which
++        // charges as fast as the best real shake.
++        static const bool stickRock = std::getenv("WC_EB_STICK_STEER_SHAKE") == nullptr;
++        // Developer aid: WC_EB_TEST_STICK=1 acts as if the stick were held over during the shake.
++        static const bool testStick = std::getenv("WC_EB_TEST_STICK") != nullptr;
++        if (shake && !crashShake && !push && (actionButton || (stickRock && (testStick || mag > 0.4f)))) {
++            static int rock = 0;
++            in.steer = ((++rock / 3) % 2) != 0 ? 1.0f : -1.0f;
++            in.pitch = 0.0f;
++        }
++        if (traceShake && shake && !crashShake) {
++            const uint32_t ctrl = Memory::Read32(0x805785D0u);
++            static int n = 0;
++            if (ctrl && (++n % 10) == 0) RT_LOGF(RT_TAG_HLE, "EB shake %.3f %.3f steer %.2f\n", ReadF32(ctrl + 0x30), ReadF32(ctrl + 0x34), in.steer);
 +        }
 +    }
 +    // Developer aid for testing swings without a pad: WC_EB_AUTOSWING=N swings every N reads.
@@ -1095,15 +1118,25 @@ index 0000000..7e30327
 +        static int reads = 0;
 +        swingButton = (++reads % autoSwing) < 2;
 +    }
++    // A swing asked for while one is still playing (fast stick strokes) waits for it to end and
++    // for two reads at rest, so the game's detector sees each one as its own flick.
 +    static bool swingWasDown = false;
-+    if (swingButton && !swingWasDown) {
++    static bool swingPending = false;
++    static int restReads = 0;
++    if (swingButton && !swingWasDown) swingPending = true;
++    swingWasDown = swingButton;
++    if (!racing) swingPending = false;
++    if (swingPending && g_swingReadsLeft == 0 && restReads >= 2) {
++        swingPending = false;
 +        g_swingReadsLeft = kSwingReads;
 +        if (std::getenv("WC_TRACE_INPUT")) RT_LOGF(RT_TAG_HLE, "EB remote swing\n");
 +    }
-+    swingWasDown = swingButton;
 +    if (g_swingReadsLeft > 0) {
 +        in.swing = kSwingReads - g_swingReadsLeft;
 +        --g_swingReadsLeft;
++        restReads = 0;
++    } else {
++        ++restReads;
 +    }
 +    return in;
 +}

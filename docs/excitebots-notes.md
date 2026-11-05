@@ -74,13 +74,21 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
 - Pad layout in a race: RT/RB accelerate (Wii 2), X and LT/LB brake (Wii 1), A turbo, B the Wii
   A button (weapons), Y also Wii A, left stick steers and tilts. Menus: A OK, B or X back.
 - Motion prompts are spotted by their textures (`EbScreenTextures` in gx_texture.cpp) and played
-  with the left stick. On "Push" (let go of a bar) the stick held forward plays a swing at once
-  and again every 12 reads, and each other flick of the stick (past 70% from under 30%) plays one
-  swing: three reads with the acceleration thrown against gravity at twice its
+  with the left stick. On "Push" (swinging on a bar) every stroke of the stick plays a swing:
+  each time it reaches a new direction past 50% (forward, back, left or right), so a fast
+  forward-back flip is two swings even when it skips the centre between reads (round 8: waiting
+  for the centre missed most strokes). Held in one direction, or with A held, it swings again
+  every 12 reads. A swing asked for while one plays waits for it and two reads at rest, so the
+  game sees each as its own flick (checked here: one game flick per swing). A swing is three
+  reads with the acceleration thrown against gravity at twice its
   strength. On the crash meter (256x256 CMPR fcf8a1191fd23f9c) each change of side while shaking
   the stick left and right plays a swing. On the shaking remote without the crash meter (bar
-  spin, dentures) the stick rocks the remote as it steers. A (pad), C or Space (keyboard) still
-  work: a swing per press, or held on a bar spin, a rocking remote. A is the main way out of a
+  spin, dentures) the stick pushed in any direction (past 40%) rocks the remote at full speed, so
+  holding or wiggling it charges as fast as the hardest real shake (round 8: steering the stick only
+  rocked as fast as the player wiggled, and forward and back did nothing).
+  `WC_EB_STICK_STEER_SHAKE=1` goes back to the old steer rock; `WC_EB_TEST_STICK=1` fakes the held
+  stick and `WC_EB_TRACE_SHAKE=1` logs the detector's shake values. A (pad), C or Space (keyboard)
+  still work: a swing per press, or held on a bar spin, a rocking remote. A is the main way out of a
   crash, so the crash prompt shows A (the stick shake is the backup).
 - Any menu's Back / OK icons on screen (pause, Training cards, results) switch the pad to the
   menu layout, even while the race clock runs.
@@ -131,8 +139,8 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   whole microseconds were handed out. A race polls about 100,000 times a second, so the dropped
   fractions lost about 5% of the time; the game made too little sound and the output sat nearly
   empty (scratchy, worst in the stage intro). The cursor now advances by what it hands out.
-  `WC_TRACE_AUDIOTIME=1` prints wall time, polled time and blocks per second. The fix is in the
-  shared runtime, so Excite Truck gets it too once its patch carries it.
+  `WC_TRACE_AUDIOTIME=1` prints wall time, polled time and blocks per second. The fix itself is in
+  patch 0001, so Excite Truck has it too; 0004 only adds the trace.
 - The three screens before the title (strap, ESRB, hold) are skipped: the boot step at
   `0x805A47F0` is set to 11 (done) each frame until the game reaches it (`EbFrameTick`).
 - `-direct_to_track:@mitch5_bar_challenge` (the yellow bar minigame) reaches a bar in about
