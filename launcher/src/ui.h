@@ -7,7 +7,8 @@
 struct SDL_Window;
 struct SDL_Renderer;
 
-enum class UiAction { None, Launch, Quit };
+// LaunchAudioLog: start the game with its sound-output stats written to audio-log.txt in its folder.
+enum class UiAction { None, Launch, LaunchAudioLog, Quit };
 
 void UiInit(SDL_Window* window, SDL_Renderer* renderer);
 void UiShutdown();

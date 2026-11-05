@@ -31,7 +31,7 @@ void SetGameIcon(SDL_Window* window) {
 }
 
 // Starts the game in the background. Returns an empty string, or what went wrong.
-std::string LaunchGame() {
+std::string LaunchGame(bool audioLog) {
     const GameId id = UiSelectedGame();
     const auto game = GameExecutable(id);
     if (game.empty()) {
@@ -56,9 +56,21 @@ std::string LaunchGame() {
     SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_ENVIRONMENT_POINTER, env);
     SDL_SetStringProperty(props, SDL_PROP_PROCESS_CREATE_WORKING_DIRECTORY_STRING, dir.c_str());
     SDL_SetBooleanProperty(props, SDL_PROP_PROCESS_CREATE_BACKGROUND_BOOLEAN, true);
+    SDL_IOStream* log = nullptr;
+    if (audioLog) {
+        // The game's output, with its sound-output stats switched on, into audio-log.txt.
+        SDL_SetEnvironmentVariable(env, "WC_TRACE_AUDIOQ", "1", true);
+        log = SDL_IOFromFile(cfg::PathToUtf8(game.parent_path() / "audio-log.txt").c_str(), "wb");
+        if (log) {
+            SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDOUT_NUMBER, SDL_PROCESS_STDIO_REDIRECT);
+            SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_STDOUT_POINTER, log);
+            SDL_SetBooleanProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_TO_STDOUT_BOOLEAN, true);
+        }
+    }
     SDL_Process* process = SDL_CreateProcessWithProperties(props);
     SDL_DestroyProperties(props);
     SDL_DestroyEnvironment(env);
+    if (log) SDL_CloseIO(log);   // the game has its own handle to the file
     if (process == nullptr) {
         return std::string("The game could not be started: ") + SDL_GetError();
     }
@@ -193,9 +205,11 @@ int main(int argc, char** argv) {
             shown = true;
         }
 
-        switch (UiTakeAction()) {
-            case UiAction::Launch: {
-                const std::string error = LaunchGame();
+        const UiAction action = UiTakeAction();
+        switch (action) {
+            case UiAction::Launch:
+            case UiAction::LaunchAudioLog: {
+                const std::string error = LaunchGame(action == UiAction::LaunchAudioLog);
                 if (error.empty()) {
                     // Close, unless the other game is still being set up: then step aside.
                     if (SetupBusy()) {

@@ -685,6 +685,26 @@ void SettingsPage() {
         if (ImGui::IsItemDeactivated()) {
             cfg::SetVolumePercent(g_settings.volumePercent);
         }
+        ImGui::Dummy(ImVec2(0, S(8)));
+        // For tracking down crackle: a run that logs the sound output, and the log it writes.
+        const fs::path log = InstallDir(g_game) / "audio-log.txt";
+        NavRow();
+        if (PageButton("Start with Audio Log", "Starts the game and writes how its sound output keeps up to "
+                       "audio-log.txt in the game's folder. Play a race where you hear crackle, quit, then send "
+                       "the file over.")) {
+            g_action = UiAction::LaunchAudioLog;
+        }
+        std::error_code ec;
+        if (fs::is_regular_file(log, ec)) {
+            ImGui::SameLine(0.0f, S(10));
+            if (PageButton("Open Audio Log", ("The log from the last run: " + cfg::PathToUtf8(log)).c_str())) {
+                SDL_OpenURL(cfg::PathToUtf8(log).c_str());
+            }
+            ImGui::SameLine(0.0f, S(10));
+            if (PageButton("Show in Folder", "Opens the game's folder, where audio-log.txt is.")) {
+                SDL_OpenURL(cfg::PathToUtf8(InstallDir(g_game)).c_str());
+            }
+        }
         ImGui::Unindent(S(8));
         ImGui::Dummy(ImVec2(0, S(12)));
     }
