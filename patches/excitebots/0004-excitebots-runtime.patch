@@ -1,3 +1,16 @@
+diff --git a/runtime/include/audio_backend.h b/runtime/include/audio_backend.h
+index b845d85..6ddd825 100644
+--- a/runtime/include/audio_backend.h
++++ b/runtime/include/audio_backend.h
+@@ -18,6 +18,8 @@ public:
+     // native-endian interleaved left, right samples.
+     bool PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes);
+     bool PushSamplesLE16(const int16_t* samples, size_t sampleCount);
++    // Seconds of audio waiting in the output queue (0 when there is no output).
++    double QueuedSeconds();
+ 
+     // Applied to the final host output, covering both AX and direct AI DMA.
+     void SetMasterVolume(float volume);
 diff --git a/runtime/include/aurora_events.h b/runtime/include/aurora_events.h
 index c7f071d..fa0ba9b 100644
 --- a/runtime/include/aurora_events.h
@@ -122,10 +135,32 @@ index baed2d3..d5eaefd 100644
      return Get().etDefaultsVersion.value_or(0);
  }
 diff --git a/runtime/src/audio_backend.cpp b/runtime/src/audio_backend.cpp
-index f5df903..6010d8e 100644
+index f5df903..2bdb400 100644
 --- a/runtime/src/audio_backend.cpp
 +++ b/runtime/src/audio_backend.cpp
-@@ -134,16 +134,20 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+@@ -112,10 +112,19 @@ void AudioBackend::Shutdown() {
+     m_convertBuffer.clear();
+ }
+ 
++double AudioBackend::QueuedSeconds() {
++    std::lock_guard<std::mutex> lock(m_mutex);
++    if (!m_stream || m_spec.freq <= 0) return 0.0;
++    const int queued = SDL_GetAudioStreamQueued(m_stream);
++    if (queued <= 0) return 0.0;
++    return static_cast<double>(queued) / (static_cast<double>(m_spec.freq) * m_spec.channels * sizeof(int16_t));
++}
++
+ uint32_t AudioBackend::QueueLimitBytesLocked() const {
+     // Room for the guest thread to stall (track loading runs long stretches of game code
+-    // between audio services) without the output running dry. Was 120 ms.
+-    constexpr uint32_t queueMs = 250;
++    // between audio services) without the output running dry. Was 120 ms, then 250. The game side
++    // (Audio_HLE_Tick) keeps what it queues under 200 ms, so this is only a backstop.
++    constexpr uint32_t queueMs = 400;
+ 
+     const uint64_t bytesPerSecond = static_cast<uint64_t>(m_spec.freq) *
+                                     static_cast<uint64_t>(m_spec.channels) *
+@@ -134,16 +143,20 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
      const uint32_t maxQueued = QueueLimitBytesLocked();
      static const bool trace = std::getenv("WC_TRACE_AUDIOQ") != nullptr;
      if (trace) {
@@ -150,7 +185,7 @@ index f5df903..6010d8e 100644
          }
      }
      // The output ran dry (the game stalled, e.g. while loading a track). Put back a short
-@@ -151,7 +155,7 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+@@ -151,7 +164,7 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
      // again on every block, which sounds like crackling.
      if (queued == 0 && m_hadAudio) {
          const uint64_t bytesPerSecond = static_cast<uint64_t>(m_spec.freq) * m_spec.channels * sizeof(int16_t);
@@ -159,7 +194,7 @@ index f5df903..6010d8e 100644
          m_silence.assign(cushion, 0);
          SDL_PutAudioStreamData(m_stream, m_silence.data(), static_cast<int>(cushion));
          m_fadeInNext = true;
-@@ -159,16 +163,19 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
+@@ -159,16 +172,19 @@ bool AudioBackend::QueueHasCapacityLocked(int incomingBytes) {
      m_hadAudio = true;
      // The game makes audio by the CPU clock and the sound card plays it by its own clock, so the
      // queue slowly fills up (and blocks get dropped: clicks) or runs dry (crackle). Nudge the
@@ -183,7 +218,7 @@ index f5df903..6010d8e 100644
          // Only hand SDL a new ratio in 0.1% steps: every change restarts its resampler, and
          // changing it on every block (hundreds of times a second) is itself audible as static.
          static const bool noRate = std::getenv("WC_AUDIO_NO_RATE") != nullptr;
-@@ -227,6 +234,10 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
+@@ -227,6 +243,10 @@ bool AudioBackend::PushWiiAiSamplesBE16(const uint8_t* data, size_t bytes) {
      }
  
      const int lenBytes = static_cast<int>(frameCount * 2 * sizeof(int16_t));
@@ -195,18 +230,28 @@ index f5df903..6010d8e 100644
          return true;
      }
 diff --git a/runtime/src/hle/audio/audio.cpp b/runtime/src/hle/audio/audio.cpp
-index fd19215..6c63a91 100644
+index fd19215..867cfa3 100644
 --- a/runtime/src/hle/audio/audio.cpp
 +++ b/runtime/src/hle/audio/audio.cpp
-@@ -29,6 +29,7 @@ const uint32_t kAIDmaCallbackAddr = MKW_GADDR(80386480);
+@@ -29,6 +29,9 @@ const uint32_t kAIDmaCallbackAddr = MKW_GADDR(80386480);
  // Max completed 3 ms DMA blocks delivered per tick. Draining several at once catches up
  // backlog from a long frame without letting a large stall spiral into an unbounded loop.
  constexpr int kMaxBlocksPerTick = 4;
 +constexpr int kMaxCatchUpBlocksPerTick = 40; // 120 ms of 3 ms blocks
++// Most audio the game side keeps waiting in the output queue (see Audio_HLE_Tick).
++constexpr double kMaxQueuedSeconds = 0.2;
  // Backlog (in blocks) tolerated before a catch-up block waits on an in-flight mix.
  constexpr double kMaxDeferredBlocks = 2.0;
  
-@@ -407,6 +408,16 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
+@@ -42,6 +45,7 @@ struct AIDmaState {
+     uint32_t sampleRate = kDefaultSampleRate;
+     uint32_t bytesLeft = 0;
+     double accumulatorSeconds = 0.0;
++    double skippedSeconds = 0.0; // stall time not made up (WC_TRACE_AUDIOQ)
+     bool tickActive = false;
+     bool loggedBackendFailure = false;
+     bool loggedMissingCallback = false;
+@@ -407,6 +411,28 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
      CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
      CpuContextScope scope(cpu);
  
@@ -214,8 +259,20 @@ index fd19215..6c63a91 100644
 +    // one (a 60 fps race leaves little idle time, and a frame can block on presentation), catch
 +    // up the whole backlog instead: at 4 blocks per point the output fell behind and crackled.
 +    int maxBlocks = kMaxBlocksPerTick;
++    // After a stall (a stage intro streams its data in, a shader compiles) the output has played
++    // on or run dry. Catching all of it up at once overfilled the output queue, which then dropped
++    // blocks: clicks, heard as scratchy sound. Only make as much as fits in about 200 ms of queue;
++    // the rest of the stall is skipped, as the game's audio would on a real console.
++    const double queuedSeconds = AudioBackend::Instance().QueuedSeconds();
 +    {
 +        std::lock_guard<std::mutex> lock(g_ai.mutex);
++        const double room = std::max(blockDuration * kMaxBlocksPerTick, kMaxQueuedSeconds - queuedSeconds);
++        if (g_ai.accumulatorSeconds > room) {
++            g_ai.skippedSeconds += g_ai.accumulatorSeconds - room;
++            g_ai.accumulatorSeconds = room;
++            static const bool trace = std::getenv("WC_TRACE_AUDIOQ") != nullptr;
++            if (trace) std::fprintf(stderr, "[audioskip] queue %.0f ms, skipped %.0f ms in all\n", queuedSeconds * 1000.0, g_ai.skippedSeconds * 1000.0);
++        }
 +        if (g_ai.accumulatorSeconds >= blockDuration * kMaxBlocksPerTick) {
 +            maxBlocks = kMaxCatchUpBlocksPerTick;
 +        }
@@ -223,7 +280,7 @@ index fd19215..6c63a91 100644
      int blocksCompleted = 0;
      while (true) {
          // A block due while the previous mix is still running would block on it; leave it for the
-@@ -475,11 +486,10 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
+@@ -475,11 +501,10 @@ void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros)
              g_ai.bytesLeft = g_ai.length;
          }
  
@@ -236,7 +293,7 @@ index fd19215..6c63a91 100644
      {
          std::lock_guard<std::mutex> lock(g_ai.mutex);
          if (g_ai.length != 0) {
-@@ -514,7 +524,14 @@ int64_t ConsumeAudioPollDeltaMicros()
+@@ -514,7 +539,14 @@ int64_t ConsumeAudioPollDeltaMicros()
      // Cap the catch-up interval after a debugger pause or host stall; backlog drains via
      // kMaxBlocksPerTick per pass. Never return early on a zero delta: two scheduler passes
      // can land in the same microsecond and the backlog still needs servicing.
@@ -665,10 +722,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..e14fa0c
+index 0000000..9012ae5
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,545 @@
+@@ -0,0 +1,550 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -951,6 +1008,11 @@ index 0000000..e14fa0c
 +        } else {
 +            flicked = mag > 0.7f;
 +        }
++        // On a bar (spinning to charge, then Push to let go) and while shaking something off,
++        // holding the gas (RT, R, X) kept some of the swings from registering, so it is ignored
++        // there. Crash recovery keeps it.
++        static const bool keepGas = std::getenv("WC_EB_GAS_ON_BARS") != nullptr;
++        if (!keepGas && (push || (shake && !crashShake))) in.hold &= ~kWpad2;
 +        const int side = stickX > 0.5f ? 1 : stickX < -0.5f ? -1 : 0;
 +        if (crashShake && side != 0 && side != lastSide) swingButton = true;
 +        if (side != 0) lastSide = side;
@@ -1214,6 +1276,247 @@ index 0000000..e14fa0c
 +{
 +    return ReadF32(kRaceTimeStep) > 0.0f;
 +}
+diff --git a/runtime/src/hle/excitebots/eb_menus.cpp b/runtime/src/hle/excitebots/eb_menus.cpp
+new file mode 100644
+index 0000000..a8fa3fb
+--- /dev/null
++++ b/runtime/src/hle/excitebots/eb_menus.cpp
+@@ -0,0 +1,235 @@
++// Excitebots: Trick Racing (RX3E01) menu layout changes.
++//
++// Menu screens are built from .lyt layouts ('LAYT') in the res packs: after a header, a list of
++// 0x134-byte records, each with a type at +0, x and y at +8 and +0xC, width and height at +0x14
++// and +0x18, a name at +0x20 and its text at +0x40. The layout loader (0x802BB430) gets the data
++// through 0x801688C0, and on the first load swaps the words to big endian in place; the data then
++// stays in the res pack for later visits. The records are edited as 0x801688C0 hands them over,
++// in whichever byte order they are in, before any widget is made from them.
++
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++#include <initializer_list>
++#include <string>
++
++#include "abi_bridge.h"
++#include "hle_stubs.h"
++#include "ppc_runtime.h"
++#include "runtime_log.h"
++
++namespace {
++constexpr uint32_t kRecordSize = 0x134;
++constexpr uint32_t kLayoutMagic = 0x4C415954; // 'LAYT'
++constexpr uint32_t kValuesMagic = 0x56414C54; // 'VALT'
++
++// The layout's words are little endian until the loader's first pass swaps them.
++bool g_littleEndian = false;
++
++uint32_t Word(uint32_t addr)
++{
++    const uint32_t v = Memory::Read32(addr);
++    return g_littleEndian ? __builtin_bswap32(v) : v;
++}
++
++void SetWord(uint32_t addr, uint32_t v)
++{
++    Memory::Write32(addr, g_littleEndian ? __builtin_bswap32(v) : v);
++}
++
++std::string ReadName(uint32_t addr, uint32_t max)
++{
++    std::string s;
++    for (uint32_t i = 0; i < max; ++i) {
++        const uint8_t c = Memory::Read8(addr + i);
++        if (c == 0) break;
++        s.push_back(static_cast<char>(c));
++    }
++    return s;
++}
++
++// Finds the record named `name` within the first `span` bytes of a layout.
++uint32_t FindRecord(uint32_t data, uint32_t span, const char* name)
++{
++    const size_t len = std::strlen(name);
++    for (uint32_t a = data; a + kRecordSize <= data + span; a += 4) {
++        const uint32_t type = Word(a);
++        if (type == 0 || type > 0x40) continue;
++        bool match = true;
++        for (size_t i = 0; i <= len && match; ++i) {
++            match = Memory::Read8(a + 0x20 + uint32_t(i)) == (i < len ? uint8_t(name[i]) : 0);
++        }
++        if (match) return a;
++    }
++    return 0;
++}
++
++void MoveRecord(uint32_t rec, int32_t dx, int32_t dy)
++{
++    if (rec == 0) return;
++    SetWord(rec + 0x8, uint32_t(int32_t(Word(rec + 0x8)) + dx));
++    SetWord(rec + 0xC, uint32_t(int32_t(Word(rec + 0xC)) + dy));
++}
++
++int32_t RecordY(uint32_t rec) { return int32_t(Word(rec + 0xC)); }
++
++// The records run from +0x68 to one whose type is 0.
++uint32_t FirstRecord(uint32_t data) { return data + 0x68; }
++
++uint32_t ListEnd(uint32_t data)
++{
++    uint32_t a = FirstRecord(data);
++    for (int n = 0; n < 512 && Word(a) != 0; ++n) a += kRecordSize;
++    return a;
++}
++
++// Takes a record out of the list: the ones after it (and the end marker) move up over it.
++void DeleteRecord(uint32_t data, uint32_t rec)
++{
++    if (rec == 0) return;
++    const uint32_t end = ListEnd(data) + kRecordSize;
++    auto* dst = static_cast<uint8_t*>(Memory::GetPointer(rec, end - rec));
++    if (dst == nullptr) return;
++    std::memmove(dst, dst + kRecordSize, end - rec - kRecordSize);
++}
++
++// After a race (postrace.lyt): Continue, Retry, View Replay and "Send..." (a replay or challenge
++// to a Wii Friend over WiiConnect24, which goes nowhere here). "Send..." is taken out and the
++// three left move down half a row, so the column stays centred where the four were.
++void PatchPostRace(uint32_t data)
++{
++    constexpr uint32_t kSpan = 0x1000;
++    const uint32_t send = FindRecord(data, kSpan, "challenge");
++    const uint32_t replay = FindRecord(data, kSpan, "replay");
++    if (send == 0 || replay == 0) return; // already done
++    const int32_t half = (RecordY(send) - RecordY(replay)) / 2;
++    for (const char* n : {"continue", "retry", "replay"}) MoveRecord(FindRecord(data, kSpan, n), 0, half);
++    DeleteRecord(data, send);
++    RT_LOGF(RT_TAG_HLE, "[eb] post-race menu: Send removed\n");
++}
++
++void DumpLayout(const std::string& name, uint32_t data)
++{
++    for (uint32_t a = FirstRecord(data); Word(a) != 0 && a < data + 0x10000; a += kRecordSize) {
++        RT_LOGF(RT_TAG_HLE, "[eb]   %s %08X type %02X x %d y %d w %d h %d name '%s' text '%s'\n", name.c_str(), a, Word(a),
++                int32_t(Word(a + 8)), int32_t(Word(a + 0xC)), int32_t(Word(a + 0x14)), int32_t(Word(a + 0x18)),
++                ReadName(a + 0x20, 0x20).c_str(), ReadName(a + 0x40, 0x40).c_str());
++    }
++}
++
++// Main menu (main_2.lyt): Excite Race, Poker Race, Nintendo WFC, Minigames, Collections, Options.
++// Nintendo WFC and the friend-mail icon beside it are taken out, and the buttons under it move up
++// into its row. The cursor follows the list, so it skips straight from Poker Race to Minigames.
++void PatchMainMenu(uint32_t data)
++{
++    constexpr uint32_t kSpan = 0x2000;
++    const uint32_t wfc = FindRecord(data, kSpan, "multi");
++    if (wfc == 0) return; // already done (the layout stays loaded between visits)
++    const int32_t wfcY = RecordY(wfc);
++    const uint32_t poker = FindRecord(data, kSpan, "poker");
++    const int32_t step = poker ? wfcY - RecordY(poker) : 64;
++    uint32_t mail = 0;
++    for (uint32_t a = FirstRecord(data); Word(a) != 0; a += kRecordSize) {
++        const int32_t y = RecordY(a);
++        if (a == wfc) continue;
++        if (ReadName(a + 0x20, 0x20) == "mail_icon" && y >= wfcY - 16 && y < wfcY + step - 16) {
++            mail = a;
++        } else if (y > wfcY) {
++            MoveRecord(a, 0, -step);
++        }
++    }
++    if (mail != 0) DeleteRecord(data, mail); // after the WFC button, so delete it first
++    DeleteRecord(data, wfc);
++    RT_LOGF(RT_TAG_HLE, "[eb] main menu: Nintendo WFC removed\n");
++}
++// Value-file layouts ('VALT', "BAZ!" data, e.g. vollyt.val) hold {key hash, word} pairs; key
++// 0x790 is an element's y (a float). On the first load the file is still little endian with
++// offsets for pointers (the loader fixes it up afterwards), so elements are found by their y.
++constexpr uint32_t kValY = 0x790;
++
++// Moves every element whose y is one of `ys` to `newY`. Returns how many it moved.
++int MoveValElements(uint32_t data, uint32_t span, std::initializer_list<float> ys, float newY)
++{
++    const uint32_t magic = Memory::Read32(data);
++    bool le;
++    if (magic == 0x42415A21) le = false;      // "BAZ!"
++    else if (magic == 0x215A4142) le = true;  // "BAZ!" not yet swapped
++    else return 0;
++    auto rd = [&](uint32_t a) { const uint32_t v = Memory::Read32(a); return le ? __builtin_bswap32(v) : v; };
++    int moved = 0;
++    for (uint32_t a = data + 8; a + 8 <= data + span; a += 4) {
++        if (rd(a) != kValY) continue;
++        const uint32_t bits = rd(a + 4);
++        float y;
++        std::memcpy(&y, &bits, 4);
++        bool hit = false;
++        for (float t : ys) hit = hit || y == t;
++        if (!hit) continue;
++        uint32_t nb;
++        std::memcpy(&nb, &newY, 4);
++        Memory::Write32(a + 4, le ? __builtin_bswap32(nb) : nb);
++        ++moved;
++    }
++    return moved;
++}
++
++// The pause menu's Options panel (vollyt.val, vollyt_2p.val): Music Volume, FX Volume and
++// Controller (Wii Remote / Wii Wheel), which means nothing on a pad. The game already skips that
++// row with the cursor in a race; its label, box, value, arrows and slider (y 214.5, 285.5, 280.5
++// and 269 in vollyt.val) leave the screen.
++void PatchPauseOptions(uint32_t data, bool twoPlayer)
++{
++    const int moved = twoPlayer ? 0 : MoveValElements(data, 0x1000, {214.5f, 285.5f, 280.5f, 269.0f}, -2000.0f);
++    if (std::getenv("WC_EB_TRACE_RES")) RT_LOGF(RT_TAG_HLE, "[eb] pause options: Controller row removed (%d values)\n", moved);
++}
++} // namespace
++
++// 0x801688C0(name, magic, &type, &size, flags, &firstLoad): a resource's data, retried up to ten
++// times while the res pack is still loading (0x801677C0 does the work and sets -0x58FC(r13) when
++// it had to wait).
++extern "C" void EB_ResData_801688c0(CpuContext* ctx)
++{
++    uint32_t args[6];
++    for (int i = 0; i < 6; ++i) args[i] = ctx->gpr[3 + i];
++    const uint32_t waitFlag = ctx->gpr[13] - 0x58FC;
++    uint32_t data = 0;
++    for (int tries = 0; tries < 10; ++tries) {
++        Memory::Write8(waitFlag, 0);
++        for (int i = 0; i < 6; ++i) ctx->gpr[3 + i] = args[i];
++        InvokeDirectCpu<0x801677C0u>(ctx);
++        data = ctx->gpr[3];
++        if (Memory::Read8(waitFlag) == 0 || data != 0) break;
++        InvokeDirectCpu<0x8015F580u>(ctx);
++    }
++    ctx->gpr[3] = data;
++    static const bool traceAll = std::getenv("WC_EB_TRACE_RES") && std::getenv("WC_EB_TRACE_RES")[0] == '2';
++    if (traceAll && Memory::Contains(args[0], 16)) RT_LOGF(RT_TAG_HLE, "[eb] res %s magic %08X at 0x%08X\n", ReadName(args[0], 64).c_str(), args[1], data);
++    if (data == 0 || !Memory::Contains(args[0], 16)) return;
++    const std::string name = ReadName(args[0], 64);
++    if (args[1] == kValuesMagic) {
++        if (std::getenv("WC_EB_STOCK_MENUS")) return;
++        if (name == "vollyt.val") PatchPauseOptions(data, false);
++        return;
++    }
++    if (args[1] != kLayoutMagic) return;
++    static const bool trace = std::getenv("WC_EB_TRACE_RES") != nullptr;
++    const bool firstLoad = args[5] != 0 && Memory::Read8(args[5]) != 0;
++    if (trace) RT_LOGF(RT_TAG_HLE, "[eb] layout %s at 0x%08X%s\n", name.c_str(), data, firstLoad ? " (first load)" : "");
++    if (std::getenv("WC_EB_STOCK_MENUS")) return;
++    g_littleEndian = firstLoad;
++    static const bool dump = std::getenv("WC_EB_TRACE_RES") && std::getenv("WC_EB_TRACE_RES")[0] == '3';
++    if (dump && firstLoad) DumpLayout(name, data);
++    if (name == "main_2.lyt") PatchMainMenu(data);
++    else if (name == "postrace.lyt") PatchPostRace(data);
++    g_littleEndian = false;
++}
++PPC_NATIVE_OVERRIDE_VOID(8E1688C0, EB_ResData_801688c0, (CpuContext* ctx), (ctx));
++
++// The tips screen after a race (posttips.lyt: "new tips" about turbo, bars, air spins and so on,
++// shown when the race taught one), run from 0x8030D388 only when a tip is pending. Not shown; the
++// caller then clears the pending tips (0x801D8C70) as it would after the screen.
++extern "C" void EB_PostRaceTips_8030ce50(CpuContext* ctx)
++{
++    (void)ctx;
++}
++PPC_NATIVE_OVERRIDE_VOID(8E30CE50, EB_PostRaceTips_8030ce50, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/gx/gx_copy.cpp b/runtime/src/hle/gx/gx_copy.cpp
 index c93affe..69cdd47 100644
 --- a/runtime/src/hle/gx/gx_copy.cpp

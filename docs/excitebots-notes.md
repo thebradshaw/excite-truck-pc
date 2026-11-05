@@ -111,6 +111,21 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   ("low": pushes that found under 2 blocks queued, "in": audio made so far over real time) and
   each gap over 50 ms; `Excitebots-audio-log.bat` in the install folder runs the game with it into
   `audio-log.txt`. `WC_AUDIO_DUMP=<file>` writes the raw output.
+- Menu changes (`eb_menus.cpp`, all off with `WC_EB_STOCK_MENUS=1`): layouts come through
+  0x801688C0 (name, magic), which is overridden to edit them as they are handed over. `.lyt`
+  ('LAYT') layouts are lists of 0x134-byte records (type, x +8, y +0xC, name +0x20, text +0x40)
+  from +0x68, little endian on the first load (the loader swaps them after). Main menu
+  (main_2.lyt): Nintendo WFC (`multi`) and its mail icon are deleted from the list and the
+  buttons under it move up a row; the cursor follows the list. Post-race menu (postrace.lyt):
+  "Send..." (`challenge`) is deleted and the other three move down half a row. Pause Options
+  (vollyt.val, a "BAZ!" value file): the Controller row's elements are moved off screen by their
+  y (key 0x790). The post-race tips screen (0x8030CE50, posttips.lyt) is not run.
+  `WC_EB_TRACE_RES=1` logs layouts (2: every resource, 3: dumps each layout's records).
+- On a bar (Push or the spin's shake prompt) and while shaking something off, the gas (2) is
+  dropped, since holding it kept swings from registering (`WC_EB_GAS_ON_BARS=1` keeps it).
+- Audio after a stall: the game side only makes as much audio as fits in about 200 ms of output
+  queue (the rest of a stall is skipped); catching a long stall up at once overfilled the queue,
+  which dropped blocks (clicks), mostly in the stage intro. The queue limit is 400 ms.
 - The three screens before the title (strap, ESRB, hold) are skipped: the boot step at
   `0x805A47F0` is set to 11 (done) each frame until the game reaches it (`EbFrameTick`).
 - `-direct_to_track:@mitch5_bar_challenge` (the yellow bar minigame) reaches a bar in about
