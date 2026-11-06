@@ -7,7 +7,8 @@ Dolphin-style texture replacement expects: tex1_<w>x<h>_<xxh64>_<fmt>.png.
 
 It replaces the Wii Remote pictures that ask for a motion with the left stick, which plays the
 motion on the pad: the shaking remote (bar spin, dentures) becomes a stick pushed left and right
-(but the A button during crash recovery, where A is the main way back up), and the bar prompt's pushed remote ("Push", let go of a bar) a stick flicked up.
+(but the A button during crash recovery, where A is the main way back up), and the bar prompt's pushed remote ("Push") a stick flicked up, or, on a bar, an A button
+pulsing between up and pressed.
 
 It also redraws the round button icons Excitebots shares with Excite Truck (common.res, same
 hashes): Wii 2 becomes A (OK / accelerate), Wii 1 becomes B (back) and Wii A becomes B, since B
@@ -87,6 +88,17 @@ def build(scale):
     stick(c, cx, cy, r, 0, -1)
     out["tex1_256x256_ddf1c663d39c4ad2_14.png"] = c.result()
     out["tex1_256x256_aa8407612f74e6ba_0.png"] = circle_mask(256, 256, scale, cx - r, cy - r, cx + r, cy + r)
+    # On a bar the runtime swaps that texture for two marked copies, every 0.25 s of race time:
+    # the A button up, then pressed (smaller, sunk into its dark well), so the hint pulses in the
+    # rhythm that charges the swing.
+    c = Canvas(256, 256, scale, (0, 0, 0, 255))
+    c.face(cx - r, cy - r, cx + r, cy + r, "A")
+    out["tex1_256x256_e64eb528944812c4_14.png"] = c.result()
+    c = Canvas(256, 256, scale, (0, 0, 0, 255))
+    c.d.ellipse(c.box(cx - r, cy - r, cx + r, cy + r), fill=(20, 20, 22))
+    p = r * 0.78
+    c.face(cx - p, cy - p, cx + p, cy + p, "A", pressed=True)
+    out["tex1_256x256_86b57fd5aad797cc_14.png"] = c.result()
     return out
 
 

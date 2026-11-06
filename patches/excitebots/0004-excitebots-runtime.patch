@@ -759,10 +759,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..56da241
+index 0000000..62863e0
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,641 @@
+@@ -0,0 +1,666 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -1048,34 +1048,53 @@ index 0000000..56da241
 +        static bool pushWasShown = false;
 +        static int heldReads = 0;
 +        static int lastDir = 0; // 1 forward, 2 back, 3 left, 4 right
-+        // Bars play themselves (Chris, round 9: automated and fast): while the Push prompt is up the
-+        // remote rocks forward and back, and the bar spin's shake rocks it side to side at full
-+        // speed, whatever the stick does. WC_EB_MANUAL_BARS=1 goes back to the stick and A.
-+        static const bool autoBars = std::getenv("WC_EB_MANUAL_BARS") == nullptr;
-+        static int autoReads = 0;
++        // Bars are played with A (Chris, round 11, after the automatic bars of rounds 9 and 10
++        // still felt wrong): each press of A charges the swing for a while, so pressing in the
++        // rhythm of the hint (an A button pulsing every 0.25 s), mashing, or holding A all work.
++        // WC_EB_AUTO_BARS=1 charges without A (round 10); WC_EB_MANUAL_BARS=1 goes back to
++        // stick strokes and A swings (round 8).
++        static const bool manualBars = std::getenv("WC_EB_MANUAL_BARS") != nullptr;
++        static const bool autoBars = !manualBars;
++        static const bool chargeWithoutA = std::getenv("WC_EB_AUTO_BARS") != nullptr;
++        // How long one press keeps charging, in seconds of race time.
++        constexpr float kChargePerPress = 0.8f;
++        static float chargeUntil = -1.0f;
++        static bool barActionWasDown = false;
++        const float clock = ReadF32(kRaceClock);
 +        // What spins the bot round a bar is rocking the remote forward and back (its pitch), not
-+        // a flick or a push (a push lets go of the bar). Rocking a full tilt each way every 0.25 s
-+        // of race time took the bar challenge's bar from 3.8 s to 1.7 s here. WC_EB_PUMP_HALF
-+        // sets the half period in seconds.
++        // a flick or a push (a push lets go of a yellow bar). Rocking a full tilt each way every
++        // 0.25 s of race time took the bar challenge's bar from 3.8 s to 1.7 s here.
++        // WC_EB_PUMP_HALF sets the half period in seconds.
 +        static const float pumpHalf = std::getenv("WC_EB_PUMP_HALF") ? float(std::atof(std::getenv("WC_EB_PUMP_HALF"))) : 0.25f;
 +        // A red (horizontal) bar fills its meter from thrusts of the remote along its length,
 +        // forward then back (the hint's side-on remote), not from the pitch rocking: a thrust each
-+        // way every 0.5 s of race time filled it to four stars in one swing here. Thrusts would
++        // way every 0.5 s of race time filled it to the top in one swing here. Thrusts would
 +        // let go of a yellow bar, so they only happen while the red bar's texture is drawn.
 +        // WC_EB_REDBAR_THRUST sets the time between thrusts in seconds.
 +        static const float thrustPeriod = std::getenv("WC_EB_REDBAR_THRUST") ? float(std::atof(std::getenv("WC_EB_REDBAR_THRUST"))) : 0.5f;
 +        if (autoBars && push) {
-+            ++autoReads;
-+            if (EbRedBarShown() && thrustPeriod > 0.0f) {
-+                static int lastSlot = -1, readsLeft = 0, dir = 1;
-+                const int slot = int(ReadF32(kRaceClock) / thrustPeriod);
-+                if (slot != lastSlot) { lastSlot = slot; readsLeft = 3; dir = (slot % 2) ? -1 : 1; }
-+                if (readsLeft > 0) { --readsLeft; in.thrust = dir; }
++            if (!pushWasShown) chargeUntil = -1.0f;
++            if (actionButton && !barActionWasDown) chargeUntil = clock + kChargePerPress;
++            if (actionButton) chargeUntil = std::max(chargeUntil, clock + kChargePerPress * 0.5f);
++            const bool charging = chargeWithoutA || clock < chargeUntil;
++            if (charging) {
++                if (EbRedBarShown() && thrustPeriod > 0.0f) {
++                    // Each thrust lasts at least 0.08 s of race time and 3 reads, so it reads as a
++                    // thrust at any frame rate.
++                    static int lastSlot = -1, readsLeft = 0, dir = 1;
++                    static float thrustEnd = 0.0f;
++                    const int slot = int(clock / thrustPeriod);
++                    if (slot != lastSlot) { lastSlot = slot; readsLeft = 3; thrustEnd = clock + 0.08f; dir = (slot % 2) ? -1 : 1; }
++                    if (readsLeft > 0 || clock < thrustEnd) { --readsLeft; in.thrust = dir; }
++                }
++                in.pitch = (int(clock / pumpHalf) % 2) ? 1.0f : -1.0f;
++            } else {
++                in.pitch = 0.0f;
 +            }
-+            in.pitch = (int(ReadF32(kRaceClock) / pumpHalf) % 2) ? 1.0f : -1.0f;
-+        } else {
-+            autoReads = 0;
++            // A on a bar charges; it is not a turbo or a remote swing there.
++            in.hold &= ~kSidewaysUp;
 +        }
++        barActionWasDown = actionButton;
 +        if (push && !autoBars) {
 +            static const bool testStroke = std::getenv("WC_EB_TEST_STICK") != nullptr;
 +            if (testStroke) {
@@ -1301,6 +1320,12 @@ index 0000000..56da241
 +    ctx->gpr[3] = 1;
 +}
 +PPC_NATIVE_OVERRIDE_VOID(8E04DABC, EB_KPADReadEx_8004dabc, (CpuContext* ctx), (ctx));
++
++// The bar prompt shows a pulsing A button unless bars are played with the stick (round 8).
++bool EbBarPromptShowsA() {
++    static const bool manualBars = std::getenv("WC_EB_MANUAL_BARS") != nullptr;
++    return !manualBars;
++}
 +
 +// Called once per presented frame. Skips the three boot screens (wrist strap, "Online Interactions
 +// Not Rated" and the Wii Remote / Wii Wheel "Press 2 to Start" picture), which are about the Wii
@@ -1855,7 +1880,7 @@ index 49be121..1f0e12f 100644
  
  void DeliverDrawSyncToken(CpuContext* ctx, uint16_t token)
 diff --git a/runtime/src/hle/gx/gx_texture.cpp b/runtime/src/hle/gx/gx_texture.cpp
-index b644a42..ef4e6f0 100644
+index b644a42..e8edbb8 100644
 --- a/runtime/src/hle/gx/gx_texture.cpp
 +++ b/runtime/src/hle/gx/gx_texture.cpp
 @@ -1,5 +1,9 @@
@@ -1901,7 +1926,7 @@ index b644a42..ef4e6f0 100644
              GXInitTexObjData(obj, dp);
              meta.needsUpload = false;
              textureDataUploaded = true;
-@@ -750,7 +764,180 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+@@ -750,7 +764,206 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
      }
  }
  
@@ -2006,31 +2031,50 @@ index b644a42..ef4e6f0 100644
 +    return kind;
 +}
 +
-+// Crash recovery keeps the A button on the shaking-remote prompt, while a bar spin or the
-+// dentures (same texture) show the left stick. While the crash meter is up the shake texture is
-+// handed to aurora from a copy whose first 4x4 block (hidden by the prompt's mask) is changed, so
-+// it hashes differently and the prompt pack gives it the A button.
-+const uint8_t* CrashShakeVariant(uint32_t dataAddr) {
++// A copy of a 256x256 CMPR prompt texture whose first 4x4 block (hidden by the prompt's mask)
++// carries an 8-byte mark, so it hashes differently and the prompt pack can draw something else
++// for it. One buffer per mark; a buffer is rebuilt when the source texture changes.
++const uint8_t* MarkedVariant(uint32_t dataAddr, int slot, const char (&mark)[9]) {
 +    constexpr uint32_t kBytes = 256u * 256u / 2u;
-+    static std::unique_ptr<uint8_t[]> variant;
-+    static uint32_t variantAddr = 0;
-+    static uint64_t sourceHead = 0;
++    struct Variant {
++        std::unique_ptr<uint8_t[]> data;
++        uint32_t addr = 0;
++        uint64_t head = 0;
++    };
++    static Variant variants[3];
++    Variant& v = variants[slot];
 +    if (!Memory::Contains(dataAddr, kBytes)) return nullptr;
 +    const auto* src = static_cast<const uint8_t*>(GuestToHostPtr(dataAddr, kBytes));
 +    if (src == nullptr) return nullptr;
 +    uint64_t head;
 +    std::memcpy(&head, src + 8, sizeof(head));
-+    if (!variant || variantAddr != dataAddr || sourceHead != head) {
-+        variant.reset(new uint8_t[kBytes]);
-+        std::memcpy(variant.get(), src, kBytes);
-+        static const uint8_t kMark[8] = {'E', 'B', 'c', 'r', 'a', 's', 'h', 'A'};
-+        std::memcpy(variant.get(), kMark, sizeof(kMark));
-+        variantAddr = dataAddr;
-+        sourceHead = head;
-+        RT_LOGF(RT_TAG_GX, "Excitebots crash shake prompt variant %016llx\n",
-+                static_cast<unsigned long long>(XXH64(variant.get(), kBytes, 0)));
++    if (!v.data || v.addr != dataAddr || v.head != head) {
++        v.data.reset(new uint8_t[kBytes]);
++        std::memcpy(v.data.get(), src, kBytes);
++        std::memcpy(v.data.get(), mark, 8);
++        v.addr = dataAddr;
++        v.head = head;
++        RT_LOGF(RT_TAG_GX, "Excitebots prompt variant %s %016llx\n", mark,
++                static_cast<unsigned long long>(XXH64(v.data.get(), kBytes, 0)));
 +    }
-+    return variant.get();
++    return v.data.get();
++}
++
++// Crash recovery keeps the A button on the shaking-remote prompt, while a bar spin or the
++// dentures (same texture) show the left stick.
++const uint8_t* CrashShakeVariant(uint32_t dataAddr) {
++    return MarkedVariant(dataAddr, 0, "EBcrashA");
++}
++
++// On a bar the Push prompt becomes the A button, pressed and released in the rhythm A charges
++// the swing best at (Chris, round 11): up for 0.25 s of race time, pressed for 0.25 s.
++const uint8_t* BarPromptVariant(uint32_t dataAddr) {
++    constexpr uint32_t kRaceClock = 0x805A2AC4u;
++    uint32_t bits = Memory::Read32(kRaceClock);
++    float clock;
++    std::memcpy(&clock, &bits, sizeof(clock));
++    const bool pressed = (int(clock / 0.25f) % 2) != 0;
++    return pressed ? MarkedVariant(dataAddr, 2, "EBbarAdn") : MarkedVariant(dataAddr, 1, "EBbarAup");
 +}
 +} // namespace EbScreenTextures
 +
@@ -2067,22 +2111,29 @@ index b644a42..ef4e6f0 100644
 +    return now - g_firstControllerType.load(std::memory_order_relaxed);
 +}
 +
++bool EbBarPromptShowsA(); // eb_input.cpp: bars are played with A (the default)
++
  extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
 +    uint32_t crashShakeAddr = 0;
 +    const void* crashShakePtr = nullptr;
 +    if (::GuestRegion::IsExcitebots()) {
 +        uint32_t dataAddr = 0;
-+        if (EbScreenTextures::Note(oa, &dataAddr) == EbScreenTextures::kShake && EbCrashMeterShown()) {
-+            if (const uint8_t* v = EbScreenTextures::CrashShakeVariant(dataAddr)) {
-+                crashShakeAddr = dataAddr;
-+                crashShakePtr = v;
-+            }
++        const auto kind = EbScreenTextures::Note(oa, &dataAddr);
++        const uint8_t* v = nullptr;
++        if (kind == EbScreenTextures::kShake && EbCrashMeterShown()) {
++            v = EbScreenTextures::CrashShakeVariant(dataAddr);
++        } else if (kind == EbScreenTextures::kPush && EbBarPromptShowsA()) {
++            v = EbScreenTextures::BarPromptVariant(dataAddr);
++        }
++        if (v != nullptr) {
++            crashShakeAddr = dataAddr;
++            crashShakePtr = v;
 +        }
 +    }
      if (g_gxTraceFrame) {
          TexObjMeta m; bool ok = false;
          { std::lock_guard<std::mutex> guard(g_texObjMutex); try { ok = TryGetOrExtractTexObjMeta(oa, m); } catch (...) {} }
-@@ -763,13 +950,16 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+@@ -763,13 +976,16 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
              bytes = CaptureTexObjBytes(oa);
          } catch (...) {
          }
@@ -2102,7 +2153,7 @@ index b644a42..ef4e6f0 100644
                      IsReasonableTextureDimensions(m.width, m.height) && IsAuroraLoadableTexFormat(m.format)) {
                      const uint8_t maxLod = m.mipmap ? static_cast<uint8_t>(ComputeMaxMipLevel(m.width, m.height)) : 0u;
                      const uint32_t size = GXGetTexBufferSize(m.width, m.height, m.format, (GXBool)m.mipmap, maxLod);
-@@ -793,6 +983,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+@@ -793,6 +1009,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
              }
          });
      } else {

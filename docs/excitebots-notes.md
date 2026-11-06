@@ -74,8 +74,13 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
 - Pad layout in a race: RT/RB accelerate (Wii 2), X and LT/LB brake (Wii 1), A turbo, B the Wii
   A button (weapons), Y also Wii A, left stick steers and tilts. Menus: A OK, B or X back.
 - Motion prompts are spotted by their textures (`EbScreenTextures` in gx_texture.cpp) and played
-  with the left stick. Bars play themselves (round 9, Chris: "automated and fast"): while "Push"
-  is up the remote's pitch rocks a full tilt forward and back every 0.25 s of race time
+  with the left stick. Bars are played with A (round 11, Chris: "use just the A button ... very
+  forgiving"): on any bar the hint's remote becomes an A button that presses every 0.25 s of race
+  time (two marked copies of the Push texture, e64eb528944812c4 up and 86b57fd5aad797cc pressed,
+  drawn by tools/prompts/make_eb_pack.py), and each press of A charges for 0.8 s of race time
+  (held A keeps charging), so tapping in rhythm, mashing or holding all work. Charging is what
+  rounds 9 and 10 did on their own (`WC_EB_AUTO_BARS=1` still does): while "Push" is up the
+  remote's pitch rocks a full tilt forward and back every 0.25 s of race time
   (`WC_EB_PUMP_HALF`), and the bar spin's shake rocks it side to side at full speed, whatever
   the stick does. What spins the bot round a bar is that pitch rocking: on the bar challenge's
   bar it cut the hang from 3.8 s (no input, or flicks) to 1.1 s (0.5 s rocking: 1.8 s; 0.12 s
@@ -86,7 +91,7 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   bar's own texture (256x256 CMPR 78583d305e906e63, never drawn on a yellow bar) is up the remote
   also thrusts each way every 0.5 s of race time (`WC_EB_REDBAR_THRUST`). On School_Mexico that
   filled the meter to the top in one swing and launched a record jump; pitch rocking alone had
-  reached two stars. `WC_EB_MANUAL_BARS=1` restores the manual
+  reached two stars. With A held the same run also filled it to the top. `WC_EB_MANUAL_BARS=1` restores the manual
   controls below. Manual: on "Push" (swinging on a bar) every stroke of the stick plays a swing:
   each time it reaches a new direction past 50% (forward, back, left or right), so a fast
   forward-back flip is two swings even when it skips the centre between reads (round 8: waiting
