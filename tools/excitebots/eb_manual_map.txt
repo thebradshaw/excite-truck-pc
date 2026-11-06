@@ -1,0 +1,58 @@
+# Hand-checked Excitebots addresses for SDK functions the aligner misses or gets unsure about.
+# Format: <MKWii addr> <EB addr|none> <name>    ("none" = not in Excitebots / rejected)
+# Found by searching for Excite Truck's hand-checked functions (tools/manual_map.txt) with
+# relocations masked (tools/excitebots/dolfind.py).
+# PPCArch.o
+8012e594 800380bc PPCMtdec
+8012e5a4 800380cc PPCHalt
+8012e574 8003809c PPCMfhid0
+8012e57c 800380a4 PPCMthid0
+8012e59c 800380c4 PPCSync
+8012e5b8 800380e0 PPCMtmmcr0
+8012e5c0 800380e8 PPCMtmmcr1
+8012e5c8 800380f0 PPCMtpmc1
+8012e5d0 800380f8 PPCMtpmc2
+8012e5d8 80038100 PPCMtpmc3
+8012e5e0 80038108 PPCMtpmc4
+8012e638 80038160 PPCMthid2
+8012e640 80038168 PPCMfwpar
+8012e64c 80038174 PPCMtwpar
+# dsp.o: same order and sizes as Excite Truck and MKWii
+8015d3fc 800382e4 DSPCheckMailToDSP
+8015d40c 800382f4 DSPCheckMailFromDSP
+8015d41c 80038304 DSPReadMailFromDSP
+8015d430 80038318 DSPSendMailToDSP
+8015d444 8003832c DSPInit
+8015d504 800383ec DSPCheckInit
+8015d50c 800383f4 DSPAddTask
+8015d57c 800384a4 DSPAssertTask
+# ipc
+80192f7c 800aba98 IPCInit
+80193010 800abb2c IPCReadReg
+80193020 800abb3c IPCWriteReg
+80193030 800abb4c IPCGetBufferHi
+80193038 800abb54 IPCGetBufferLo
+80193040 800abb5c IPCSetBufferLo
+80166964 80040594 DVDLowClearCoverInterrupt
+8016d608 80045a84 GXSetVtxDescv
+8016de08 80046040 GXSetVtxAttrFmtv
+# Size changes against MKWii, placed by their neighbours and checked by disassembly
+8016eab0 80046aac GXDrawDone (GXSetDrawDone 80046a08 + wait loop on -0x61b8(r13))
+8016f3e0 80047408 GXSetCoPlanar (rlwimi into genMode bit 19)
+801aa1d4 8005b8f8 OSCancelThread (between OSExitThread and OSJoinThread)
+801a7dfc 80059258 __OSInitMemoryProtection
+8019f2d0 80050ff0 __OSGetIOSRev
+8019f33c 8005105c OSGetConsoleType
+801b90f4 80061020 VISetPreRetraceCallback
+801b9138 80061064 VISetPostRetraceCallback
+80015500 8002f034 __write_console (calls OSGetConsoleType)
+# nand.o: same layout as MKWii ahead of NANDDelete (0x800af248)
+8019b43c 800af0e4 NANDCreate
+8019b524 800af1d0 NANDPrivateCreateAsync
+# ai.o: Excitebots links AIStopDMA right after AIStartDMA (same size), which MKWii lacks, so the
+# aligner was off by one here. AIStopDMA (0x800342c0) gets its own hook (eb_hooks.cpp).
+80124048 800342ac AIStartDMA
+# nand.o: Excitebots links the public async calls (NANDCreateAsync 0x800af158, NANDCreateDirAsync
+# 0x800af900) where MKWii has the private sync ones; those get Excitebots hooks (eb_hooks.cpp).
+8019bbe0 800af88c NANDCreateDir
+8019bcc8 800af978 NANDPrivateCreateDirAsync

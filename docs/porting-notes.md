@@ -364,3 +364,13 @@ Measured on the container with Dawn's null backend (`WC_NULL_GPU=1`, CPU cost on
   D-pad. Wii B has no pad button (only the keyboard's B); its replay cell is a blank button.
 - **Not done yet:** the tutorial photos of hands holding a Wii Remote (`overlays.res/tu_*.art`) and
   the Wii strap and remote screens (`uiaction.res/WiiStrap*.img`, `rev_rem*.img`).
+
+## Audio clock fix (2026-11-05)
+
+- The audio poll's wall-clock cursor (`ConsumeAudioPollDeltaMicros`, `runtime/src/hle/audio/audio.cpp`)
+  was set to `now` on every poll while only whole microseconds were handed out. With polls tens of
+  microseconds apart (a busy race polls up to ~100,000 times a second) the dropped fractions add up
+  to several percent of real time, so the game made too little audio and the output queue ran
+  nearly dry (crackle). The cursor now advances by the microseconds it hands out. Found on
+  Excitebots (5% short in races, Chris's audio log); the fix is in patch 0001, so Excite Truck
+  gets it too.

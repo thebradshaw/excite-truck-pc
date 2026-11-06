@@ -1,0 +1,42 @@
+# Hand-checked Excitebots addresses for data globals.  <MKWii PAL> <EB> <name / evidence>
+# These override tools/excitebots/datamap.py where it guessed wrong (lis-based structs) and
+# cover what Excite Truck needed by hand (tools/manual_data.txt).
+# IPC buffer (IPCGetBufferLo/Hi)
+803867EC 805A22DC ipcBufferLo
+803867F0 805A22E0 ipcBufferHi
+# VI retrace queue: VIWaitForRetrace 0x80061938 addi r3,r13,-0x5f88
+80386BC0 805A2058
+# HorVer = 0x804FC9C0 (VIInit 0x800615f8 lis r30,0x8050; addi r31,r30,-0x3640)
+80350864 804FC9C4
+80350866 804FC9C6
+80350872 804FC9D2
+8035087C 804FC9DC
+80350890 804FC9F0 HorVer.bufAddr (VISetNextFrameBuffer stw r30,0x30(r7))
+# GX: __GXData pointer lwz -0x76a0(r2); it holds 0x804F90E0. PE draw-done queue/flag
+# (GXDrawDone 0x80046aac: addi r3,r13,-0x61c0 / lbz -0x61b8(r13)).
+803886C8 805A5440
+803437C0 804F90E0
+803867D0 805A1E20
+803867D8 805A1E28
+# Display-list FIFO (GXBeginDisplayList 0x8004a2f0: lis r31,0x8050; addi r31,r31,-0x68d8)
+80344090 804F9728
+80344094 804F972C
+80344098 804F9730
+803440A4 804F973C
+803440A8 804F9740
+803440AC 804F9744
+80344110 804F97A8 saved GXData copy (+0x80)
+80344710 804F9DA8 saved CPU FIFO (+0x680)
+# AX: __AXOutInitDSP 0x80036228: task 0x804E2660, IRAM 0x804A2B20, DRAM 0x804E26C0,
+# vectors/length -0x7f78..-0x7f74(r13), init flags -0x63e4/-0x63e0(r13).
+802F81A0 804E2660
+8027F820 804A2B20
+802F8200 804E26C0
+80385800 805A0068
+80385802 805A006A
+80385804 805A006C
+80386524 805A1BFC
+80386528 805A1C00
+# DVD: __DVDClearWaitingQueue lis/addi 0x804F8B30; DVDLowInit stwu r5,-0x7220(r4=0x80500000)
+80343230 804F8B30
+803434E0 804F8DE0
