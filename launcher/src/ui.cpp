@@ -748,7 +748,7 @@ void BotsControlsPage() {
     ImGui::Indent(S(8));
     ControlLine("RT", 0, true, "Accelerate", "RB");
     ControlLine("X", IM_COL32(80, 150, 255, 255), false, "Brake", "LT");
-    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Turbo, and tap it to recover from a crash");
+    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Turbo, swing on bars, and recover from a crash");
     ControlLine("B", IM_COL32(240, 80, 70, 255), false, "Use your weapon");
     ControlLine("Y", IM_COL32(240, 200, 60, 255), false, "The Wii Remote's A button");
     ControlLine("LS", 0, true, "Steer, and tilt in the air");
@@ -766,10 +766,10 @@ void BotsControlsPage() {
     }
     ImGui::Dummy(ImVec2(0, S(4)));
     ImGui::Indent(S(8));
-    Paragraph("Bars and shakes play themselves: your bot grabs bars, swings, spins and lets go at full speed, and "
-              "shakes off things like dentures on its own. After a crash, tap A to get going again (shaking the "
-              "stick side to side works too). The game shows the button for each action. To change which button "
-              "does what, press F10 in the game and open Controllers.");
+    Paragraph("Your bot grabs bars by itself. On a bar, press A to swing: tap it in rhythm, mash it or hold it, "
+              "and the hint on screen pulses A to show the rhythm. After a crash, tap A to get going again "
+              "(shaking the stick side to side works too). The game shows the button for each action. To change "
+              "which button does what, press F10 in the game and open Controllers.");
     ImGui::Unindent(S(8));
 }
 
