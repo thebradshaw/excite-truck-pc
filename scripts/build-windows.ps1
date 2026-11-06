@@ -10,12 +10,12 @@ Run from PowerShell in the repository folder:
 Accepts a .wbfs/.iso/.rvz/.ciso/.wia disc image, a .zip holding one (or the first part,
 .zip.001, of a zip split by 7-Zip), or a folder already
 extracted with nodtool (the one holding sys\ and files\). The result is a self-contained folder,
-ExciteTruck\ in the repository, with ExciteTruckLauncher.exe and ExciteTruck.exe, its settings (ExciteTruck\UserData) and your
+ExciteTruck\ in the repository, with ExciteTruck.exe, its settings (ExciteTruck\UserData) and your
 Music folder.
 
-From a repository checkout this needs Git for Windows (winget install Git.Git). The setup exe
-(ExciteTruckSetup.exe) runs this script with a payload folder beside it and needs nothing
-installed. Everything else (compiler, CMake, Ninja, .NET,
+From a repository checkout this needs Git for Windows (winget install Git.Git). Players don't run
+this by hand: the Excite PC launcher (installed by ExciteSetup.exe) runs it with a payload folder
+beside it, shows its "##progress" lines as a progress bar, and needs nothing installed. Everything else (compiler, CMake, Ninja, .NET,
 nodtool, libraries) is downloaded into the work folder with pinned checksums. About 20 GB of
 free space during the build; the finished game is much smaller.
 #>
@@ -68,7 +68,13 @@ trap {
     exit 1
 }
 
-function Step([string]$Text) { Write-Host ''; Write-Host "==> $Text" -ForegroundColor Cyan }
+# A step's title, and where the launcher's progress bar stands when it starts. "##progress A B"
+# means the steps after it run from A to B percent, moved along by ninja's [n/m] lines.
+function Step([string]$Text, [string]$Progress = '') {
+    Write-Host ''
+    Write-Host "==> $Text" -ForegroundColor Cyan
+    if ($Progress) { Write-Host "##progress $Progress" }
+}
 function Fail([string]$Text) {
     Write-Host ''; Write-Host "Error: $Text" -ForegroundColor Red
     try { Stop-Transcript | Out-Null } catch { }
@@ -152,7 +158,7 @@ if ($Work.Contains(' ')) { Fail "the work folder path must not contain spaces: $
 $downloads = Join-Path $Work 'downloads'
 [IO.Directory]::CreateDirectory($downloads) | Out-Null
 
-Step 'Checking tools'
+Step 'Checking tools' '1'
 $git = Get-Command git -ErrorAction SilentlyContinue
 if (-not $SetupMode -and -not $git) { Fail 'Git is not installed. Install it with: winget install Git.Git   (then open a new PowerShell window)' }
 if (-not (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\vcruntime140.dll'))) {
@@ -175,7 +181,7 @@ if (-not $dotnet) {
     $dotnetRoot = Join-Path $Work 'dotnet'
     $dotnet = Join-Path $dotnetRoot 'dotnet.exe'
     if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf)) {
-        Step 'Downloading the .NET 8 SDK (private copy, no admin needed)'
+        Step 'Downloading the .NET 8 SDK (private copy, no admin needed)' '2'
         $installer = Join-Path $downloads 'dotnet-install.ps1'
         Invoke-WebRequest -UseBasicParsing -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile $installer
         & $installer -Channel 8.0 -InstallDir $dotnetRoot -NoPath
@@ -193,7 +199,7 @@ if (Test-Path -LiteralPath (Join-Path $Disc 'sys\main.dol') -PathType Leaf) {
     $image = $Disc
     if ($Disc -match '\.zip\.\d{3}$') {
         # A zip split into parts by 7-Zip (name.zip.001, .002, ...): join the parts back into one zip.
-        Step 'Joining the zip parts'
+        Step 'Joining the zip parts' '4'
         $prefix = $Disc.Substring(0, $Disc.Length - 4)
         $joined = Join-Path $Work 'disc.zip'
         $output = [IO.File]::Create($joined)
@@ -207,7 +213,7 @@ if (Test-Path -LiteralPath (Join-Path $Disc 'sys\main.dol') -PathType Leaf) {
         $image = $joined
     }
     if ([IO.Path]::GetExtension($image) -ieq '.zip') {
-        Step 'Unpacking the zip'
+        Step 'Unpacking the zip' '5'
         $unzipped = Join-Path $Work 'disc-zip'
         if (Test-Path -LiteralPath $unzipped) { Remove-Item -LiteralPath $unzipped -Recurse -Force }
         Expand-Archive -LiteralPath $image -DestinationPath $unzipped
@@ -218,9 +224,9 @@ if (Test-Path -LiteralPath (Join-Path $Disc 'sys\main.dol') -PathType Leaf) {
     }
     $nodtool = Join-Path $Work 'tools\nodtool.exe'
     [IO.Directory]::CreateDirectory((Split-Path -Parent $nodtool)) | Out-Null
-    Step 'Downloading nodtool (reads Wii disc images)'
+    Step 'Downloading nodtool (reads Wii disc images)' '7'
     Download $NodtoolUrl $nodtool $NodtoolSha256
-    Step 'Extracting the disc'
+    Step 'Extracting the disc' '8'
     $partial = "$data.partial"
     if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Recurse -Force }
     Run $nodtool @('extract', $image, $partial)
@@ -242,7 +248,7 @@ $current = if (Test-Path -LiteralPath $stampFile) { [IO.File]::ReadAllText($stam
 if ($SetupMode) {
     $stamp = [IO.File]::ReadAllText((Join-Path $Payload 'stamp.txt')).Trim()
     if ($current -ne $stamp) {
-        Step 'Downloading WiiCompiled (the recompiler and runtime this port is built on)'
+        Step 'Downloading WiiCompiled (the recompiler and runtime this port is built on)' '12'
         [IO.Directory]::CreateDirectory($ws) | Out-Null
         # Fresh sources; keep the build, translation output and downloaded build tools.
         Get-ChildItem -LiteralPath $ws -Force |
@@ -269,7 +275,7 @@ if ($SetupMode) {
             if ($LASTEXITCODE -ge 8) { Fail "could not copy $($root.Name)" }
             Remove-Item -LiteralPath $extract -Recurse -Force
         }
-        Step 'Applying the Excite Truck changes'
+        Step 'Applying the Excite Truck changes' '15'
         & robocopy (Join-Path $Payload 'overlay') $ws /E /NFL /NDL /NJH /NJS /NP | Out-Null
         if ($LASTEXITCODE -ge 8) { Fail 'could not copy the Excite Truck changes' }
         [IO.File]::WriteAllText($stampFile, $stamp)
@@ -277,11 +283,10 @@ if ($SetupMode) {
 } else {
 $stampInputs = @(Get-ChildItem -LiteralPath (Join-Path $Repo 'patches') -Filter '*.patch' -File) +
     @(Get-Item -LiteralPath (Join-Path $Repo 'tools\sdk_map\et_versions.inc')) +
-    @(Get-ChildItem -LiteralPath (Join-Path $Repo 'projects\excite-truck') -File) +
-    @(Get-ChildItem -LiteralPath (Join-Path $Repo 'launcher') -File -Recurse)
+    @(Get-ChildItem -LiteralPath (Join-Path $Repo 'projects\excite-truck') -File)
 $stamp = ($stampInputs | Sort-Object FullName | ForEach-Object { Sha256 $_.FullName }) -join ','
 if ($current -ne $stamp) {
-    Step 'Fetching WiiCompiled (the recompiler and runtime this port is built on)'
+    Step 'Fetching WiiCompiled (the recompiler and runtime this port is built on)' '12'
     if (-not (Test-Path -LiteralPath (Join-Path $ws '.git'))) {
         if (Test-Path -LiteralPath $ws) { Remove-Item -LiteralPath $ws -Recurse -Force }
         # Keep LF line endings so the patches apply.
@@ -297,7 +302,7 @@ if ($current -ne $stamp) {
     Run $git.Source @('-C', $aurora, 'checkout', '--quiet', '--force', $AuroraCommit)
     Run $git.Source @('-C', $aurora, 'clean', '-fdq')
 
-    Step 'Applying the Excite Truck patches'
+    Step 'Applying the Excite Truck patches' '15'
     Run $git.Source @('-C', $ws, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0001-excite-truck-runtime.patch'))
     Run $git.Source @('-C', $aurora, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0002-aurora-channel-colors.patch'))
     Run $git.Source @('-C', $ws, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0003-xbox-button-prompts.patch'))
@@ -306,11 +311,6 @@ if ($current -ne $stamp) {
     $project = Join-Path $ws 'projects\excite-truck'
     [IO.Directory]::CreateDirectory($project) | Out-Null
     Copy-Item -Path (Join-Path $Repo 'projects\excite-truck\*') -Destination $project -Force
-    # The launcher builds inside the runtime tree, next to the game (see launcher\CMakeLists.txt).
-    $launcherDir = Join-Path $ws 'runtime\et_launcher'
-    if (Test-Path -LiteralPath $launcherDir) { Remove-Item -LiteralPath $launcherDir -Recurse -Force }
-    Copy-Item -LiteralPath (Join-Path $Repo 'launcher') -Destination $launcherDir -Recurse -Force
-    [IO.File]::AppendAllText((Join-Path $ws 'runtime\CMakeLists.txt'), "`nadd_subdirectory(et_launcher)`n")
     [IO.File]::WriteAllText($stampFile, $stamp)
 }
 }
@@ -318,10 +318,10 @@ if ($current -ne $stamp) {
 # --- Build tools and libraries (WiiCompiled's own pinned set) ----------------------------
 $tools = Join-Path $Work 'toolchain'
 $deps = Join-Path $Work 'deps'
-Step 'Preparing the compiler, CMake and Ninja (downloaded once)'
+Step 'Preparing the compiler, CMake and Ninja (downloaded once)' '17'
 & (Join-Path $ws 'Launcher\Prepare-PortableTools.ps1') -Destination $tools
 $cmake = Join-Path $tools 'CMake\bin\cmake.exe'
-Step 'Preparing the libraries (downloaded once)'
+Step 'Preparing the libraries (downloaded once)' '23'
 # Windows 10's tar.exe can't open .tar.bz2 files, and libusb only ships as one. Unpack it with
 # CMake instead and stamp it the way Prepare-Dependencies.ps1 does, so that script skips it.
 $libusb = Join-Path $deps 'libusb'
@@ -358,7 +358,7 @@ $bin = Join-Path $tools 'llvm-mingw\bin'
 Copy-Item -LiteralPath $dol -Destination (Join-Path $ws 'Assets\main.dol') -Force
 $cli = Join-Path $ws 'translator\src\Translator.Cli\bin\Release\net8.0\Translator.Cli.dll'
 if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
-    Step 'Building the translator'
+    Step 'Building the translator' '28'
     Run $dotnet @('build', (Join-Path $ws 'translator\src\Translator.Cli\Translator.Cli.csproj'), '-c', 'Release', '-v', 'quiet', '-nologo')
 }
 
@@ -366,7 +366,7 @@ Push-Location $ws
 $oldPath = $env:PATH
 try {
     $p = 'projects/excite-truck/recomp.yml'
-    Step "Translating the game's code (a few minutes)"
+    Step "Translating the game's code (a few minutes)" '31'
     Run $dotnet @($cli, 'translate-recursive', '0x80004170', '--project', $p, '--outdir', 'generated/functions',
         '--output-metadata', 'generated/base_translation_output.json',
         '--production-source-bundle', 'generated/base_translation_sources.bin',
@@ -399,7 +399,7 @@ try {
     Get-ChildItem -LiteralPath $ws -Recurse -File -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -gt $now } |
         ForEach-Object { $_.LastWriteTime = $now }
-    Step 'Configuring'
+    Step 'Configuring' '38'
     $configure = Get-MkwNativeConfigureArguments `
         -SourceDirectory (Join-Path $ws 'runtime') -BuildDirectory $build `
         -Ninja $ninja -CCompiler (Join-Path $bin 'x86_64-w64-mingw32-clang.exe') `
@@ -410,17 +410,19 @@ try {
             "-DMKW_INITIAL_PIPELINE_CACHE=$(ConvertTo-MkwCMakePath $SeedCache)",
             "-DMKW_TRANSLATED_COMPILE_JOBS=$Jobs", "-DMKW_X86_CPU_PROFILE=$cpuProfile")
     Run $cmake $configure
-    Step "Compiling with $Jobs jobs (this is the long part: 20 to 60 minutes)"
-    Run $cmake @('--build', $build, '--target', 'WiiCompiled', 'ExciteTruckLauncher', '--parallel', "$Jobs")
+    Step "Compiling with $Jobs jobs (this is the long part: 20 to 60 minutes)" '40 97'
+    Run $cmake @('--build', $build, '--target', 'WiiCompiled', '--parallel', "$Jobs")
 } finally {
     $env:PATH = $oldPath
     Pop-Location
 }
 
 # --- Package -----------------------------------------------------------------------------
-Step "Installing to $Out"
+Step "Installing to $Out" '98'
 Copy-Item -LiteralPath (Join-Path $build 'WiiCompiled.exe') -Destination (Join-Path $Out 'ExciteTruck.exe') -Force
-Copy-Item -LiteralPath (Join-Path $build 'ExciteTruckLauncher.exe') -Destination (Join-Path $Out 'ExciteTruckLauncher.exe') -Force
+# The launcher now lives on its own (Excite PC); drop the copy older setups put here.
+$oldLauncher = Join-Path $Out 'ExciteTruckLauncher.exe'
+if (Test-Path -LiteralPath $oldLauncher) { Remove-Item -LiteralPath $oldLauncher -Force -ErrorAction SilentlyContinue }
 Get-ChildItem -LiteralPath $build -File |
     Where-Object { $_.Extension -in '.dll', '.bin', '.pem', '.db', '.zip' } |
     Copy-Item -Destination $Out -Force
@@ -455,8 +457,8 @@ if ($Shortcut) {
     $shell = New-Object -ComObject WScript.Shell
     $desktop = [Environment]::GetFolderPath('Desktop')
     $link = $shell.CreateShortcut((Join-Path $desktop 'Excite Truck.lnk'))
-    # The shortcut opens the launcher (settings, music, then Start Game).
-    $link.TargetPath = Join-Path $Out 'ExciteTruckLauncher.exe'
+    # Straight into the game (players normally start it from the Excite PC launcher).
+    $link.TargetPath = Join-Path $Out 'ExciteTruck.exe'
     $link.WorkingDirectory = $Out
     $gameIcon = Join-Path $Out 'ExciteTruck.ico'
     if (Test-Path -LiteralPath $gameIcon -PathType Leaf) { $link.IconLocation = "$gameIcon,0" }
@@ -467,11 +469,9 @@ if ($Shortcut) {
     Write-Host 'Added "Excite Truck" and "Excite Truck Music" shortcuts to the desktop.'
 }
 
+Write-Host '##progress 100'
 Write-Host ''
-Write-Host 'Done. Start the launcher (settings, music, then Start Game) with:' -ForegroundColor Green
-Write-Host "  $(Join-Path $Out 'ExciteTruckLauncher.exe')"
-Write-Host "or go straight into the game with $(Join-Path $Out 'ExciteTruck.exe')."
-Write-Host ''
+Write-Host "Done. The game is $(Join-Path $Out 'ExciteTruck.exe')." -ForegroundColor Green
 Write-Host "Your own songs go in $(Join-Path $Out 'UserData\Music') (MP3, up to 100)."
 Write-Host 'In the game set Options > Race Music to All Random. F10 opens the settings bar.'
 try { Stop-Transcript | Out-Null } catch { }
