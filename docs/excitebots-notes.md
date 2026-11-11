@@ -74,11 +74,21 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
 - Pad layout in a race: RT/RB accelerate (Wii 2), X and LT/LB brake (Wii 1), A turbo, B the Wii
   A button (weapons), Y also Wii A, left stick steers and tilts. Menus: A OK, B or X back.
 - Motion prompts are spotted by their textures (`EbScreenTextures` in gx_texture.cpp) and played
-  with the left stick. Bars are played with A (round 11, Chris: "use just the A button ... very
-  forgiving"): on any bar the hint's remote becomes an A button that presses every 0.25 s of race
-  time (two marked copies of the Push texture, e64eb528944812c4 up and 86b57fd5aad797cc pressed,
-  drawn by tools/prompts/make_eb_pack.py), and each press of A charges for 0.8 s of race time
-  (held A keeps charging), so tapping in rhythm, mashing or holding all work. Charging is what
+  with the left stick. Bars are played with A (round 12, Chris: "tapping on the A button
+  repeatedly to gather speed, or a timed A button to release"; round 11's press-to-charge window
+  did not feel like gathering momentum). On a red (horizontal) bar every tap of A is one thrust
+  of the remote, alternating forward and back, and rocks its pitch the other way, so tapping
+  faster swings harder (five taps a second reached "Super Red Bar" on School_Mexico). On a yellow
+  (vertical) bar one press of A is a forward thrust, which lets go about 0.7 s later; the game's
+  "Push" label lights up as the cue. The hint is an A button that stays still and shrinks and
+  grows: 0x802C27B0 draws 2D sprites from (x, y, z, scale x, scale y, angle) and first calls cos
+  (0x80032990) on the angle, so cos is a native override (`EB_cos_80032990`, the library's own
+  kernels) that, when called from there for the prompt's sprite, pins its position (already on
+  the stack at r1+68), scale and angle to the first frame's. The pulse is in the texture: four
+  marked copies of the Push texture and of its I4 mask (hashes in tools/prompts/make_eb_pack.py),
+  drawn 4/3 wide because the sprite is 3/4 as wide as its texture. Five pulses a second on a red
+  bar, two on a yellow one. Without the prompt pack the Wii Remote picture is left alone.
+  `WC_EB_TEST_TAP=S` taps for tests; `WC_EB_TRACE_HINT=1` logs the sprite. What a tap does is what
   rounds 9 and 10 did on their own (`WC_EB_AUTO_BARS=1` still does): while "Push" is up the
   remote's pitch rocks a full tilt forward and back every 0.25 s of race time
   (`WC_EB_PUMP_HALF`), and the bar spin's shake rocks it side to side at full speed, whatever

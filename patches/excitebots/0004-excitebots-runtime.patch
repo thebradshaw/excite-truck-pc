@@ -459,7 +459,7 @@ index 3e0fe9b..744957b 100644
  // <user data>/achievements/definitions.json so the launcher can show it.
  namespace EtAchievements {
 diff --git a/runtime/src/hle/excite_truck/et_prompts.cpp b/runtime/src/hle/excite_truck/et_prompts.cpp
-index c35cfa6..7c3c52d 100644
+index c35cfa6..5e7c3ca 100644
 --- a/runtime/src/hle/excite_truck/et_prompts.cpp
 +++ b/runtime/src/hle/excite_truck/et_prompts.cpp
 @@ -8,6 +8,7 @@
@@ -481,6 +481,17 @@ index c35cfa6..7c3c52d 100644
      std::error_code ec;
      if (!std::filesystem::is_directory(root, ec)) {
          RT_LOG(RT_TAG_RUNTIME) << "Xbox button prompts: " << root.string() << " is missing, keeping the Wii prompts"
+@@ -51,4 +54,10 @@ void Apply(bool enabled) {
+     g_group = aurora::texture::load_replacement_directory(root, {.priority = -100});
+     RT_LOG(RT_TAG_RUNTIME) << "Xbox button prompts: " << g_group->registrations.size() << " textures" << std::endl;
+ }
++
++// Whether the pack is loaded (Excitebots swaps prompt textures only when it can redraw them).
++bool Active() {
++    std::lock_guard<std::mutex> lock(g_mutex);
++    return g_group.has_value();
++}
+ } // namespace EtPrompts
 diff --git a/runtime/src/hle/excitebots/eb_achievement_list.inc b/runtime/src/hle/excitebots/eb_achievement_list.inc
 new file mode 100644
 index 0000000..76c6331
@@ -759,10 +770,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..62863e0
+index 0000000..f6edfd7
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,666 @@
+@@ -0,0 +1,804 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -806,6 +817,10 @@ index 0000000..62863e0
 +bool EbShakePromptShown(); // gx_texture.cpp: the shaking remote (crash, bar spin, dentures)
 +bool EbPushPromptShown();  // gx_texture.cpp: the pushed remote (let go of a bar)
 +bool EbRedBarShown();      // gx_texture.cpp: a red (horizontal) bar's meter
++bool EbBarPromptShowsA();  // below: bars are played with A
++namespace EtPrompts {
++bool Active(); // et_prompts.cpp: the Xbox prompt pack is loaded
++}
 +bool EbCrashMeterShown();  // gx_texture.cpp: the crash recovery meter
 +bool EbMenuButtonsShown(); // gx_texture.cpp: a menu's Back / OK icons are on screen
 +int EbControllerTypeScreenFrames(); // gx_texture.cpp: the Wii Remote / Wii Wheel choice, -1 if not shown
@@ -904,6 +919,8 @@ index 0000000..62863e0
 +// the last 1.5 s, so the menus and the pause menu get the menu layout.
 +constexpr uint32_t kRaceTimeStep = 0x805A2CE4u;
 +constexpr uint32_t kRaceClock = 0x805A2AC4u;
++// The bar hint's A button this frame: 0 big, 1 smaller, 2 smallest (pressed), 3 smaller.
++int g_hintSize = 0;
 +
 +float ReadF32(uint32_t addr)
 +{
@@ -1048,52 +1065,71 @@ index 0000000..62863e0
 +        static bool pushWasShown = false;
 +        static int heldReads = 0;
 +        static int lastDir = 0; // 1 forward, 2 back, 3 left, 4 right
-+        // Bars are played with A (Chris, round 11, after the automatic bars of rounds 9 and 10
-+        // still felt wrong): each press of A charges the swing for a while, so pressing in the
-+        // rhythm of the hint (an A button pulsing every 0.25 s), mashing, or holding A all work.
-+        // WC_EB_AUTO_BARS=1 charges without A (round 10); WC_EB_MANUAL_BARS=1 goes back to
++        // Bars are played with A (Chris, round 12): on a red (horizontal, swinging) bar every
++        // tap of A adds momentum, so tapping faster swings harder; on a yellow (vertical) bar one
++        // press of A, timed by the player, lets go. The hint is an A button that stays still and
++        // grows and shrinks (BarPromptSprite): quickly on a red bar, slower on a yellow one.
++        // WC_EB_AUTO_BARS=1 plays bars without A (round 10); WC_EB_MANUAL_BARS=1 goes back to
 +        // stick strokes and A swings (round 8).
 +        static const bool manualBars = std::getenv("WC_EB_MANUAL_BARS") != nullptr;
 +        static const bool autoBars = !manualBars;
-+        static const bool chargeWithoutA = std::getenv("WC_EB_AUTO_BARS") != nullptr;
-+        // How long one press keeps charging, in seconds of race time.
-+        constexpr float kChargePerPress = 0.8f;
-+        static float chargeUntil = -1.0f;
++        static const bool playAlone = std::getenv("WC_EB_AUTO_BARS") != nullptr;
 +        static bool barActionWasDown = false;
 +        const float clock = ReadF32(kRaceClock);
-+        // What spins the bot round a bar is rocking the remote forward and back (its pitch), not
-+        // a flick or a push (a push lets go of a yellow bar). Rocking a full tilt each way every
-+        // 0.25 s of race time took the bar challenge's bar from 3.8 s to 1.7 s here.
-+        // WC_EB_PUMP_HALF sets the half period in seconds.
-+        static const float pumpHalf = std::getenv("WC_EB_PUMP_HALF") ? float(std::atof(std::getenv("WC_EB_PUMP_HALF"))) : 0.25f;
-+        // A red (horizontal) bar fills its meter from thrusts of the remote along its length,
-+        // forward then back (the hint's side-on remote), not from the pitch rocking: a thrust each
-+        // way every 0.5 s of race time filled it to the top in one swing here. Thrusts would
-+        // let go of a yellow bar, so they only happen while the red bar's texture is drawn.
-+        // WC_EB_REDBAR_THRUST sets the time between thrusts in seconds.
-+        static const float thrustPeriod = std::getenv("WC_EB_REDBAR_THRUST") ? float(std::atof(std::getenv("WC_EB_REDBAR_THRUST"))) : 0.5f;
-+        if (autoBars && push) {
-+            if (!pushWasShown) chargeUntil = -1.0f;
-+            if (actionButton && !barActionWasDown) chargeUntil = clock + kChargePerPress;
-+            if (actionButton) chargeUntil = std::max(chargeUntil, clock + kChargePerPress * 0.5f);
-+            const bool charging = chargeWithoutA || clock < chargeUntil;
-+            if (charging) {
-+                if (EbRedBarShown() && thrustPeriod > 0.0f) {
-+                    // Each thrust lasts at least 0.08 s of race time and 3 reads, so it reads as a
-+                    // thrust at any frame rate.
-+                    static int lastSlot = -1, readsLeft = 0, dir = 1;
-+                    static float thrustEnd = 0.0f;
-+                    const int slot = int(clock / thrustPeriod);
-+                    if (slot != lastSlot) { lastSlot = slot; readsLeft = 3; thrustEnd = clock + 0.08f; dir = (slot % 2) ? -1 : 1; }
-+                    if (readsLeft > 0 || clock < thrustEnd) { --readsLeft; in.thrust = dir; }
-+                }
-+                in.pitch = (int(clock / pumpHalf) % 2) ? 1.0f : -1.0f;
-+            } else {
-+                in.pitch = 0.0f;
-+            }
-+            // A on a bar charges; it is not a turbo or a remote swing there.
-+            in.hold &= ~kSidewaysUp;
++        // Developer aid: WC_EB_TEST_TAP=S taps A every S seconds of race time on a red bar, and
++        // once, S seconds after it is grabbed, on a yellow one.
++        static const float testTap = std::getenv("WC_EB_TEST_TAP") ? float(std::atof(std::getenv("WC_EB_TEST_TAP"))) : 0.0f;
++        static float barStart = 0.0f;
++        if (push && !pushWasShown) barStart = clock;
++        bool tapDown = actionButton;
++        if (testTap > 0.0f && push) {
++            const float t = clock - barStart;
++            tapDown = EbRedBarShown() ? (std::fmod(t, testTap) < testTap * 0.5f) : (t >= testTap && t < testTap + 0.1f);
 +        }
++        // What spins the bot round a bar is rocking the remote forward and back (its pitch); on a
++        // red bar its meter fills from thrusts of the remote along its length, forward then back
++        // (the hint's side-on remote); a thrust lets go of a yellow bar.
++        static const float pumpHalf = std::getenv("WC_EB_PUMP_HALF") ? float(std::atof(std::getenv("WC_EB_PUMP_HALF"))) : 0.25f;
++        static int thrustReads = 0;
++        static float thrustEnd = 0.0f;
++        static int thrustDir = 1;
++        static float pitchDir = 1.0f;
++        if (autoBars && push) {
++            const bool red = EbRedBarShown();
++            const bool tap = tapDown && !barActionWasDown;
++            if (!pushWasShown) { thrustReads = 0; thrustEnd = 0.0f; pitchDir = 1.0f; }
++            if (playAlone) {
++                if (red) {
++                    static int lastSlot = -1;
++                    const int slot = int(clock / 0.5f);
++                    if (slot != lastSlot) { lastSlot = slot; thrustReads = 3; thrustEnd = clock + 0.08f; thrustDir = (slot % 2) ? -1 : 1; }
++                }
++                pitchDir = (int(clock / pumpHalf) % 2) ? 1.0f : -1.0f;
++            } else if (tap) {
++                // A thrust lasts at least 3 reads and 0.08 s of race time, so it reads as one at
++                // any frame rate. On a red bar each tap also rocks the remote the other way.
++                thrustReads = 3;
++                thrustEnd = clock + 0.08f;
++                if (red) {
++                    thrustDir = -thrustDir;
++                    pitchDir = -pitchDir;
++                } else {
++                    thrustDir = 1;
++                }
++            }
++            if (thrustReads > 0 || clock < thrustEnd) {
++                --thrustReads;
++                in.thrust = thrustDir;
++            }
++            in.pitch = (red || playAlone) ? pitchDir : 0.0f;
++            // A on a bar is for the bar; it is not a turbo or a remote swing there.
++            in.hold &= ~kSidewaysUp;
++            // The hint: an A button shrinking and growing again, in four steps. Five times a
++            // second on a red bar (tap fast), twice a second on a yellow one (press once).
++            const float period = red ? 0.2f : 0.5f;
++            g_hintSize = int(std::fmod(clock, period) / period * 4.0f) & 3;
++        }
++        actionButton = tapDown;
 +        barActionWasDown = actionButton;
 +        if (push && !autoBars) {
 +            static const bool testStroke = std::getenv("WC_EB_TEST_STICK") != nullptr;
@@ -1321,10 +1357,123 @@ index 0000000..62863e0
 +}
 +PPC_NATIVE_OVERRIDE_VOID(8E04DABC, EB_KPADReadEx_8004dabc, (CpuContext* ctx), (ctx));
 +
++namespace {
++// The bar prompt's sprite. 0x802C27B0 draws a 2D sprite from (x f1, y f2, z f3, scale f4 f5,
++// angle f6); it keeps them in f26 to f31 and first calls cos (0x80032990) on the angle, with the
++// sprite's texture handle (from 0x802BC6D0) in r29. The bar prompt's handle is the one in use
++// when the Push texture is loaded (gx_texture.cpp calls EbNoteBarPromptTexture).
++uint32_t g_lastSpriteHandle = 0;
++double g_lastSpriteX = 0.0;
++uint32_t g_barPromptHandle = 0;
++double g_barPromptX = 0.0;
++// The prompt's own animation pushes the remote up and down and in and out; the A stays where
++// and at the size the prompt first appeared. Its pulse is in the texture (gx_texture.cpp).
++struct HintPlace {
++    double x = 0, y = 0, z = 0, sx = 0, sy = 0;
++};
++HintPlace g_hint;
++int g_hintDraws = 0;
++int g_hintLastDraw = -1000;
++
++void BarPromptSprite(CpuContext* ctx)
++{
++    const double x = ctx->fpr[26].d;
++    g_lastSpriteHandle = ctx->gpr[29];
++    g_lastSpriteX = x;
++    // The prompt's texture pack holds other sprites too: the prompt is the one at its x.
++    if (g_barPromptHandle == 0 || ctx->gpr[29] != g_barPromptHandle || std::fabs(x - g_barPromptX) > 2.0) return;
++    static const bool trace = std::getenv("WC_EB_TRACE_HINT") != nullptr;
++    if (trace) {
++        RT_LOGF(RT_TAG_HLE, "EB hint x %.2f y %.2f z %.2f sx %.3f sy %.3f a %.3f\n", ctx->fpr[26].d, ctx->fpr[31].d,
++                ctx->fpr[30].d, ctx->fpr[27].d, ctx->fpr[28].d, ctx->fpr[29].d);
++    }
++    if (!EbBarPromptShowsA()) return;
++    ++g_hintDraws;
++    if (g_hintDraws - g_hintLastDraw > 20) {
++        g_hint = {x, ctx->fpr[31].d, ctx->fpr[30].d, ctx->fpr[27].d, ctx->fpr[28].d};
++    }
++    g_hintLastDraw = g_hintDraws;
++    // The position is already on 0x802C27B0's stack (r1 + 68) by now; the rest is in registers.
++    const uint32_t sp = ctx->gpr[1];
++    WriteF32(sp + 68, float(g_hint.x));
++    WriteF32(sp + 72, float(g_hint.y));
++    WriteF32(sp + 76, float(g_hint.z));
++    ctx->fpr[26].d = g_hint.x;
++    ctx->fpr[30].d = g_hint.z;
++    ctx->fpr[27].d = g_hint.sx;
++    ctx->fpr[28].d = g_hint.sy;
++    ctx->fpr[29].d = 0.0;
++    ctx->fpr[1].d = 0.0;
++}
++} // namespace
++
++void EbNoteBarPromptTexture()
++{
++    g_barPromptHandle = g_lastSpriteHandle;
++    g_barPromptX = g_lastSpriteX;
++}
++
++// cos (0x80032990, the library's fdlibm cos), replaced only to see the bar prompt's sprite
++// before it is drawn (BarPromptSprite); the result is the library's own, from its kernels.
++extern "C" void EB_cos_80032990(CpuContext* ctx)
++{
++    if (ctx->lr == 0x802C284Cu) BarPromptSprite(ctx);
++    const double x = ctx->fpr[1].d;
++    uint64_t bits;
++    std::memcpy(&bits, &x, sizeof bits);
++    const uint32_t ix = uint32_t(bits >> 32) & 0x7FFFFFFFu;
++    const uint32_t lr = ctx->lr;
++    if (ix <= 0x3FE921FBu) {
++        ctx->fpr[2].d = 0.0;
++        InvokeDirectCpu<0x80030B30u>(ctx); // __kernel_cos(x, 0)
++        ctx->lr = lr;
++        return;
++    }
++    if (ix >= 0x7FF00000u) {
++        ctx->fpr[1].d = x - x;
++        return;
++    }
++    // __ieee754_rem_pio2(x, y) with y on a stack frame of our own, as the library does.
++    const uint32_t sp = ctx->gpr[1];
++    const uint32_t frame = sp - 32;
++    Memory::Write32(frame, sp);
++    ctx->gpr[1] = frame;
++    ctx->gpr[3] = frame + 16;
++    ctx->fpr[1].d = x;
++    InvokeDirectCpu<0x800307ACu>(ctx);
++    const uint32_t n = ctx->gpr[3] & 3u;
++    auto readF64 = [](uint32_t a) {
++        const uint64_t v = (uint64_t(Memory::Read32(a)) << 32) | Memory::Read32(a + 4);
++        double d;
++        std::memcpy(&d, &v, sizeof d);
++        return d;
++    };
++    ctx->fpr[1].d = readF64(frame + 16);
++    ctx->fpr[2].d = readF64(frame + 24);
++    if (n == 0 || n == 2) {
++        InvokeDirectCpu<0x80030B30u>(ctx); // __kernel_cos
++    } else {
++        ctx->gpr[3] = 1;
++        InvokeDirectCpu<0x800322F8u>(ctx); // __kernel_sin(y0, y1, 1)
++    }
++    if (n == 1 || n == 2) ctx->fpr[1].d = -ctx->fpr[1].d;
++    ctx->gpr[1] = sp;
++    ctx->lr = lr;
++}
++PPC_NATIVE_OVERRIDE_VOID(8E032990, EB_cos_80032990, (CpuContext* ctx), (ctx));
++
++// Which size of the bar hint's A to draw this frame (gx_texture.cpp picks its texture).
++int EbBarHintSize() { return g_hintSize; }
++
 +// The bar prompt shows a pulsing A button unless bars are played with the stick (round 8).
 +bool EbBarPromptShowsA() {
 +    static const bool manualBars = std::getenv("WC_EB_MANUAL_BARS") != nullptr;
-+    return !manualBars;
++    if (manualBars) return false;
++    // The A is drawn by the prompt pack; without it the Wii Remote picture stays as it is.
++    static int checked = 0;
++    static bool active = false;
++    if ((checked++ & 63) == 0) active = EtPrompts::Active();
++    return active;
 +}
 +
 +// Called once per presented frame. Skips the three boot screens (wrist strap, "Online Interactions
@@ -1880,7 +2029,7 @@ index 49be121..1f0e12f 100644
  
  void DeliverDrawSyncToken(CpuContext* ctx, uint16_t token)
 diff --git a/runtime/src/hle/gx/gx_texture.cpp b/runtime/src/hle/gx/gx_texture.cpp
-index b644a42..e8edbb8 100644
+index b644a42..285e6d1 100644
 --- a/runtime/src/hle/gx/gx_texture.cpp
 +++ b/runtime/src/hle/gx/gx_texture.cpp
 @@ -1,5 +1,9 @@
@@ -1926,7 +2075,7 @@ index b644a42..e8edbb8 100644
              GXInitTexObjData(obj, dp);
              meta.needsUpload = false;
              textureDataUploaded = true;
-@@ -750,7 +764,206 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+@@ -750,7 +764,212 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
      }
  }
  
@@ -1939,8 +2088,11 @@ index b644a42..e8edbb8 100644
 +// in the texture dump names): the swing prompts, during which the A button plays a remote swing,
 +// the Wii Remote / Wii Wheel choice, which input skips, and the Back / OK button icons of any
 +// menu, which switch the pad to the menu layout even mid-race (eb_input.cpp).
++bool EbBarPromptShowsA(); // eb_input.cpp: bars are played with A (the default)
++int EbBarHintSize();      // eb_input.cpp: which size of the bar hint's A to draw (0-3)
++void EbNoteBarPromptTexture(); // eb_input.cpp: the sprite being drawn is the bar prompt
 +namespace EbScreenTextures {
-+enum Kind : uint8_t { kNone, kShake, kPush, kCrashMeter, kControllerType, kMenuButton, kRedBar };
++enum Kind : uint8_t { kNone, kShake, kPush, kPushMask, kCrashMeter, kControllerType, kMenuButton, kRedBar };
 +std::mutex g_mutex;
 +struct Seen {
 +    uint64_t head = 0;
@@ -1961,6 +2113,9 @@ index b644a42..e8edbb8 100644
 +    }
 +    if (w == 256 && h == 256 && hash == 0xddf1c663d39c4ad2ull) {  // the bar's "Push" remote
 +        return kPush;
++    }
++    if (w == 256 && h == 256 && hash == 0xaa8407612f74e6baull) {  // its I4 mask
++        return kPushMask;
 +    }
 +    if (w == 256 && h == 256 && hash == 0xfcf8a1191fd23f9cull) {  // the crash meter's chevrons
 +        return kCrashMeter;
@@ -1991,7 +2146,8 @@ index b644a42..e8edbb8 100644
 +    }
 +    const bool large = m.width == 256 && (m.height == 256 || m.height == 128);
 +    const bool icon = m.width == 64 && m.height == 64;
-+    if (!(large || icon) || m.format != GX_TF_CMPR || m.dataAddr == 0) {
++    const bool i4Mask = m.width == 256 && m.height == 256 && m.format == GX_TF_I4;
++    if (!(large || icon) || (m.format != GX_TF_CMPR && !i4Mask) || m.dataAddr == 0) {
 +        return kNone;
 +    }
 +    const uint32_t bytes = uint32_t(m.width) * m.height / 2u; // CMPR base level
@@ -2041,7 +2197,7 @@ index b644a42..e8edbb8 100644
 +        uint32_t addr = 0;
 +        uint64_t head = 0;
 +    };
-+    static Variant variants[3];
++    static Variant variants[9];
 +    Variant& v = variants[slot];
 +    if (!Memory::Contains(dataAddr, kBytes)) return nullptr;
 +    const auto* src = static_cast<const uint8_t*>(GuestToHostPtr(dataAddr, kBytes));
@@ -2066,15 +2222,13 @@ index b644a42..e8edbb8 100644
 +    return MarkedVariant(dataAddr, 0, "EBcrashA");
 +}
 +
-+// On a bar the Push prompt becomes the A button, pressed and released in the rhythm A charges
-+// the swing best at (Chris, round 11): up for 0.25 s of race time, pressed for 0.25 s.
-+const uint8_t* BarPromptVariant(uint32_t dataAddr) {
-+    constexpr uint32_t kRaceClock = 0x805A2AC4u;
-+    uint32_t bits = Memory::Read32(kRaceClock);
-+    float clock;
-+    std::memcpy(&clock, &bits, sizeof(clock));
-+    const bool pressed = (int(clock / 0.25f) % 2) != 0;
-+    return pressed ? MarkedVariant(dataAddr, 2, "EBbarAdn") : MarkedVariant(dataAddr, 1, "EBbarAup");
++// On a bar the Push prompt (colour and mask) becomes the A button at one of four sizes, as the
++// input code says (eb_input.cpp), so it shrinks and grows again while staying in place.
++const uint8_t* BarPromptVariant(uint32_t dataAddr, bool mask) {
++    static const char kMarks[8][9] = {"EBbarC0", "EBbarC1", "EBbarC2", "EBbarC3", "EBbarM0", "EBbarM1", "EBbarM2", "EBbarM3"};
++    const int size = EbBarHintSize() & 3;
++    const int i = (mask ? 4 : 0) + size;
++    return MarkedVariant(dataAddr, 1 + i, kMarks[i]);
 +}
 +} // namespace EbScreenTextures
 +
@@ -2111,7 +2265,6 @@ index b644a42..e8edbb8 100644
 +    return now - g_firstControllerType.load(std::memory_order_relaxed);
 +}
 +
-+bool EbBarPromptShowsA(); // eb_input.cpp: bars are played with A (the default)
 +
  extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
 +    uint32_t crashShakeAddr = 0;
@@ -2119,11 +2272,13 @@ index b644a42..e8edbb8 100644
 +    if (::GuestRegion::IsExcitebots()) {
 +        uint32_t dataAddr = 0;
 +        const auto kind = EbScreenTextures::Note(oa, &dataAddr);
++        // The sprite being drawn is the bar prompt; eb_input.cpp keeps it still and pulsing.
++        if (kind == EbScreenTextures::kPush) EbNoteBarPromptTexture();
 +        const uint8_t* v = nullptr;
 +        if (kind == EbScreenTextures::kShake && EbCrashMeterShown()) {
 +            v = EbScreenTextures::CrashShakeVariant(dataAddr);
-+        } else if (kind == EbScreenTextures::kPush && EbBarPromptShowsA()) {
-+            v = EbScreenTextures::BarPromptVariant(dataAddr);
++        } else if ((kind == EbScreenTextures::kPush || kind == EbScreenTextures::kPushMask) && EbBarPromptShowsA()) {
++            v = EbScreenTextures::BarPromptVariant(dataAddr, kind == EbScreenTextures::kPushMask);
 +        }
 +        if (v != nullptr) {
 +            crashShakeAddr = dataAddr;
@@ -2133,7 +2288,7 @@ index b644a42..e8edbb8 100644
      if (g_gxTraceFrame) {
          TexObjMeta m; bool ok = false;
          { std::lock_guard<std::mutex> guard(g_texObjMutex); try { ok = TryGetOrExtractTexObjMeta(oa, m); } catch (...) {} }
-@@ -763,13 +976,16 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+@@ -763,13 +982,16 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
              bytes = CaptureTexObjBytes(oa);
          } catch (...) {
          }
@@ -2153,7 +2308,7 @@ index b644a42..e8edbb8 100644
                      IsReasonableTextureDimensions(m.width, m.height) && IsAuroraLoadableTexFormat(m.format)) {
                      const uint8_t maxLod = m.mipmap ? static_cast<uint8_t>(ComputeMaxMipLevel(m.width, m.height)) : 0u;
                      const uint32_t size = GXGetTexBufferSize(m.width, m.height, m.format, (GXBool)m.mipmap, maxLod);
-@@ -793,6 +1009,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+@@ -793,6 +1015,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
              }
          });
      } else {
