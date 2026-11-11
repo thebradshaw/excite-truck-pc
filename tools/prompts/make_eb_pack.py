@@ -106,6 +106,15 @@ def build(scale):
         im.paste(face, (round((cx - rx) * scale), round((cy - ry) * scale)), face)
         out[f"tex1_256x256_{colours[i]}_14.png"] = im
         out[f"tex1_256x256_{masks[i]}_0.png"] = circle_mask(256, 256, scale, cx - rx, cy - ry, cx + rx, cy + ry)
+    # A red bar's hint is crash recovery's A instead: the big button, then (this copy) the same
+    # button pressed, behind the big mask.
+    button = Canvas(64, 64, scale * 2)
+    button.face(0, 0, 64, 64, "A", pressed=True)
+    rx = r * wide
+    im = Image.new("RGBA", (256 * scale, 256 * scale), (0, 0, 0, 255))
+    face = button.result().resize((round(2 * rx * scale), round(2 * r * scale)), Image.LANCZOS)
+    im.paste(face, (round((cx - rx) * scale), round((cy - r) * scale)), face)
+    out["tex1_256x256_cb5889d280503f65_14.png"] = im
     return out
 
 

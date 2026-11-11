@@ -770,10 +770,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..f6edfd7
+index 0000000..720aabb
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,804 @@
+@@ -0,0 +1,832 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -919,8 +919,12 @@ index 0000000..f6edfd7
 +// the last 1.5 s, so the menus and the pause menu get the menu layout.
 +constexpr uint32_t kRaceTimeStep = 0x805A2CE4u;
 +constexpr uint32_t kRaceClock = 0x805A2AC4u;
-+// The bar hint's A button this frame: 0 big, 1 smaller, 2 smallest (pressed), 3 smaller.
++// The bar hint's A button this frame: 0 big, 1 smaller, 2 smallest (pressed), 3 smaller, 4 big
++// and pressed.
 +int g_hintSize = 0;
++// Presses of A a second on a red bar, over the last kMashWindow seconds of race time.
++constexpr float kMashWindow = 0.75f;
++float g_mashRate = 0.0f;
 +
 +float ReadF32(uint32_t addr)
 +{
@@ -1105,17 +1109,38 @@ index 0000000..f6edfd7
 +                    if (slot != lastSlot) { lastSlot = slot; thrustReads = 3; thrustEnd = clock + 0.08f; thrustDir = (slot % 2) ? -1 : 1; }
 +                }
 +                pitchDir = (int(clock / pumpHalf) % 2) ? 1.0f : -1.0f;
++            } else if (red) {
++                // Mash A, as in crash recovery (Chris, round 13): the remote thrusts back and
++                // forth at a rate that follows how fast A is being pressed, 1.5 thrusts a press
++                // up to 8 a second, and stops 0.75 s after the last press. The first press
++                // thrusts at once.
++                static float taps[16];
++                static int tapCount = 0;
++                static float lastThrust = -10.0f;
++                if (!pushWasShown) { tapCount = 0; lastThrust = -10.0f; }
++                if (tap) {
++                    if (tapCount == 16) { std::memmove(taps, taps + 1, 15 * sizeof(float)); tapCount = 15; }
++                    taps[tapCount++] = clock;
++                }
++                int recent = 0;
++                for (int i = 0; i < tapCount; ++i) recent += (clock - taps[i] <= kMashWindow && clock >= taps[i]) ? 1 : 0;
++                g_mashRate = float(recent) / kMashWindow;
++                if (recent > 0) {
++                    const float perSecond = std::clamp(1.5f * g_mashRate, 2.0f, 8.0f);
++                    if (clock - lastThrust >= 1.0f / perSecond || clock < lastThrust) {
++                        lastThrust = clock;
++                        thrustReads = 3;
++                        thrustEnd = clock + 0.08f;
++                        thrustDir = -thrustDir;
++                        pitchDir = -pitchDir;
++                    }
++                }
 +            } else if (tap) {
-+                // A thrust lasts at least 3 reads and 0.08 s of race time, so it reads as one at
-+                // any frame rate. On a red bar each tap also rocks the remote the other way.
++                // A yellow bar: one press is a forward thrust, which lets go. A thrust lasts at
++                // least 3 reads and 0.08 s of race time, so it reads as one at any frame rate.
 +                thrustReads = 3;
 +                thrustEnd = clock + 0.08f;
-+                if (red) {
-+                    thrustDir = -thrustDir;
-+                    pitchDir = -pitchDir;
-+                } else {
-+                    thrustDir = 1;
-+                }
++                thrustDir = 1;
 +            }
 +            if (thrustReads > 0 || clock < thrustEnd) {
 +                --thrustReads;
@@ -1124,10 +1149,13 @@ index 0000000..f6edfd7
 +            in.pitch = (red || playAlone) ? pitchDir : 0.0f;
 +            // A on a bar is for the bar; it is not a turbo or a remote swing there.
 +            in.hold &= ~kSidewaysUp;
-+            // The hint: an A button shrinking and growing again, in four steps. Five times a
-+            // second on a red bar (tap fast), twice a second on a yellow one (press once).
-+            const float period = red ? 0.2f : 0.5f;
-+            g_hintSize = int(std::fmod(clock, period) / period * 4.0f) & 3;
++            // The hint. On a red bar, crash recovery's A: up, then pressed, ten changes a second.
++            // On a yellow bar an A shrinking and growing again in four steps, twice a second.
++            if (red) {
++                g_hintSize = (int(clock / 0.1f) & 1) ? 4 : 0;
++            } else {
++                g_hintSize = int(std::fmod(clock, 0.5f) / 0.5f * 4.0f) & 3;
++            }
 +        }
 +        actionButton = tapDown;
 +        barActionWasDown = actionButton;
@@ -2029,7 +2057,7 @@ index 49be121..1f0e12f 100644
  
  void DeliverDrawSyncToken(CpuContext* ctx, uint16_t token)
 diff --git a/runtime/src/hle/gx/gx_texture.cpp b/runtime/src/hle/gx/gx_texture.cpp
-index b644a42..285e6d1 100644
+index b644a42..662dc51 100644
 --- a/runtime/src/hle/gx/gx_texture.cpp
 +++ b/runtime/src/hle/gx/gx_texture.cpp
 @@ -1,5 +1,9 @@
@@ -2089,7 +2117,7 @@ index b644a42..285e6d1 100644
 +// the Wii Remote / Wii Wheel choice, which input skips, and the Back / OK button icons of any
 +// menu, which switch the pad to the menu layout even mid-race (eb_input.cpp).
 +bool EbBarPromptShowsA(); // eb_input.cpp: bars are played with A (the default)
-+int EbBarHintSize();      // eb_input.cpp: which size of the bar hint's A to draw (0-3)
++int EbBarHintSize();      // eb_input.cpp: which of the bar hint's A pictures to draw (0-4)
 +void EbNoteBarPromptTexture(); // eb_input.cpp: the sprite being drawn is the bar prompt
 +namespace EbScreenTextures {
 +enum Kind : uint8_t { kNone, kShake, kPush, kPushMask, kCrashMeter, kControllerType, kMenuButton, kRedBar };
@@ -2197,7 +2225,7 @@ index b644a42..285e6d1 100644
 +        uint32_t addr = 0;
 +        uint64_t head = 0;
 +    };
-+    static Variant variants[9];
++    static Variant variants[10];
 +    Variant& v = variants[slot];
 +    if (!Memory::Contains(dataAddr, kBytes)) return nullptr;
 +    const auto* src = static_cast<const uint8_t*>(GuestToHostPtr(dataAddr, kBytes));
@@ -2222,12 +2250,12 @@ index b644a42..285e6d1 100644
 +    return MarkedVariant(dataAddr, 0, "EBcrashA");
 +}
 +
-+// On a bar the Push prompt (colour and mask) becomes the A button at one of four sizes, as the
-+// input code says (eb_input.cpp), so it shrinks and grows again while staying in place.
++// On a bar the Push prompt (colour and mask) becomes the A button, as the input code says
++// (eb_input.cpp): one of four sizes, or (4) full size and pressed, crash recovery's second frame.
 +const uint8_t* BarPromptVariant(uint32_t dataAddr, bool mask) {
-+    static const char kMarks[8][9] = {"EBbarC0", "EBbarC1", "EBbarC2", "EBbarC3", "EBbarM0", "EBbarM1", "EBbarM2", "EBbarM3"};
-+    const int size = EbBarHintSize() & 3;
-+    const int i = (mask ? 4 : 0) + size;
++    static const char kMarks[9][9] = {"EBbarC0", "EBbarC1", "EBbarC2", "EBbarC3", "EBbarM0", "EBbarM1", "EBbarM2", "EBbarM3", "EBbarC4"};
++    const int size = EbBarHintSize();
++    const int i = mask ? 4 + (size & 3) : (size == 4 ? 8 : size & 3);
 +    return MarkedVariant(dataAddr, 1 + i, kMarks[i]);
 +}
 +} // namespace EbScreenTextures
