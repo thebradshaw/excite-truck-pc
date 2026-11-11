@@ -749,7 +749,7 @@ void BotsControlsPage() {
     ControlLine("RT", 0, true, "Accelerate", "RB");
     ControlLine("X", IM_COL32(80, 150, 255, 255), false, "Brake", "LT");
     ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Turbo, and tap it to recover from a crash");
-    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Swing bars (red): tap it fast");
+    ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Swing bars (red): mash it, the faster the better");
     ControlLine("A", IM_COL32(110, 200, 80, 255), false, "Push-off bars (yellow): press once to let go");
     ControlLine("B", IM_COL32(240, 80, 70, 255), false, "Use your weapon");
     ControlLine("Y", IM_COL32(240, 200, 60, 255), false, "The Wii Remote's A button");
@@ -768,7 +768,7 @@ void BotsControlsPage() {
     }
     ImGui::Dummy(ImVec2(0, S(4)));
     ImGui::Indent(S(8));
-    Paragraph("Your bot grabs bars by itself. On a swing bar (red), tap A fast to build momentum. On a push-off "
+    Paragraph("Your bot grabs bars by itself. On a swing bar (red), mash A: the faster you mash, the faster you swing. On a push-off "
               "bar (yellow), press A once to let go. After a crash, tap A to get going again (shaking the stick "
               "side to side works too). The game shows the button for each action. To change which button does "
               "what, press F10 in the game and open Controllers.");
