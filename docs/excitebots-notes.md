@@ -90,8 +90,12 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   speed"): shakes alone stay capped by the bar's own pace, the player's red bar helper (vtable
   0x804D27B0, at player+0x1FD4; built by 0x8024ADA0, which reads the "red_bar_accel" hook
   variable into +12, 1.0 for the player, 0.7-1.3 for the bots). The runtime scales it with the
-  mash rate, 0.5x at one press a second to 4x at eight, and puts it back when the bar ends. On
-  School_Mexico steady pressing took 10.5 s, fast mashing 5.3 s (4x fixed: 4.6 s). Trace with
+  mash rate and puts it back when the bar ends. Round 16 (Chris: still slow at full speed):
+  shakes were 3 reads long, 3 game ticks at 60 FPS, too short to register, though a slow test
+  machine (6 ticks a read) hid it. Shakes are now timed in race time: while A is mashed at all,
+  one every 0.25 s for 0.12 s, down to every 0.12 s for 0.08 s at 5 presses a second, with the
+  accel from 1x to 4x over the same range. School_Mexico's bar: 1 press a second 7.2 s, 5 a
+  second 4.0 s (round 13's "Super Red Bar" took 6.7 s). Trace with
   `WC_EB_TRACE_TURNS`. The hint is crash recovery's A, recorded from the game (it bounces down
   by about half its height and back twice every 0.55 s, pressed at the bottom), played twice as
   fast (`RedHintBounce`, `WC_EB_HINT_DROP` sprite units, default 17). On a yellow
