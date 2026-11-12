@@ -95,7 +95,12 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   machine (6 ticks a read) hid it. Shakes are now timed in race time: while A is mashed at all,
   one every 0.25 s for 0.12 s, down to every 0.12 s for 0.08 s at 5 presses a second, with the
   accel from 1x to 4x over the same range. School_Mexico's bar: 1 press a second 7.2 s, 5 a
-  second 4.0 s (round 13's "Super Red Bar" took 6.7 s). Trace with
+  second 4.0 s (round 13's "Super Red Bar" took 6.7 s). Round 17 (Chris: still not fast enough
+  on his PC, asked for each press to count as several shakes): full pace now from 3 presses a
+  second, each shake twice as hard (thrust 2), accel up to 10x (10x alone gained little over 4x
+  here, so it is slack for his 60 FPS PC). Here: 1 press a second 6.1 s, 4 a second 3.6 s. The
+  test machine runs ~10 FPS with ~6 game ticks per input read; slowing the VI retrace does not
+  make it one tick a read (the race clock is not retrace-driven), so 60 FPS stays untested here. Trace with
   `WC_EB_TRACE_TURNS`. The hint is crash recovery's A, recorded from the game (it bounces down
   by about half its height and back twice every 0.55 s, pressed at the bottom), played twice as
   fast (`RedHintBounce`, `WC_EB_HINT_DROP` sprite units, default 17). On a yellow

@@ -770,10 +770,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..0ac5726
+index 0000000..4545369
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,899 @@
+@@ -0,0 +1,902 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -939,10 +939,11 @@ index 0000000..0ac5726
 +const float kRedBarAccelSlow = 1.0f;
 +const float kRedShakeEvery = std::getenv("WC_EB_SHAKE_EVERY") ? float(std::atof(std::getenv("WC_EB_SHAKE_EVERY"))) : 0.25f;
 +const float kRedShakeLength = std::getenv("WC_EB_SHAKE_LEN") ? float(std::atof(std::getenv("WC_EB_SHAKE_LEN"))) : 0.12f;
++const int kRedShakeStrength = std::getenv("WC_EB_THRUST_MAG") ? std::atoi(std::getenv("WC_EB_THRUST_MAG")) : 2;
 +const float kRedShakeEveryFast = 0.12f;
 +const float kRedShakeLengthFast = 0.08f;
-+const float kRedBarFullRate = 5.0f; // presses a second for full speed
-+const float kRedBarAccelFast = std::getenv("WC_EB_ACCEL_MAX") ? float(std::atof(std::getenv("WC_EB_ACCEL_MAX"))) : 4.0f;
++const float kRedBarFullRate = 3.0f; // presses a second for full speed
++const float kRedBarAccelFast = std::getenv("WC_EB_ACCEL_MAX") ? float(std::atof(std::getenv("WC_EB_ACCEL_MAX"))) : 10.0f;
 +void EbRestoreRedBarAccel()
 +{
 +    if (g_redBarHelper != 0 && Memory::Read32(g_redBarHelper) == 0x804D27B0u) WriteF32(g_redBarHelper + 12, g_redBarBaseAccel);
@@ -1166,9 +1167,10 @@ index 0000000..0ac5726
 +                // in the player; the player is *0x805785F4) keeps "red_bar_accel" at +12, 1.0 for
 +                // the player, which sets how hard each shake speeds the spin. Shakes alone are
 +                // capped by it, so frantic mashing barely beat steady pressing (Chris, round 15).
-+                // Scale it with the mash rate: as is at one press a second, four times at five
-+                // or more (round 15: 4x took School_Mexico's bar from 7.6 s to 4.6 s). Put back
-+                // when the bar ends (EbRestoreRedBarAccel).
++                // Scale it with the mash rate: as is at one press a second, ten times at three
++                // or more, generously (round 17, Chris: still too slow on his PC; 4x took
++                // School_Mexico's bar from 7.6 s to 4.6 s here). Put back when the bar ends
++                // (EbRestoreRedBarAccel).
 +                if (const uint32_t helper = HumanRedBarHelper()) {
 +                    if (g_redBarHelper != helper) {
 +                        EbRestoreRedBarAccel();
@@ -1186,8 +1188,9 @@ index 0000000..0ac5726
 +                    // rhythm, timed in race time so each shake spans the same game ticks at any
 +                    // frame rate (round 14 timed them in reads: 3 ticks at 60 FPS, too short to
 +                    // register, though 18 in a slow test). Any mashing shakes every 0.25 s for
-+                    // 0.12 s (School_Mexico's bar in 5.9 s); faster mashing shakes faster, up to
-+                    // every 0.12 s for 0.08 s at 5 presses a second (4.2 s, with the accel below).
++                    // 0.12 s; faster mashing shakes faster, up to every 0.12 s for 0.08 s at 3
++                    // presses a second, each shake twice as hard (School_Mexico's bar: 1 press a
++                    // second 6.1 s, 4 a second 3.6 s, with the accel below).
 +                    if (tap && clock - lastThrust > 0.75f) lastThrust = -10.0f;
 +                    const float pace = std::clamp((g_mashRate - 1.0f) / (kRedBarFullRate - 1.0f), 0.0f, 1.0f);
 +                    if (clock - lastThrust >= kRedShakeEvery + (kRedShakeEveryFast - kRedShakeEvery) * pace || clock < lastThrust) {
@@ -1207,7 +1210,7 @@ index 0000000..0ac5726
 +            }
 +            if (thrustReads > 0 || clock < thrustEnd) {
 +                --thrustReads;
-+                in.thrust = thrustDir;
++                in.thrust = thrustDir * ((red && !playAlone) ? kRedShakeStrength : 1);
 +            }
 +            in.pitch = (red || playAlone) ? pitchDir : 0.0f;
 +            // A on a bar is for the bar; it is not a turbo or a remote swing there.
