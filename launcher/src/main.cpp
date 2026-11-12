@@ -11,6 +11,14 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "launcher_config.h"
 #include "setup_job.h"
 #include "ui.h"
@@ -29,6 +37,48 @@ void SetGameIcon(SDL_Window* window) {
         SDL_DestroySurface(icon);
     }
 }
+
+#ifdef _WIN32
+struct FindWindowData {
+    DWORD pid;
+    HWND found;
+};
+
+BOOL CALLBACK FindGameWindow(HWND hwnd, LPARAM param) {
+    auto* data = reinterpret_cast<FindWindowData*>(param);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == data->pid && IsWindowVisible(hwnd) && GetWindow(hwnd, GW_OWNER) == nullptr) {
+        data->found = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+// Windows only lets the program in front hand the front to another one, and the launcher closes
+// right after starting the game, so the game's window would open behind whatever was there. While
+// the launcher is still in front, wait for the game's window (up to 15 s) and bring it forward.
+void BringGameToFront(SDL_Process* process) {
+    const auto pid = static_cast<DWORD>(
+        SDL_GetNumberProperty(SDL_GetProcessProperties(process), SDL_PROP_PROCESS_PID_NUMBER, 0));
+    if (pid == 0) return;
+    AllowSetForegroundWindow(pid);
+    const Uint64 start = SDL_GetTicks();
+    while (SDL_GetTicks() - start < 15000) {
+        FindWindowData data{pid, nullptr};
+        EnumWindows(FindGameWindow, reinterpret_cast<LPARAM>(&data));
+        if (data.found) {
+            if (IsIconic(data.found)) ShowWindow(data.found, SW_RESTORE);
+            SetForegroundWindow(data.found);
+            BringWindowToTop(data.found);
+            return;
+        }
+        if (SDL_WaitProcess(process, false, nullptr)) return;   // it closed straight away
+        SDL_PumpEvents();   // keep the launcher's window responsive while we wait
+        SDL_Delay(50);
+    }
+}
+#endif
 
 // Starts the game in the background. Returns an empty string, or what went wrong.
 std::string LaunchGame(bool audioLog) {
@@ -74,6 +124,9 @@ std::string LaunchGame(bool audioLog) {
     if (process == nullptr) {
         return std::string("The game could not be started: ") + SDL_GetError();
     }
+#ifdef _WIN32
+    BringGameToFront(process);
+#endif
     SDL_DestroyProcess(process);   // the game keeps running on its own
     return {};
 }
