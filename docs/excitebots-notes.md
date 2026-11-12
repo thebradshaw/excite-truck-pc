@@ -86,9 +86,15 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   (presses counted over the last 0.75 s, up to 8 a second, none without presses; the first
   press thrusts at once). Round 13 thrusted at least 2 a second for any press, which saturated
   the bar, so slow and fast mashing felt the same. Gas is dropped while a red bar shows as well
-  as while the Push prompt does. The hint is crash recovery's A, recorded from the game: it
-  bounces down by about half its height and back twice every 0.55 s, pressed at the bottom
-  (`RedHintBounce`, `WC_EB_HINT_DROP` sprite units, default 17). On a yellow
+  as while the Push prompt does. Round 15 (Chris: "frantic A button mashing to max out spin
+  speed"): shakes alone stay capped by the bar's own pace, the player's red bar helper (vtable
+  0x804D27B0, at player+0x1FD4; built by 0x8024ADA0, which reads the "red_bar_accel" hook
+  variable into +12, 1.0 for the player, 0.7-1.3 for the bots). The runtime scales it with the
+  mash rate, 0.5x at one press a second to 4x at eight, and puts it back when the bar ends. On
+  School_Mexico steady pressing took 10.5 s, fast mashing 5.3 s (4x fixed: 4.6 s). Trace with
+  `WC_EB_TRACE_TURNS`. The hint is crash recovery's A, recorded from the game (it bounces down
+  by about half its height and back twice every 0.55 s, pressed at the bottom), played twice as
+  fast (`RedHintBounce`, `WC_EB_HINT_DROP` sprite units, default 17). On a yellow
   (vertical) bar one press of A is a forward thrust, which lets go about 0.7 s later; the game's
   "Push" label lights up as the cue. The hint is an A button that stays still and shrinks and
   grows: 0x802C27B0 draws 2D sprites from (x, y, z, scale x, scale y, angle) and first calls cos
