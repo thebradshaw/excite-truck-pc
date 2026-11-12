@@ -770,10 +770,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..720aabb
+index 0000000..ab5f92e
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,832 @@
+@@ -0,0 +1,847 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -924,8 +924,15 @@ index 0000000..720aabb
 +int g_hintSize = 0;
 +// Presses of A a second on a red bar, over the last kMashWindow seconds of race time.
 +constexpr float kMashWindow = 0.75f;
++// Crash recovery's A bounce (0 at rest, 1 at the bottom): two bounces every 0.55 s.
++float RedHintBounce(float clock)
++{
++    return std::fabs(std::sin(clock * (3.14159265f / 0.275f)));
++}
++const float kRedHintDrop = std::getenv("WC_EB_HINT_DROP") ? float(std::atof(std::getenv("WC_EB_HINT_DROP"))) : 17.0f;
 +float g_mashRate = 0.0f;
 +
++void WriteF32(uint32_t addr, float v);
 +float ReadF32(uint32_t addr)
 +{
 +    const uint32_t bits = Memory::Read32(addr);
@@ -1110,10 +1117,6 @@ index 0000000..720aabb
 +                }
 +                pitchDir = (int(clock / pumpHalf) % 2) ? 1.0f : -1.0f;
 +            } else if (red) {
-+                // Mash A, as in crash recovery (Chris, round 13): the remote thrusts back and
-+                // forth at a rate that follows how fast A is being pressed, 1.5 thrusts a press
-+                // up to 8 a second, and stops 0.75 s after the last press. The first press
-+                // thrusts at once.
 +                static float taps[16];
 +                static int tapCount = 0;
 +                static float lastThrust = -10.0f;
@@ -1125,12 +1128,20 @@ index 0000000..720aabb
 +                int recent = 0;
 +                for (int i = 0; i < tapCount; ++i) recent += (clock - taps[i] <= kMashWindow && clock >= taps[i]) ? 1 : 0;
 +                g_mashRate = float(recent) / kMashWindow;
++                // How a red bar paces itself: the game builds the swing up while the remote is
++                // shaken back and forth in time with it, and each turn waits partway round for
++                // a shake to carry it on (up to about a second), so the more shakes the sooner
++                // each turn comes round, up to the bar's own limit. The remote shakes as often
++                // as A is being pressed (over the last 0.75 s), up to 8 times a second, and
++                // stops when A does; the first press shakes at once. So, as in crash recovery:
++                // mash faster, swing faster.
 +                if (recent > 0) {
-+                    const float perSecond = std::clamp(1.5f * g_mashRate, 2.0f, 8.0f);
++                    const float perSecond = std::min(g_mashRate, 8.0f);
++                    if (tap && clock - lastThrust > 0.75f) lastThrust = -10.0f;
 +                    if (clock - lastThrust >= 1.0f / perSecond || clock < lastThrust) {
 +                        lastThrust = clock;
 +                        thrustReads = 3;
-+                        thrustEnd = clock + 0.08f;
++                        thrustEnd = clock + 0.05f;
 +                        thrustDir = -thrustDir;
 +                        pitchDir = -pitchDir;
 +                    }
@@ -1152,7 +1163,7 @@ index 0000000..720aabb
 +            // The hint. On a red bar, crash recovery's A: up, then pressed, ten changes a second.
 +            // On a yellow bar an A shrinking and growing again in four steps, twice a second.
 +            if (red) {
-+                g_hintSize = (int(clock / 0.1f) & 1) ? 4 : 0;
++                g_hintSize = RedHintBounce(clock) > 0.6f ? 4 : 0;
 +            } else {
 +                g_hintSize = int(std::fmod(clock, 0.5f) / 0.5f * 4.0f) & 3;
 +            }
@@ -1201,7 +1212,7 @@ index 0000000..720aabb
 +        // holding the gas (RT, R, X) kept some of the swings from registering, so it is ignored
 +        // there. Crash recovery keeps it.
 +        static const bool keepGas = std::getenv("WC_EB_GAS_ON_BARS") != nullptr;
-+        if (!keepGas && (push || (shake && !crashShake))) in.hold &= ~kWpad2;
++        if (!keepGas && (push || EbRedBarShown() || (shake && !crashShake))) in.hold &= ~kWpad2;
 +        const int side = stickX > 0.5f ? 1 : stickX < -0.5f ? -1 : 0;
 +        if (crashShake && side != 0 && side != lastSide) swingButton = true;
 +        if (side != 0) lastSide = side;
@@ -1423,10 +1434,14 @@ index 0000000..720aabb
 +    g_hintLastDraw = g_hintDraws;
 +    // The position is already on 0x802C27B0's stack (r1 + 68) by now; the rest is in registers.
 +    const uint32_t sp = ctx->gpr[1];
++    // On a red bar the A bounces as crash recovery's does (recorded from the game): down and
++    // back up twice in 0.55 s, by about half the button's height, pressed at the bottom.
++    const double y = g_hint.y + (EbRedBarShown() ? kRedHintDrop * RedHintBounce(ReadF32(kRaceClock)) : 0.0);
 +    WriteF32(sp + 68, float(g_hint.x));
-+    WriteF32(sp + 72, float(g_hint.y));
++    WriteF32(sp + 72, float(y));
 +    WriteF32(sp + 76, float(g_hint.z));
 +    ctx->fpr[26].d = g_hint.x;
++    ctx->fpr[31].d = y;
 +    ctx->fpr[30].d = g_hint.z;
 +    ctx->fpr[27].d = g_hint.sx;
 +    ctx->fpr[28].d = g_hint.sy;

@@ -77,12 +77,18 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   with the left stick. Bars are played with A (round 12, Chris: "tapping on the A button
   repeatedly to gather speed, or a timed A button to release"; round 11's press-to-charge window
   did not feel like gathering momentum). On a red (horizontal) bar A is mashed as in
-  crash recovery (round 13, Chris: "increase speed the faster the A button is pressed"): the
-  remote thrusts back and forth 1.5 times per press per second (presses counted over the last
-  0.75 s of race time, 2 to 8 thrusts a second), each thrust also rocking its pitch the other way.
-  On School_Mexico 1.7 presses a second took 9.4 s on the bar for "Red Bar" (5 stars), 8 a
-  second took 6.7 s for "Super Red Bar" (10 stars). Its hint is crash recovery's A: up, then
-  pressed, ten changes a second. On a yellow
+  crash recovery (rounds 13-14, Chris: "increase speed the faster the A button is pressed"). How
+  the bar paces itself (traced in the player's bar state at player+0x1FC4, player at *0x805785F4):
+  +0xA0 counts turns (11 ends the bar), each turn starts with a kick over the top and then waits
+  partway round for a remote thrust to carry it on, timing out after about a second; +0x58 is the
+  swing speed. Writing the turn count or the speed directly did not make turns faster, so the
+  input is the lever: the remote thrusts back and forth exactly as often as A is pressed
+  (presses counted over the last 0.75 s, up to 8 a second, none without presses; the first
+  press thrusts at once). Round 13 thrusted at least 2 a second for any press, which saturated
+  the bar, so slow and fast mashing felt the same. Gas is dropped while a red bar shows as well
+  as while the Push prompt does. The hint is crash recovery's A, recorded from the game: it
+  bounces down by about half its height and back twice every 0.55 s, pressed at the bottom
+  (`RedHintBounce`, `WC_EB_HINT_DROP` sprite units, default 17). On a yellow
   (vertical) bar one press of A is a forward thrust, which lets go about 0.7 s later; the game's
   "Push" label lights up as the cue. The hint is an A button that stays still and shrinks and
   grows: 0x802C27B0 draws 2D sprites from (x, y, z, scale x, scale y, angle) and first calls cos
