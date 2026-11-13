@@ -23,6 +23,8 @@ struct Bridge {
     virtual bool CupUnlocked(const std::string& cupKey) = 0;
     // Start the race an invite is for (the game's normal pre-race flow follows).
     virtual void BeginRace(const std::string& contestKey) = 0;
+    // False when a player joins by picking the same race in the game's menus instead of View.
+    virtual bool JoinsByView() { return true; }
     // The vehicle and paint the player would race with now.
     virtual void CurrentVehicle(uint32_t& vehicle, uint32_t& variant) = 0;
     // A game frame (guest thread) for per-race work: sending and applying vehicle states.
@@ -46,6 +48,9 @@ void LocalRaceChosen(const std::string& contestKey, const std::string& title, co
 bool HoldAtLine();
 // The race left (finished, quit, or restarted).
 void LocalRaceEnded();
+
+// A short message in the top-right toast stack (stars from the others, join hints).
+void ShowToast(const std::string& text, uint32_t color = 0xFFFFFFFF);
 
 // Name tags, set by the game each frame for the slots of other people (screen pixels, 0..1).
 void SetNameTag(uint8_t slot, float x, float y, bool visible);

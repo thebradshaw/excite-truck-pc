@@ -119,6 +119,9 @@ struct SessionConfig {
     uint32_t color = 0xFFFFFFFF;
     std::string game, build;
     bool create = false;
+    // How long a race stays open to the room. Games where joiners still pick a vehicle after
+    // picking the race in their menus (Excite Truck) give a little longer than kInviteSeconds.
+    double inviteSeconds = kInviteSeconds;
 };
 
 class Session {

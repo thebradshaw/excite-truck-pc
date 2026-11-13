@@ -20,7 +20,7 @@
 
 namespace NetplayRuntime {
 
-namespace {
+namespace detail {
 
 using Clock = std::chrono::steady_clock;
 
@@ -47,7 +47,7 @@ struct State {
     Clock::time_point lastFrame = Clock::now();
     std::string relayError;
     bool reportedFailure = false;
-    std::mutex mutex;
+    std::recursive_mutex mutex;
 } g;
 
 const char* Env(const char* name) {
@@ -74,6 +74,9 @@ void Start() {
     c.create = std::string(Env("WC_NET_CREATE")) == "1";
     c.game = Env("WC_NET_GAME");
     c.build = Env("WC_NET_BUILD");
+    // Excite Truck joiners pick the race in the course menu and then a truck before the race
+    // starts, so its races stay open a little longer.
+    if (c.game == "excite_truck") c.inviteSeconds = 20.0;
     g.session = std::make_unique<netplay::Session>(c);
     std::fprintf(stderr, "[netplay] %s room \"%s\" on %s as %s\n", c.create ? "opening" : "joining", c.room.c_str(),
                  c.url.c_str(), c.name.c_str());
@@ -103,7 +106,9 @@ std::string Seconds(double s) {
     return text;
 }
 
-} // namespace
+} // namespace detail
+
+using namespace detail;
 
 void Register(Bridge* bridge) { g.bridge = bridge; }
 
@@ -142,13 +147,19 @@ void Frame() {
 
     if (s.GetStatus() != netplay::Session::Status::InRoom || !g.bridge) return;
     const netplay::RaceView& race = s.Race();
+    static int lastPhase = -1;
+    if (int(race.phase) != lastPhase) {
+        lastPhase = int(race.phase);
+        std::fprintf(stderr, "[netplay] race phase %d (%s, %d players)\n", lastPhase, race.title.c_str(), race.Players());
+    }
     if (race.phase >= netplay::RaceView::Loading) g.bridge->RaceFrame(s);
 
     // View: join the newest invite (menus), or start now (the starter, waiting at the line).
     if (g.viewPressed) {
         if (race.starter && race.phase == netplay::RaceView::Inviting) {
             s.StartNow();
-        } else if (race.phase == netplay::RaceView::None && !s.Invites().empty() && g.bridge->CanJoinNow()) {
+        } else if (race.phase == netplay::RaceView::None && !s.Invites().empty() && g.bridge->CanJoinNow() &&
+                   g.bridge->JoinsByView()) {
             const netplay::Invite inv = s.Invites().front();
             if (g.bridge->CupUnlocked(inv.cupKey)) {
                 s.JoinRace(inv.raceId);
@@ -168,6 +179,15 @@ void LocalRaceChosen(const std::string& contestKey, const std::string& title, co
     uint32_t vehicle = 0, variant = 0;
     g.bridge->CurrentVehicle(vehicle, variant);
     const netplay::RaceView& race = s.Race();
+    // Picking the same race in the menus while someone's invite for it is open joins it.
+    if (race.phase == netplay::RaceView::None) {
+        for (const auto& inv : s.Invites()) {
+            if (inv.contestKey != contestKey) continue;
+            s.JoinRace(inv.raceId);
+            s.Ready(vehicle, variant);
+            return;
+        }
+    }
     if ((race.phase == netplay::RaceView::Joining || race.phase == netplay::RaceView::WaitingStart) && race.contestKey == contestKey) {
         s.Ready(vehicle, variant);   // the race I joined
         return;
@@ -199,6 +219,12 @@ void LocalRaceEnded() {
     std::lock_guard lock(g.mutex);
     g.session->LeaveRace();
     g.tags.fill(Tag{});
+}
+
+void ShowToast(const std::string& text, uint32_t color) {
+    if (!Active()) return;
+    std::lock_guard lock(g.mutex);
+    g.toasts.push_back({{text, color}, Clock::now()});
 }
 
 void SetNameTag(uint8_t slot, float x, float y, bool visible) {
@@ -324,7 +350,11 @@ void DrawOverlay() {
         const bool unlocked = g.bridge && g.bridge->CupUnlocked(inv.cupKey);
         std::vector<std::pair<std::string, ImU32>> lines;
         lines.push_back({inv.fromName + " is starting " + inv.title + "  (" + Seconds(inv.secondsLeft) + "s)", Rgba(s.ColorOf(inv.from))});
-        lines.push_back({!unlocked ? "Not unlocked in your save" : canJoin ? "View: join this race" : "Finish your race to join the next one",
+        const bool byView = g.bridge && g.bridge->JoinsByView();
+        lines.push_back({!unlocked  ? "Not unlocked in your save"
+                         : !canJoin ? "Finish your race to join the next one"
+                         : byView   ? "View: join this race"
+                                    : "Pick " + inv.title + " in your menu to join",
                          unlocked && canJoin ? text : dim});
         centerPanel(H * 0.10f, lines);
     }

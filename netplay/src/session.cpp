@@ -203,7 +203,11 @@ void Session::Update() {
     for (auto& i : invites_) i.secondsLeft = inviteDeadline_[i.raceId] - now;
 
     switch (race_.phase) {
-        case RaceView::Inviting:
+        case RaceView::Inviting: {
+            // Everyone in the room is in and has picked a vehicle: no need to wait out the invite.
+            bool everyoneIn = race_.Players() == int(members_.size()) && race_.Players() > 1;
+            for (auto& m : race_.members) everyoneIn &= m.ready;
+            if (everyoneIn) inviteDeadlineMine_ = std::min(inviteDeadlineMine_, now);
             race_.secondsLeft = std::max(0.0, inviteDeadlineMine_ - now);
             if (now >= inviteDeadlineMine_) {
                 Writer w = Payload(Game::InviteClosed, race_.raceId);
@@ -212,6 +216,7 @@ void Session::Update() {
                 phaseDeadline_ = now + kReadySeconds;
             }
             break;
+        }
         case RaceView::Joining:
             race_.secondsLeft = std::max(0.0, phaseDeadline_ - now);
             break;
@@ -257,7 +262,7 @@ void Session::Handle(uint8_t from, const std::vector<uint8_t>& payload) {
             inv.cupKey = r.str();
             const float left = r.f32();
             if (!r.ok || left <= 0) break;
-            inv.secondsLeft = std::min<double>(left, kInviteSeconds);
+            inv.secondsLeft = std::min<double>(left, 60.0);
             inviteDeadline_[raceId] = Now() + inv.secondsLeft;
             invites_.erase(std::remove_if(invites_.begin(), invites_.end(), [&](const Invite& i) { return i.raceId == raceId; }), invites_.end());
             invites_.insert(invites_.begin(), inv);
@@ -439,10 +444,10 @@ void Session::StartRace(const std::string& contestKey, const std::string& title,
     me.member = myId_;
     me.slot = 0;
     race_.members.push_back(me);
-    inviteDeadlineMine_ = Now() + kInviteSeconds;
-    race_.secondsLeft = kInviteSeconds;
+    inviteDeadlineMine_ = Now() + cfg_.inviteSeconds;
+    race_.secondsLeft = cfg_.inviteSeconds;
     Writer w = Payload(Game::Invite, race_.raceId);
-    w.str(contestKey).str(title).str(cupKey).f32(float(kInviteSeconds));
+    w.str(contestKey).str(title).str(cupKey).f32(float(cfg_.inviteSeconds));
     Send(kToEveryone, w.b);
     SetActivity("Starting " + title);
 }
