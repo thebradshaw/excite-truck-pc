@@ -770,7 +770,7 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..802d22a
+index 0000000..7ca99e9
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
 @@ -0,0 +1,904 @@
@@ -943,7 +943,7 @@ index 0000000..802d22a
 +const float kRedShakeEveryFast = 0.12f;
 +const float kRedShakeLengthFast = 0.08f;
 +const float kRedBarFullRate = 3.0f; // presses a second for full speed
-+const float kRedBarAccelFast = std::getenv("WC_EB_ACCEL_MAX") ? float(std::atof(std::getenv("WC_EB_ACCEL_MAX"))) : 10.0f;
++const float kRedBarAccelFast = std::getenv("WC_EB_ACCEL_MAX") ? float(std::atof(std::getenv("WC_EB_ACCEL_MAX"))) : 9.0f;
 +void EbRestoreRedBarAccel()
 +{
 +    if (g_redBarHelper != 0 && Memory::Read32(g_redBarHelper) == 0x804D27B0u) WriteF32(g_redBarHelper + 12, g_redBarBaseAccel);
@@ -1167,11 +1167,11 @@ index 0000000..802d22a
 +                // in the player; the player is *0x805785F4) keeps "red_bar_accel" at +12, 1.0 for
 +                // the player, which sets how hard each shake speeds the spin. Shakes alone are
 +                // capped by it, so frantic mashing barely beat steady pressing (Chris, round 15).
-+                // Scale it with the mash rate: as is at one press a second, ten times at three
++                // Scale it with the mash rate: as is at one press a second, nine times at three
 +                // or more (round 17: 10x works on Chris's PC, "almost too fast"; round 18's 8x
 +                // fell all the way back to the old slow swing there, so the bar has a threshold
-+                // between the two at 60 FPS; 4x took School_Mexico's bar from 7.6 s to 4.6 s
-+                // here). Put back when the bar ends
++                // between the two at 60 FPS; round 20 tries the half step; 4x took
++                // School_Mexico's bar from 7.6 s to 4.6 s here). Put back when the bar ends
 +                // (EbRestoreRedBarAccel).
 +                if (const uint32_t helper = HumanRedBarHelper()) {
 +                    if (g_redBarHelper != helper) {
