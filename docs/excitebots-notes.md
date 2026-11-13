@@ -104,7 +104,18 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   (Chris: works well, "almost too fast"): top accel lowered 20%, to 8x, which on his PC fell
   all the way back to the old slow swing, so it is back to 10x (round 19). The bar's response to
   accel at 60 FPS has a threshold between 8x and 10x; slow it some other way if asked again. Round 20
-  (Chris: "a half step between these two"): 9x. Trace with
+  (Chris: "a half step between these two"): 9x. Round 21 (Chris: the red bar works on some courses and not
+  others): the bot was taken from 0x805785F4, which holds it only in some events (0 in
+  mitch5_bar_challenge). The local red bar helper is now found through the controller
+  (`HumanRedBarHelper`: controller at 0x805785D0 is +4 of a wrapper, vtable 0x804D09C8; a slot
+  holding the wrapper follows one holding the bot; the helper, vtable 0x804D27B0, sits at a
+  bot-kind-dependent offset, +0x1FD4 or +0x2C94, and holds the bot's address in its first 0x200
+  bytes). A red bar is also recognised from the helper's state (+8: 1 free, 2 near a bar, 4
+  swinging), in case a race draws other meter art than the contests' 78583d305e906e63.
+- Running legs (round 21, Chris: control them like the Wii Remote, with the stick side to side):
+  on a non-crash shake prompt the remote's side-to-side rock follows the stick (past a third of
+  the way is a full rock); A held still rocks at full speed (dentures); a still stick no longer
+  runs by itself. Untested here: no event with legs is known yet. Trace with
   `WC_EB_TRACE_TURNS`. The hint is crash recovery's A, recorded from the game (it bounces down
   by about half its height and back twice every 0.55 s, pressed at the bottom), played twice as
   fast (`RedHintBounce`, `WC_EB_HINT_DROP` sprite units, default 17). On a yellow

@@ -770,10 +770,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..7ca99e9
+index 0000000..1e3cea3
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,904 @@
+@@ -0,0 +1,968 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -926,13 +926,65 @@ index 0000000..7ca99e9
 +constexpr float kMashWindow = 0.75f;
 +void WriteF32(uint32_t addr, float v);
 +float ReadF32(uint32_t addr);
-+// The player's red bar helper (see the red bar in ReadInput), or 0.
++// The local player's red bar helper (see the red bar in ReadInput), or 0. Every bot has one
++// (vtable 0x804D27B0), at an offset in the bot that depends on its kind (+0x1FD4, +0x2C94, ...),
++// holding the bot's address in its first 0x200 bytes. The local bot is found through its
++// controller: the controller (pointer at 0x805785D0) is held at +4 of a wrapper (vtable
++// 0x804D09C8), and a slot holding the wrapper's address follows one holding the bot's. Round
++// 21: the bot used to be taken from 0x805785F4, which holds it only in some events, so the red
++// bar boost worked on some courses and not others. Searching RAM takes a moment, so it is done
++// at most once a second, and the answer is kept while it still checks out.
 +uint32_t HumanRedBarHelper()
 +{
-+    const uint32_t player = Memory::Read32(0x805785F4u);
-+    if (player < 0x80000000u || player >= 0x81800000u) return 0;
-+    const uint32_t helper = player + 0x1FD4u;
-+    return Memory::Read32(helper) == 0x804D27B0u ? helper : 0;
++    static uint32_t helper = 0, helperCtrl = 0;
++    static auto lastSearch = std::chrono::steady_clock::time_point{};
++    const uint32_t ctrl = Memory::Read32(0x805785D0u);
++    if (helper != 0 && ctrl == helperCtrl && Memory::Read32(helper) == 0x804D27B0u) return helper;
++    helper = 0;
++    const auto now = std::chrono::steady_clock::now();
++    if (ctrl == 0 || now - lastSearch < std::chrono::seconds(1)) return 0;
++    lastSearch = now;
++    const auto* ram = static_cast<const uint8_t*>(Memory::GetPointer(0x80000000u, 0x1800000u));
++    if (!ram) return 0;
++    auto be = [&](uint32_t off) { return uint32_t(ram[off]) << 24 | uint32_t(ram[off + 1]) << 16 | uint32_t(ram[off + 2]) << 8 | ram[off + 3]; };
++    constexpr uint32_t kSize = 0x1800000u;
++    uint32_t wrappers[4];
++    int wrapperCount = 0;
++    uint32_t helpers[16];
++    int helperCount = 0;
++    for (uint32_t o = 0; o + 8 <= kSize; o += 4) {
++        const uint32_t v = be(o);
++        if (v == 0x804D09C8u && be(o + 4) == ctrl && wrapperCount < 4) wrappers[wrapperCount++] = 0x80000000u + o;
++        if (v == 0x804D27B0u && helperCount < 16) helpers[helperCount++] = 0x80000000u + o;
++    }
++    if (wrapperCount == 0 || helperCount == 0) return 0;
++    for (uint32_t r = 4; r + 4 <= kSize; r += 4) {
++        const uint32_t v = be(r);
++        bool isWrapper = false;
++        for (int i = 0; i < wrapperCount; ++i) isWrapper = isWrapper || v == wrappers[i];
++        if (!isWrapper) continue;
++        const uint32_t bot = be(r - 4);
++        if (bot < 0x80000000u || bot >= 0x81800000u) continue;
++        for (int i = 0; i < helperCount; ++i) {
++            const uint32_t h = helpers[i] - 0x80000000u;
++            for (uint32_t k = 4; k < 0x200 && h + k + 4 <= kSize; k += 4) {
++                if (be(h + k) != bot) continue;
++                helper = helpers[i];
++                helperCtrl = ctrl;
++                return helper;
++            }
++        }
++    }
++    return 0;
++}
++// On a red bar: its meter is drawn (the contests' art; a race may draw other art), or the local
++// player's red bar helper is swinging (state 4 at +8; 1 is free, 2 near a bar).
++bool OnRedBar()
++{
++    if (EbRedBarShown()) return true;
++    if (!EbPushPromptShown()) return false; // a bar shows the Push prompt; spares the RAM search
++    const uint32_t helper = HumanRedBarHelper();
++    return helper != 0 && Memory::Read32(helper + 8) == 4u;
 +}
 +uint32_t g_redBarHelper = 0;
 +float g_redBarBaseAccel = 1.0f;
@@ -1122,7 +1174,7 @@ index 0000000..7ca99e9
 +        bool tapDown = actionButton;
 +        if (testTap > 0.0f && push) {
 +            const float t = clock - barStart;
-+            tapDown = EbRedBarShown() ? (std::fmod(t, testTap) < testTap * 0.5f) : (t >= testTap && t < testTap + 0.1f);
++            tapDown = OnRedBar() ? (std::fmod(t, testTap) < testTap * 0.5f) : (t >= testTap && t < testTap + 0.1f);
 +        }
 +        // What spins the bot round a bar is rocking the remote forward and back (its pitch); on a
 +        // red bar its meter fills from thrusts of the remote along its length, forward then back
@@ -1132,9 +1184,9 @@ index 0000000..7ca99e9
 +        static float thrustEnd = 0.0f;
 +        static int thrustDir = 1;
 +        static float pitchDir = 1.0f;
-+        if (!(push && EbRedBarShown())) EbRestoreRedBarAccel();
++        if (!(push && OnRedBar())) EbRestoreRedBarAccel();
 +        if (autoBars && push) {
-+            const bool red = EbRedBarShown();
++            const bool red = OnRedBar();
 +            const bool tap = tapDown && !barActionWasDown;
 +            if (!pushWasShown) { thrustReads = 0; thrustEnd = 0.0f; pitchDir = 1.0f; }
 +            if (playAlone) {
@@ -1163,8 +1215,8 @@ index 0000000..7ca99e9
 +                // as A is being pressed (over the last 0.75 s), up to 8 times a second, and
 +                // stops when A does; the first press shakes at once. So, as in crash recovery:
 +                // mash faster, swing faster.
-+                // The bar's own pace: the player's red bar helper (vtable 0x804D27B0, at +0x1FD4
-+                // in the player; the player is *0x805785F4) keeps "red_bar_accel" at +12, 1.0 for
++                // The bar's own pace: the player's red bar helper (vtable 0x804D27B0; see
++                // HumanRedBarHelper) keeps "red_bar_accel" at +12, 1.0 for
 +                // the player, which sets how hard each shake speeds the spin. Shakes alone are
 +                // capped by it, so frantic mashing barely beat steady pressing (Chris, round 15).
 +                // Scale it with the mash rate: as is at one press a second, nine times at three
@@ -1269,7 +1321,7 @@ index 0000000..7ca99e9
 +        // holding the gas (RT, R, X) kept some of the swings from registering, so it is ignored
 +        // there. Crash recovery keeps it.
 +        static const bool keepGas = std::getenv("WC_EB_GAS_ON_BARS") != nullptr;
-+        if (!keepGas && (push || EbRedBarShown() || (shake && !crashShake))) in.hold &= ~kWpad2;
++        if (!keepGas && (push || OnRedBar() || (shake && !crashShake))) in.hold &= ~kWpad2;
 +        const int side = stickX > 0.5f ? 1 : stickX < -0.5f ? -1 : 0;
 +        if (crashShake && side != 0 && side != lastSide) swingButton = true;
 +        if (side != 0) lastSide = side;
@@ -1282,10 +1334,22 @@ index 0000000..7ca99e9
 +        static const bool stickRock = std::getenv("WC_EB_STICK_STEER_SHAKE") == nullptr;
 +        // Developer aid: WC_EB_TEST_STICK=1 acts as if the stick were held over during the shake.
 +        static const bool testStick = std::getenv("WC_EB_TEST_STICK") != nullptr;
-+        if (shake && !crashShake && !push && (autoBars || actionButton || (stickRock && (testStick || mag > 0.4f)))) {
-+            static int rock = 0;
-+            in.steer = ((++rock / 3) % 2) != 0 ? 1.0f : -1.0f;
-+            in.pitch = 0.0f;
++        // Round 21 (Chris: the running legs "seem wrong"; control them "in the same fashion as
++        // the Wii Remote, but with the left thumbstick, side to side"): the remote rocked side
++        // to side follows the stick, each push past a third of the way a full rock, so the legs
++        // run as fast as the stick is waggled. Holding A still rocks it at full speed by itself
++        // (the dentures), and the stick held still no longer does.
++        if (shake && !crashShake && !push) {
++            if (std::fabs(stickX) > 0.33f) {
++                in.steer = stickX > 0.0f ? 1.0f : -1.0f;
++                in.pitch = 0.0f;
++            } else if (actionButton || testStick || (!autoBars && stickRock && mag > 0.4f)) {
++                static int rock = 0;
++                in.steer = ((++rock / 3) % 2) != 0 ? 1.0f : -1.0f;
++                in.pitch = 0.0f;
++            } else {
++                in.steer = 0.0f;
++            }
 +        }
 +        if (traceShake && shake && !crashShake) {
 +            const uint32_t ctrl = Memory::Read32(0x805785D0u);
@@ -1493,7 +1557,7 @@ index 0000000..7ca99e9
 +    const uint32_t sp = ctx->gpr[1];
 +    // On a red bar the A bounces as crash recovery's does (recorded from the game): down and
 +    // back up twice in 0.55 s, by about half the button's height, pressed at the bottom.
-+    const double y = g_hint.y + (EbRedBarShown() ? kRedHintDrop * RedHintBounce(ReadF32(kRaceClock)) : 0.0);
++    const double y = g_hint.y + (OnRedBar() ? kRedHintDrop * RedHintBounce(ReadF32(kRaceClock)) : 0.0);
 +    WriteF32(sp + 68, float(g_hint.x));
 +    WriteF32(sp + 72, float(y));
 +    WriteF32(sp + 76, float(g_hint.z));
