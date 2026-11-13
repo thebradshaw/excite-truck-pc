@@ -7,7 +7,7 @@ One-time setup (about 5 minutes):
 
 1. Make a free account at https://dash.cloudflare.com/sign-up
 2. Install Node.js LTS from https://nodejs.org
-3. In this folder, run:
+3. Double-click deploy-windows.bat (Windows), or in this folder run:
 
        npx wrangler login
        npx wrangler deploy
