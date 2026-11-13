@@ -754,7 +754,8 @@ void BotsControlsPage() {
     ControlLine("B", IM_COL32(240, 80, 70, 255), false, "Use your weapon");
     ControlLine("Y", IM_COL32(240, 200, 60, 255), false, "The Wii Remote's A button");
     ControlLine("LS", 0, true, "Steer, and tilt in the air");
-    ControlLine("LS", 0, true, "Shake prompts and running legs: move it side to side (or hold A)");
+    ControlLine("LS", 0, true, "Running legs: move it side to side");
+    ControlLine("LS", 0, true, "Shake prompts: move it side to side (or hold A)");
     ControlLine("MENU", 0, true, "Pause");
     ControlLine("GUIDE", 0, true, "Quit the game (A to quit, B to stay)");
     ImGui::Unindent(S(8));
@@ -770,7 +771,7 @@ void BotsControlsPage() {
     ImGui::Dummy(ImVec2(0, S(4)));
     ImGui::Indent(S(8));
     Paragraph("Your bot grabs bars by itself. On a swing bar (red), mash A: the faster you mash, the faster you swing. On a push-off "
-              "bar (yellow), press A once to let go. When the game asks you to shake, such as with the running legs or dentures, move the left stick side to side, or hold A. After a crash, tap A to get going again (shaking the stick "
+              "bar (yellow), press A once to let go. For the running legs, move the left stick side to side. When the game asks you to shake, such as with dentures, move the left stick side to side, or hold A. After a crash, tap A to get going again (shaking the stick "
               "side to side works too). The game shows the button for each action. To change which button does "
               "what, press F10 in the game and open Controllers.");
     ImGui::Unindent(S(8));
