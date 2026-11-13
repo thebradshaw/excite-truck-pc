@@ -88,6 +88,12 @@ def build(scale):
     stick(c, cx, cy, r, 0, -1)
     out["tex1_256x256_ddf1c663d39c4ad2_14.png"] = c.result()
     out["tex1_256x256_aa8407612f74e6ba_0.png"] = circle_mask(256, 256, scale, cx - r, cy - r, cx + r, cy + r)
+    # The running legs show the same prompt, rocked from side to side; there the runtime keeps it
+    # level and swaps in marked copies of the stick pushed left and right in turn (same disc mask).
+    for name, dx in (("49b333bdb3a063e7", -1), ("7eda6285ba2b775e", 1)):
+        c = Canvas(256, 256, scale, (0, 0, 0, 255))
+        stick(c, cx, cy, r, dx, 0)
+        out[f"tex1_256x256_{name}_14.png"] = c.result()
     # On a bar the runtime keeps that sprite still and swaps its texture and mask for marked
     # copies, four sizes of the A button in turn (big, smaller, smallest and pressed, smaller), so
     # the hint shrinks and grows in place. The sprite is drawn 3/4 as wide as its texture, so the

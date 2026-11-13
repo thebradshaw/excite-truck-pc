@@ -770,10 +770,10 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..3040fae
+index 0000000..b38af4e
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
-@@ -0,0 +1,968 @@
+@@ -0,0 +1,996 @@
 +#include <utility>
 +#include <string>
 +// Excitebots (RX3E01): a virtual sideways Wii Remote driven by an Xbox-style gamepad or the
@@ -818,6 +818,7 @@ index 0000000..3040fae
 +bool EbPushPromptShown();  // gx_texture.cpp: the pushed remote (let go of a bar)
 +bool EbRedBarShown();      // gx_texture.cpp: a red (horizontal) bar's meter
 +bool EbBarPromptShowsA();  // below: bars are played with A
++bool EbOnLegs();          // below: the running legs' prompt is up
 +namespace EtPrompts {
 +bool Active(); // et_prompts.cpp: the Xbox prompt pack is loaded
 +}
@@ -995,7 +996,7 @@ index 0000000..3040fae
 +const float kRedShakeEveryFast = 0.12f;
 +const float kRedShakeLengthFast = 0.08f;
 +const float kRedBarFullRate = 3.0f; // presses a second for full speed
-+const float kRedBarAccelFast = std::getenv("WC_EB_ACCEL_MAX") ? float(std::atof(std::getenv("WC_EB_ACCEL_MAX"))) : 6.1f;
++const float kRedBarAccelFast = std::getenv("WC_EB_ACCEL_MAX") ? float(std::atof(std::getenv("WC_EB_ACCEL_MAX"))) : 5.5f;
 +void EbRestoreRedBarAccel()
 +{
 +    if (g_redBarHelper != 0 && Memory::Read32(g_redBarHelper) == 0x804D27B0u) WriteF32(g_redBarHelper + 12, g_redBarBaseAccel);
@@ -1142,7 +1143,10 @@ index 0000000..3040fae
 +    // or held, a rocking remote.
 +    if (racing) {
 +        const bool shake = EbShakePromptShown();
-+        const bool push = EbPushPromptShown();
++        // Round 25: the running legs show the bar's Push prompt too, so they were played as a
++        // yellow bar (A to let go, the stick ignored). They are told apart and left to the stick.
++        const bool legs = EbOnLegs();
++        const bool push = EbPushPromptShown() && !legs;
 +        const bool crashShake = shake && EbCrashMeterShown();
 +        static bool flicked = false;
 +        static int lastSide = 0;
@@ -1219,10 +1223,10 @@ index 0000000..3040fae
 +                // HumanRedBarHelper) keeps "red_bar_accel" at +12, 1.0 for
 +                // the player, which sets how hard each shake speeds the spin. Shakes alone are
 +                // capped by it, so frantic mashing barely beat steady pressing (Chris, round 15).
-+                // Scale it with the mash rate: as is at one press a second, 6.1 times at three
++                // Scale it with the mash rate: as is at one press a second, 5.5 times at three
 +                // or more (round 17: 10x works on Chris's PC, "almost too fast"; round 18's 8x
 +                // seemed to fall back to the slow swing, but that was the bot lookup failing on
-+                // some courses (fixed in round 21); round 22 8x, 23 15% less, 24 10% less; 4x took
++                // some courses (fixed in round 21); round 22 8x, 23 15% less, 24 and 25 10% less each; 4x took
 +                // School_Mexico's bar from 7.6 s to 4.6 s here). Put back when the bar ends
 +                // (EbRestoreRedBarAccel).
 +                if (const uint32_t helper = HumanRedBarHelper()) {
@@ -1339,7 +1343,16 @@ index 0000000..3040fae
 +        // to side follows the stick, each push past a third of the way a full rock, so the legs
 +        // run as fast as the stick is waggled. Holding A still rocks it at full speed by itself
 +        // (the dentures), and the stick held still no longer does.
-+        if (shake && !crashShake && !push) {
++        // The running legs (Chris, rounds 21 and 25): the remote rocked side to side follows the
++        // stick, a full rock each way past a third of the way, so the legs run as fast as the
++        // stick is waggled. The hint shows the stick pushed left, then right.
++        if (legs) {
++            static int legRock = 0;
++            if (testStick) in.steer = ((++legRock / 4) % 2) != 0 ? 1.0f : -1.0f;
++            else in.steer = std::fabs(stickX) > 0.33f ? (stickX > 0.0f ? 1.0f : -1.0f) : 0.0f;
++            in.pitch = 0.0f;
++        }
++        if (shake && !crashShake && !push && !legs) {
 +            if (std::fabs(stickX) > 0.33f) {
 +                in.steer = stickX > 0.0f ? 1.0f : -1.0f;
 +                in.pitch = 0.0f;
@@ -1534,6 +1547,7 @@ index 0000000..3040fae
 +HintPlace g_hint;
 +int g_hintDraws = 0;
 +int g_hintLastDraw = -1000;
++float g_legsSeen = -100.0f;
 +
 +void BarPromptSprite(CpuContext* ctx)
 +{
@@ -1547,6 +1561,8 @@ index 0000000..3040fae
 +        RT_LOGF(RT_TAG_HLE, "EB hint x %.2f y %.2f z %.2f sx %.3f sy %.3f a %.3f\n", ctx->fpr[26].d, ctx->fpr[31].d,
 +                ctx->fpr[30].d, ctx->fpr[27].d, ctx->fpr[28].d, ctx->fpr[29].d);
 +    }
++    // The running legs show the same picture, rocked from side to side (the bars never tilt it).
++    if (std::fabs(ctx->fpr[29].d) > 0.02) g_legsSeen = ReadF32(kRaceClock);
 +    if (!EbBarPromptShowsA()) return;
 +    ++g_hintDraws;
 +    if (g_hintDraws - g_hintLastDraw > 20) {
@@ -1628,6 +1644,18 @@ index 0000000..3040fae
 +
 +// Which size of the bar hint's A to draw this frame (gx_texture.cpp picks its texture).
 +int EbBarHintSize() { return g_hintSize; }
++
++// The running legs' prompt is up: the Push picture, which the game rocks from side to side there
++// (BarPromptSprite saw it tilted within the last second of race time).
++bool EbOnLegs() {
++    if (!EbPushPromptShown()) return false;
++    const float since = ReadF32(kRaceClock) - g_legsSeen;
++    return since >= 0.0f && since < 1.0f;
++}
++
++// Which way the legs hint's stick is pushed: -1 left, 1 right (twice a second, the game's own
++// rocking pace).
++int EbLegsHintSide() { return std::fmod(ReadF32(kRaceClock), 0.5f) < 0.25f ? -1 : 1; }
 +
 +// The bar prompt shows a pulsing A button unless bars are played with the stick (round 8).
 +bool EbBarPromptShowsA() {
@@ -2193,7 +2221,7 @@ index 49be121..1f0e12f 100644
  
  void DeliverDrawSyncToken(CpuContext* ctx, uint16_t token)
 diff --git a/runtime/src/hle/gx/gx_texture.cpp b/runtime/src/hle/gx/gx_texture.cpp
-index b644a42..662dc51 100644
+index b644a42..584665a 100644
 --- a/runtime/src/hle/gx/gx_texture.cpp
 +++ b/runtime/src/hle/gx/gx_texture.cpp
 @@ -1,5 +1,9 @@
@@ -2239,7 +2267,7 @@ index b644a42..662dc51 100644
              GXInitTexObjData(obj, dp);
              meta.needsUpload = false;
              textureDataUploaded = true;
-@@ -750,7 +764,212 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
+@@ -750,7 +764,224 @@ static void LoadTexObjImpl(uint32_t oa, uint32_t tid) {
      }
  }
  
@@ -2253,6 +2281,8 @@ index b644a42..662dc51 100644
 +// the Wii Remote / Wii Wheel choice, which input skips, and the Back / OK button icons of any
 +// menu, which switch the pad to the menu layout even mid-race (eb_input.cpp).
 +bool EbBarPromptShowsA(); // eb_input.cpp: bars are played with A (the default)
++bool EbOnLegs();          // eb_input.cpp: the running legs' prompt (the Push picture, rocked)
++int EbLegsHintSide();     // eb_input.cpp: -1 the legs hint's stick pushed left, 1 right
 +int EbBarHintSize();      // eb_input.cpp: which of the bar hint's A pictures to draw (0-4)
 +void EbNoteBarPromptTexture(); // eb_input.cpp: the sprite being drawn is the bar prompt
 +namespace EbScreenTextures {
@@ -2361,7 +2391,7 @@ index b644a42..662dc51 100644
 +        uint32_t addr = 0;
 +        uint64_t head = 0;
 +    };
-+    static Variant variants[10];
++    static Variant variants[12];
 +    Variant& v = variants[slot];
 +    if (!Memory::Contains(dataAddr, kBytes)) return nullptr;
 +    const auto* src = static_cast<const uint8_t*>(GuestToHostPtr(dataAddr, kBytes));
@@ -2393,6 +2423,12 @@ index b644a42..662dc51 100644
 +    const int size = EbBarHintSize();
 +    const int i = mask ? 4 + (size & 3) : (size == 4 ? 8 : size & 3);
 +    return MarkedVariant(dataAddr, 1 + i, kMarks[i]);
++}
++
++// On the running legs the Push prompt becomes the left stick pushed left or right in turn (its
++// mask, a disc, stays the same).
++const uint8_t* LegsPromptVariant(uint32_t dataAddr) {
++    return EbLegsHintSide() < 0 ? MarkedVariant(dataAddr, 10, "EBlegsL0") : MarkedVariant(dataAddr, 11, "EBlegsR0");
 +}
 +} // namespace EbScreenTextures
 +
@@ -2441,6 +2477,10 @@ index b644a42..662dc51 100644
 +        const uint8_t* v = nullptr;
 +        if (kind == EbScreenTextures::kShake && EbCrashMeterShown()) {
 +            v = EbScreenTextures::CrashShakeVariant(dataAddr);
++        } else if (kind == EbScreenTextures::kPush && EbBarPromptShowsA() && EbOnLegs()) {
++            v = EbScreenTextures::LegsPromptVariant(dataAddr);
++        } else if (kind == EbScreenTextures::kPushMask && EbBarPromptShowsA() && EbOnLegs()) {
++            // the stick's disc mask, as it is
 +        } else if ((kind == EbScreenTextures::kPush || kind == EbScreenTextures::kPushMask) && EbBarPromptShowsA()) {
 +            v = EbScreenTextures::BarPromptVariant(dataAddr, kind == EbScreenTextures::kPushMask);
 +        }
@@ -2452,7 +2492,7 @@ index b644a42..662dc51 100644
      if (g_gxTraceFrame) {
          TexObjMeta m; bool ok = false;
          { std::lock_guard<std::mutex> guard(g_texObjMutex); try { ok = TryGetOrExtractTexObjMeta(oa, m); } catch (...) {} }
-@@ -763,13 +982,16 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+@@ -763,13 +994,16 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
              bytes = CaptureTexObjBytes(oa);
          } catch (...) {
          }
@@ -2472,7 +2512,7 @@ index b644a42..662dc51 100644
                      IsReasonableTextureDimensions(m.width, m.height) && IsAuroraLoadableTexFormat(m.format)) {
                      const uint8_t maxLod = m.mipmap ? static_cast<uint8_t>(ComputeMaxMipLevel(m.width, m.height)) : 0u;
                      const uint32_t size = GXGetTexBufferSize(m.width, m.height, m.format, (GXBool)m.mipmap, maxLod);
-@@ -793,6 +1015,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
+@@ -793,6 +1027,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
              }
          });
      } else {
