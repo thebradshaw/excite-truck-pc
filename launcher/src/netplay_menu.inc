@@ -474,9 +474,9 @@ void DrawNetplay(float W, float H, float margin, float footer) {
 // The Network Play button on the home screen, centred on the line between the two games.
 void DrawNetplayButton(ImVec2 centre) {
     const char* label = "NETWORK PLAY";
-    const float fontSize = F.small->FontSize * 1.05f;
-    const ImVec2 text = SpacedTextSize(F.small, fontSize, label, S(2.5f));
-    const ImVec2 size(text.x + S(40), text.y + S(30));
+    const float fontSize = F.small->FontSize * 0.95f;
+    const ImVec2 text = SpacedTextSize(F.small, fontSize, label, S(1.2f));
+    const ImVec2 size(text.x + S(26), text.y + S(24));
     const ImVec2 min(centre.x - size.x * 0.5f, centre.y - size.y * 0.5f), max(min.x + size.x, min.y + size.y);
     g_navRegion = kNetButtonRegion;
     NavRow();
@@ -492,6 +492,6 @@ void DrawNetplayButton(ImVec2 centre) {
     draw->AddRectFilled(min, max, hot ? IM_COL32(255, 182, 56, 235) : IM_COL32(18, 20, 36, 235), r);
     draw->AddRect(min, max, hot ? IM_COL32(255, 230, 190, 255) : kAmber, r, 0, S(1.8f));
     SpacedText(draw, F.small, fontSize, ImVec2(centre.x - text.x * 0.5f, centre.y - text.y * 0.5f),
-               hot ? IM_COL32(24, 16, 8, 255) : kText, label, S(2.5f));
+               hot ? IM_COL32(24, 16, 8, 255) : kText, label, S(1.2f));
     if (pressed) NetplayOpen();
 }
