@@ -111,7 +111,8 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   holding the wrapper follows one holding the bot; the helper, vtable 0x804D27B0, sits at a
   bot-kind-dependent offset, +0x1FD4 or +0x2C94, and holds the bot's address in its first 0x200
   bytes). A red bar is also recognised from the helper's state (+8: 1 free, 2 near a bar, 4
-  swinging), in case a race draws other meter art than the contests' 78583d305e906e63.
+  swinging), in case a race draws other meter art than the contests' 78583d305e906e63. The
+  round 18 "regression" at 8x was most likely this, so round 22 tries 8x again.
 - Running legs (round 21, Chris: control them like the Wii Remote, with the stick side to side):
   on a non-crash shake prompt the remote's side-to-side rock follows the stick (past a third of
   the way is a full rock); A held still rocks at full speed (dentures); a still stick no longer
