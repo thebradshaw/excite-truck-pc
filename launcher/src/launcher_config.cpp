@@ -2,98 +2,186 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <optional>
+#include <sstream>
 #include <system_error>
 
-// The game's own config code, so both programs agree on where Config.toml lives (portable.txt
-// next to the game, else %LOCALAPPDATA%\WiiCompiled or ~/.local/share/WiiCompiled).
-#include "runtime_config.h"
+#include <SDL3/SDL.h>
+
+#include "toml.hpp"
 
 namespace fs = std::filesystem;
 
 namespace launcher_config {
 namespace {
 
-constexpr const char* kLauncherSection = "launcher";
+GameId g_game = GameId::Truck;
 
-std::string ReadLauncherString(const char* key) {
-    try {
-        std::ifstream input(RuntimeConfigFile::ResolveConfigPath(), std::ios::binary);
-        if (!input) {
-            return {};
-        }
-        const toml::value document = toml::parse(input, "Config.toml");
-        if (auto value = RuntimeConfigFile::FindConfigValue<std::string>(document, kLauncherSection, key)) {
-            return *value;
-        }
-    } catch (const std::exception&) {
-    }
-    return {};
+using Ordered = toml::ordered_value;
+
+fs::path ConfigPathFor(GameId id) { return InstallDir(id) / "UserData" / "Config.toml"; }
+
+std::string ReadText(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return in ? std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()) : std::string();
 }
 
+// The parsed Config.toml of the selected game, re-read when the file changes.
+struct Document {
+    fs::path path;
+    fs::file_time_type stamp{};
+    std::optional<Ordered> root;
+};
+Document g_doc;
+
+const Ordered* Find(std::string_view section, std::string_view key) {
+    const fs::path path = ConfigPath();
+    std::error_code ec;
+    const auto stamp = fs::last_write_time(path, ec);
+    if (path != g_doc.path || ec || stamp != g_doc.stamp) {
+        g_doc.path = path;
+        g_doc.stamp = ec ? fs::file_time_type{} : stamp;
+        g_doc.root.reset();
+        try {
+            g_doc.root = toml::parse_str<toml::ordered_type_config>(ReadText(path));
+        } catch (const std::exception&) {
+        }
+    }
+    if (!g_doc.root || !g_doc.root->is_table()) return nullptr;
+    const Ordered* table = &*g_doc.root;
+    std::istringstream parts{std::string(section)};
+    for (std::string part; std::getline(parts, part, '.');) {
+        if (!table->is_table() || !table->as_table().count(part)) return nullptr;
+        table = &table->as_table().at(part);
+    }
+    if (!table->is_table() || !table->as_table().count(std::string(key))) return nullptr;
+    return &table->as_table().at(std::string(key));
+}
+
+bool GetBool(std::string_view section, std::string_view key, bool fallback) {
+    const Ordered* v = Find(section, key);
+    return v && v->is_boolean() ? v->as_boolean() : fallback;
+}
+double GetNumber(std::string_view section, std::string_view key, double fallback) {
+    const Ordered* v = Find(section, key);
+    if (v && v->is_floating()) return v->as_floating();
+    if (v && v->is_integer()) return double(v->as_integer());
+    return fallback;
+}
+std::string GetString(std::string_view section, std::string_view key, const std::string& fallback) {
+    const Ordered* v = Find(section, key);
+    return v && v->is_string() ? v->as_string() : fallback;
+}
+
+// Sets one key, keeping the rest of the file (comments included) as it was. `literal` is TOML.
 void Write(std::string_view section, std::string_view key, const std::string& literal) {
-    RuntimeConfigFile::WriteSetting(section, key, literal);
+    const fs::path path = ConfigPath();
+    try {
+        auto root = toml::parse_str<toml::ordered_type_config>(ReadText(path));
+        auto value = toml::parse_str<toml::ordered_type_config>("v = " + literal);
+        Ordered* table = &root;
+        std::istringstream parts{std::string(section)};
+        for (std::string part; std::getline(parts, part, '.');) {
+            auto& parent = table->as_table();
+            if (!parent.count(part)) parent[part] = Ordered(toml::ordered_table{});
+            table = &parent.at(part);
+            if (!table->is_table()) return;
+        }
+        if (table->as_table_fmt().fmt == toml::table_format::implicit) {
+            table->as_table_fmt().fmt = toml::table_format::multiline;
+        }
+        auto& slot = table->as_table()[std::string(key)];
+        auto& updated = value.as_table().at("v");
+        updated.comments() = slot.comments();
+        slot = std::move(updated);
+        std::error_code ec;
+        fs::create_directories(path.parent_path(), ec);
+        const fs::path temp = path.string() + ".tmp";
+        {
+            std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+            if (!out) return;
+            out << toml::format(root);
+        }
+        fs::rename(temp, path, ec);
+        if (ec) {
+            fs::remove(path, ec);
+            fs::rename(temp, path, ec);
+        }
+    } catch (const std::exception&) {
+        // A Config.toml the game can't read either: leave it for the player to fix.
+    }
 }
 
 std::string Bool(bool value) { return value ? "true" : "false"; }
+std::string Str(const std::string& value) { return toml::format(toml::value(value)); }
+std::string Num(double value) {
+    std::ostringstream out;
+    out << value;
+    return out.str();
+}
 
 } // namespace
 
-std::string PathToUtf8(const fs::path& path) { return RuntimeConfigFile::PathToUtf8(path); }
-fs::path PathFromUtf8(const std::string& text) { return RuntimeConfigFile::PathFromUtf8(text); }
+void SelectGame(GameId id) { g_game = id; }
+GameId SelectedGame() { return g_game; }
+
+std::string PathToUtf8(const fs::path& path) {
+    const auto text = path.u8string();
+    return std::string(text.begin(), text.end());
+}
+fs::path PathFromUtf8(const std::string& text) {
+    return fs::path(std::u8string(text.begin(), text.end()));
+}
 
 LauncherSettings Load() {
-    RuntimeConfigFile::EnsureConfigFile();
-    // Same one-time defaults the game applies on its first run (main.cpp): borderless, and the
-    // picture rendered at the window's resolution. Applying them here keeps a choice made in the
-    // launcher before the game's first run from being overwritten by them.
-    if (RuntimeConfigFile::EtDefaultsVersion() < 1) {
-        RuntimeConfigFile::SetDisplayMode("borderless");
-        RuntimeConfigFile::SetResolutionMultiplier(0.0f);
-        RuntimeConfigFile::SetEtDefaultsVersion(1);
-        RuntimeConfigFile::Mutable() = RuntimeConfigFile::LoadConfigFile();
+    // Excite Truck's one-time defaults (its main.cpp applies the same on first run): borderless,
+    // and the picture rendered at the window's resolution. Applying them here keeps a choice
+    // made in the launcher before the game's first run from being overwritten by them.
+    if (g_game == GameId::Truck && GetNumber("excite_truck", "defaults_version", 0) < 1) {
+        Write("video", "display_mode", Str("borderless"));
+        Write("video", "resolution_multiplier", "0");
+        Write("excite_truck", "defaults_version", "1");
     }
-
     LauncherSettings s;
-    s.displayMode = RuntimeConfigFile::DisplayMode("windowed");
-    s.resolution = RuntimeConfigFile::ResolutionMultiplier(1.0f);
-    s.widescreen = RuntimeConfigFile::WidescreenEnabled(true);
-    s.vsync = RuntimeConfigFile::Vsync();
-    s.frameRate = RuntimeConfigFile::FrameInterpolationFps(0);
-    s.msaa = RuntimeConfigFile::Msaa(1);
-    s.anisotropic = RuntimeConfigFile::AnisotropicFiltering(true);
-    s.drawDistance = RuntimeConfigFile::EtDrawDistance();
-    s.showFps = RuntimeConfigFile::ShowFps();
-    s.graphicsApi = RuntimeConfigFile::GraphicsApi("auto");
-    s.volumePercent = static_cast<int>(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f + 0.5f);
-    s.invertAirControl = RuntimeConfigFile::InvertAirControl();
-    s.rumble = RuntimeConfigFile::RumbleEnabled();
-    s.texturePacks = RuntimeConfigFile::TextureReplacements(false);
-    s.musicFolder = ReadLauncherString("music_folder");
+    s.displayMode = GetString("video", "display_mode", "windowed");
+    s.resolution = float(std::max(0.0, GetNumber("video", "resolution_multiplier", 1.0)));
+    s.widescreen = GetBool("video", "widescreen", true);
+    s.vsync = GetBool("video", "vsync", false);
+    s.frameRate = unsigned(GetNumber("video", "frame_interpolation_fps", 0));
+    s.msaa = unsigned(GetNumber("video", "msaa", 1));
+    s.anisotropic = GetBool("video", "anisotropic_filtering", true);
+    s.drawDistance = float(GetNumber("excite_truck", "draw_distance", 1.0));
+    s.showFps = GetBool("video", "show_fps", true);
+    s.graphicsApi = GetString("video", "graphics_api", "auto");
+    s.volumePercent = int(std::clamp(GetNumber("audio", "volume", 1.0), 0.0, 1.0) * 100.0 + 0.5);
+    s.invertAirControl = GetBool("controller", "invert_air_control", true);
+    s.rumble = GetBool("controller", "rumble", true);
+    s.texturePacks = GetBool("video", "texture_replacements", false);
+    s.musicFolder = GetString("launcher", "music_folder", "");
     return s;
 }
 
-void SetDisplayMode(const std::string& mode) { RuntimeConfigFile::SetDisplayMode(mode); }
-void SetResolution(float multiplier) { RuntimeConfigFile::SetResolutionMultiplier(multiplier); }
+void SetDisplayMode(const std::string& mode) { Write("video", "display_mode", Str(mode)); }
+void SetResolution(float multiplier) { Write("video", "resolution_multiplier", Num(multiplier)); }
 void SetWidescreen(bool on) { Write("video", "widescreen", Bool(on)); }
-void SetVsync(bool on) { RuntimeConfigFile::SetVsync(on); }
-void SetFrameRate(unsigned fps) { RuntimeConfigFile::SetFrameInterpolationFps(fps); }
-void SetMsaa(unsigned samples) { RuntimeConfigFile::SetMsaa(samples); }
-void SetAnisotropic(bool on) { RuntimeConfigFile::SetAnisotropicFiltering(on); }
-void SetDrawDistance(float multiplier) { RuntimeConfigFile::SetEtDrawDistance(multiplier); }
-void SetShowFps(bool on) { RuntimeConfigFile::SetShowFps(on); }
-void SetGraphicsApi(const std::string& api) { Write("video", "graphics_api", RuntimeConfigFile::FormatString(api)); }
-void SetVolumePercent(int percent) { RuntimeConfigFile::SetAudioVolume(std::clamp(percent, 0, 100) / 100.0f); }
-void SetInvertAirControl(bool on) { RuntimeConfigFile::SetInvertAirControl(on); }
-void SetRumble(bool on) { RuntimeConfigFile::SetRumbleEnabled(on); }
+void SetVsync(bool on) { Write("video", "vsync", Bool(on)); }
+void SetFrameRate(unsigned fps) { Write("video", "frame_interpolation_fps", std::to_string(fps)); }
+void SetMsaa(unsigned samples) { Write("video", "msaa", std::to_string(samples)); }
+void SetAnisotropic(bool on) { Write("video", "anisotropic_filtering", Bool(on)); }
+void SetDrawDistance(float multiplier) { Write("excite_truck", "draw_distance", Num(multiplier)); }
+void SetShowFps(bool on) { Write("video", "show_fps", Bool(on)); }
+void SetGraphicsApi(const std::string& api) { Write("video", "graphics_api", Str(api)); }
+void SetVolumePercent(int percent) { Write("audio", "volume", Num(std::clamp(percent, 0, 100) / 100.0)); }
+void SetInvertAirControl(bool on) { Write("controller", "invert_air_control", Bool(on)); }
+void SetRumble(bool on) { Write("controller", "rumble", Bool(on)); }
 void SetTexturePacks(bool on) { Write("video", "texture_replacements", Bool(on)); }
-void SetMusicFolder(const std::string& folder) {
-    Write(kLauncherSection, "music_folder", RuntimeConfigFile::FormatString(folder));
-}
+void SetMusicFolder(const std::string& folder) { Write("launcher", "music_folder", Str(folder)); }
 
-fs::path ConfigPath() { return RuntimeConfigFile::ResolveConfigPath(); }
-fs::path UserDataDirectory() { return RuntimeConfigFile::ApplicationDataDirectory(); }
+fs::path ConfigPath() { return ConfigPathFor(g_game); }
+fs::path UserDataDirectory() { return InstallDir(g_game) / "UserData"; }
 fs::path DefaultMusicFolder() { return UserDataDirectory() / "Music"; }
 fs::path TextureFolder() { return UserDataDirectory() / "texture_replacements"; }
 
@@ -104,31 +192,27 @@ fs::path MusicFolder(const LauncherSettings& settings) {
     return DefaultMusicFolder();
 }
 
-fs::path DiscFolder() { return RuntimeConfigFile::ResolvedDvdRoot(); }
+fs::path DiscFolder(GameId id) {
+    // [paths] dvd_root, relative to the config file's folder; the build scripts put the disc
+    // in <install dir>/Disc.
+    const GameId previous = g_game;
+    g_game = id;
+    const std::string root = GetString("paths", "dvd_root", "");
+    g_game = previous;
+    if (root.empty()) {
+        return InstallDir(id) / "Disc";
+    }
+    fs::path path = PathFromUtf8(root);
+    if (path.is_relative()) {
+        path = ConfigPathFor(id).parent_path() / path;
+    }
+    return path.lexically_normal();
+}
+fs::path DiscFolder() { return DiscFolder(g_game); }
 
 bool DiscFound() {
     std::error_code ec;
     return fs::is_regular_file(DiscFolder() / "sys" / "main.dol", ec);
-}
-
-fs::path GameExecutable() {
-    const auto directory = RuntimeConfigFile::ExecutableDirectory();
-    if (!directory) {
-        return {};
-    }
-#ifdef _WIN32
-    const char* names[] = {"ExciteTruck.exe", "WiiCompiled.exe"};
-#else
-    const char* names[] = {"ExciteTruck", "WiiCompiled"};
-#endif
-    for (const char* name : names) {
-        std::error_code ec;
-        const fs::path candidate = *directory / name;
-        if (fs::is_regular_file(candidate, ec)) {
-            return candidate;
-        }
-    }
-    return {};
 }
 
 std::vector<fs::path> FindSongs(const fs::path& folder) {
@@ -154,8 +238,8 @@ std::vector<fs::path> FindSongs(const fs::path& folder) {
 
 // Same decoding as the game's window icon: files/mcbanner.res is a WIBN banner and the 48x48
 // RGB5A3 icon sits 0x60A0 bytes in, stored in 4x4 tiles.
-bool LoadGameIcon(std::vector<unsigned char>& rgba) {
-    std::ifstream in(DiscFolder() / "files" / "mcbanner.res", std::ios::binary);
+bool LoadGameIcon(GameId id, std::vector<unsigned char>& rgba) {
+    std::ifstream in(DiscFolder(id) / "files" / "mcbanner.res", std::ios::binary);
     if (!in) {
         return false;
     }

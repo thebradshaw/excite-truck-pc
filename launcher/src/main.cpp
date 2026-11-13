@@ -1,5 +1,5 @@
-// Excite Truck launcher: opens a window with the main menu and settings, then starts the game
-// (ExciteTruck.exe next to it) and closes.
+// Excite PC launcher: choose Excite Truck or Excitebots, set them up from your discs, change
+// their settings, then start the game.
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
@@ -11,8 +11,16 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "launcher_config.h"
-#include "banner.h"
+#include "setup_job.h"
 #include "ui.h"
 
 namespace cfg = launcher_config;
@@ -21,7 +29,7 @@ namespace {
 
 void SetGameIcon(SDL_Window* window) {
     std::vector<unsigned char> rgba;
-    if (!cfg::LoadGameIcon(rgba)) {
+    if (!cfg::LoadGameIcon(GameId::Truck, rgba) && !cfg::LoadGameIcon(GameId::Bots, rgba)) {
         return;
     }
     if (SDL_Surface* icon = SDL_CreateSurfaceFrom(48, 48, SDL_PIXELFORMAT_ABGR8888, rgba.data(), 48 * 4)) {
@@ -30,33 +38,59 @@ void SetGameIcon(SDL_Window* window) {
     }
 }
 
-// The Excite Truck logo from the player's disc (files/opening.bnr), or nullptr.
-SDL_Texture* LoadLogo(SDL_Renderer* renderer) {
-    Image image;
-    if (!LoadBannerTexture(cfg::DiscFolder() / "files" / "opening.bnr", "ex_logo.tpl", image)) {
-        return nullptr;
+#ifdef _WIN32
+struct FindWindowData {
+    DWORD pid;
+    HWND found;
+};
+
+BOOL CALLBACK FindGameWindow(HWND hwnd, LPARAM param) {
+    auto* data = reinterpret_cast<FindWindowData*>(param);
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == data->pid && IsWindowVisible(hwnd) && GetWindow(hwnd, GW_OWNER) == nullptr) {
+        data->found = hwnd;
+        return FALSE;
     }
-    SDL_Texture* texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC,
-                                             image.width, image.height);
-    if (texture == nullptr) {
-        return nullptr;
-    }
-    SDL_UpdateTexture(texture, nullptr, image.rgba.data(), image.width * 4);
-    SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
-    SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR);
-    UiSetLogo(texture, image.width, image.height);
-    return texture;
+    return TRUE;
 }
 
+// Windows only lets the program in front hand the front to another one, and the launcher closes
+// right after starting the game, so the game's window would open behind whatever was there. While
+// the launcher is still in front, wait for the game's window (up to 15 s) and bring it forward.
+void BringGameToFront(SDL_Process* process) {
+    const auto pid = static_cast<DWORD>(
+        SDL_GetNumberProperty(SDL_GetProcessProperties(process), SDL_PROP_PROCESS_PID_NUMBER, 0));
+    if (pid == 0) return;
+    AllowSetForegroundWindow(pid);
+    const Uint64 start = SDL_GetTicks();
+    while (SDL_GetTicks() - start < 15000) {
+        FindWindowData data{pid, nullptr};
+        EnumWindows(FindGameWindow, reinterpret_cast<LPARAM>(&data));
+        if (data.found) {
+            if (IsIconic(data.found)) ShowWindow(data.found, SW_RESTORE);
+            SetForegroundWindow(data.found);
+            BringWindowToTop(data.found);
+            return;
+        }
+        if (SDL_WaitProcess(process, false, nullptr)) return;   // it closed straight away
+        SDL_PumpEvents();   // keep the launcher's window responsive while we wait
+        SDL_Delay(50);
+    }
+}
+#endif
+
 // Starts the game in the background. Returns an empty string, or what went wrong.
-std::string LaunchGame() {
-    const auto game = cfg::GameExecutable();
+std::string LaunchGame(bool audioLog) {
+    const GameId id = UiSelectedGame();
+    const auto game = GameExecutable(id);
     if (game.empty()) {
-        return "ExciteTruck isn't in the launcher's folder. Run the build script again to put it back.";
+        return std::string(Game(id).title) + " isn't installed in " + cfg::PathToUtf8(InstallDir(id)) +
+               ". Go back to All Games and set it up again.";
     }
     if (!cfg::DiscFound()) {
         return "The game files from your disc aren't at " + cfg::PathToUtf8(cfg::DiscFolder()) +
-               ". Run the setup again with your disc image, or set dvd_root in " + cfg::PathToUtf8(cfg::ConfigPath()) +
+               ". Set the game up again from All Games, or set dvd_root in " + cfg::PathToUtf8(cfg::ConfigPath()) +
                ".";
     }
     const std::string exe = cfg::PathToUtf8(game);
@@ -72,22 +106,52 @@ std::string LaunchGame() {
     SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_ENVIRONMENT_POINTER, env);
     SDL_SetStringProperty(props, SDL_PROP_PROCESS_CREATE_WORKING_DIRECTORY_STRING, dir.c_str());
     SDL_SetBooleanProperty(props, SDL_PROP_PROCESS_CREATE_BACKGROUND_BOOLEAN, true);
+    SDL_IOStream* log = nullptr;
+    if (audioLog) {
+        // The game's output, with its sound-output stats switched on, into audio-log.txt.
+        SDL_SetEnvironmentVariable(env, "WC_TRACE_AUDIOQ", "1", true);
+        log = SDL_IOFromFile(cfg::PathToUtf8(game.parent_path() / "audio-log.txt").c_str(), "wb");
+        if (log) {
+            SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDOUT_NUMBER, SDL_PROCESS_STDIO_REDIRECT);
+            SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_STDOUT_POINTER, log);
+            SDL_SetBooleanProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_TO_STDOUT_BOOLEAN, true);
+        }
+    }
     SDL_Process* process = SDL_CreateProcessWithProperties(props);
     SDL_DestroyProperties(props);
     SDL_DestroyEnvironment(env);
+    if (log) SDL_CloseIO(log);   // the game has its own handle to the file
     if (process == nullptr) {
         return std::string("The game could not be started: ") + SDL_GetError();
     }
+#ifdef _WIN32
+    BringGameToFront(process);
+#endif
     SDL_DestroyProcess(process);   // the game keeps running on its own
     return {};
 }
 
 } // namespace
 
-int main(int, char**) {
-    SDL_SetHint(SDL_HINT_APP_NAME, "Excite Truck");
+// Closing while a game is being set up stops the setup: ask first.
+bool ConfirmClose(SDL_Window* window) {
+    if (!SetupBusy()) return true;
+    const SDL_MessageBoxButtonData buttons[] = {
+        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "Keep setting up"},
+        {0, 1, "Stop and close"},
+    };
+    const SDL_MessageBoxData box = {SDL_MESSAGEBOX_WARNING, window, "Excite PC",
+                                    "A game is still being set up. Closing the launcher stops the setup; setting it "
+                                    "up again later picks up where it stopped.",
+                                    2, buttons, nullptr};
+    int chosen = 0;
+    return SDL_ShowMessageBox(&box, &chosen) && chosen == 1;
+}
+
+int main(int argc, char** argv) {
+    SDL_SetHint(SDL_HINT_APP_NAME, "Excite PC");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_EVENTS)) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Excite Truck", SDL_GetError(), nullptr);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Excite PC", SDL_GetError(), nullptr);
         return 1;
     }
 
@@ -105,9 +169,9 @@ int main(int, char**) {
     if (const char* size = SDL_getenv("ET_LAUNCHER_SIZE")) {   // for testing, e.g. 960x540
         SDL_sscanf(size, "%dx%d", &width, &height);
     }
-    SDL_Window* window = SDL_CreateWindow("Excite Truck", width, height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
+    SDL_Window* window = SDL_CreateWindow("Excite PC", width, height, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
     if (window == nullptr) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Excite Truck", SDL_GetError(), nullptr);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Excite PC", SDL_GetError(), nullptr);
         return 1;
     }
     SDL_SetWindowMinimumSize(window, 800, 450);
@@ -115,7 +179,7 @@ int main(int, char**) {
     SetGameIcon(window);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, nullptr);
     if (renderer == nullptr) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Excite Truck", SDL_GetError(), window);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Excite PC", SDL_GetError(), window);
         return 1;
     }
     SDL_SetRenderVSync(renderer, 1);
@@ -124,8 +188,11 @@ int main(int, char**) {
     ImGui::CreateContext();
     ImGui_ImplSDL3_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer3_Init(renderer);
-    UiInit(window);
-    SDL_Texture* logo = LoadLogo(renderer);
+    UiInit(window, renderer);
+    // A disc image passed in (the setup program forwards one dropped on it).
+    if (argc > 1 && argv[1] && *argv[1]) {
+        UiDropFile(argv[1], -1.0f);
+    }
 
     bool running = true;
     bool shown = false;
@@ -142,10 +209,10 @@ int main(int, char**) {
             ImGui_ImplSDL3_ProcessEvent(&event);
             switch (event.type) {
                 case SDL_EVENT_QUIT:
-                    running = false;
+                    if (ConfirmClose(window)) running = false;
                     break;
                 case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
-                    if (event.window.windowID == SDL_GetWindowID(window)) running = false;
+                    if (event.window.windowID == SDL_GetWindowID(window) && ConfirmClose(window)) running = false;
                     break;
                 case SDL_EVENT_WINDOW_FOCUS_GAINED:
                     UiRefresh();
@@ -154,7 +221,7 @@ int main(int, char**) {
                     SDL_OpenGamepad(event.gdevice.which);   // read by the menu navigation
                     break;
                 case SDL_EVENT_DROP_FILE:
-                    if (event.drop.data) UiDropFile(event.drop.data);
+                    if (event.drop.data) UiDropFile(event.drop.data, event.drop.x);
                     break;
                 default:
                     break;
@@ -191,11 +258,18 @@ int main(int, char**) {
             shown = true;
         }
 
-        switch (UiTakeAction()) {
-            case UiAction::Launch: {
-                const std::string error = LaunchGame();
+        const UiAction action = UiTakeAction();
+        switch (action) {
+            case UiAction::Launch:
+            case UiAction::LaunchAudioLog: {
+                const std::string error = LaunchGame(action == UiAction::LaunchAudioLog);
                 if (error.empty()) {
-                    running = false;
+                    // Close, unless the other game is still being set up: then step aside.
+                    if (SetupBusy()) {
+                        SDL_MinimizeWindow(window);
+                    } else {
+                        running = false;
+                    }
                 } else {
                     UiShowError("Can't start the game", error.c_str());
                 }
@@ -209,12 +283,11 @@ int main(int, char**) {
         }
     }
 
+    SetupStopAll();
+    UiShutdown();
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
-    if (logo) {
-        SDL_DestroyTexture(logo);
-    }
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
