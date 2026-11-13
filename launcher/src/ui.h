@@ -4,11 +4,16 @@
 
 #include "games.h"
 
+#include <string>
+#include <utility>
+#include <vector>
+
 struct SDL_Window;
 struct SDL_Renderer;
 
 // LaunchAudioLog: start the game with its sound-output stats written to audio-log.txt in its folder.
-enum class UiAction { None, Launch, LaunchAudioLog, Quit };
+// LaunchNetplay: start the selected game in a Network Play room (UiNetplayEnv holds its settings).
+enum class UiAction { None, Launch, LaunchAudioLog, LaunchNetplay, Quit };
 
 void UiInit(SDL_Window* window, SDL_Renderer* renderer);
 void UiShutdown();
@@ -28,3 +33,5 @@ void UiDropFile(const char* path, float mouseX);
 void UiRefresh();
 // Shows an error in the help box (for example when the game could not be started).
 void UiShowError(const char* title, const char* text);
+// WC_NET_* variables for the game, set when Network Play is about to start it.
+const std::vector<std::pair<std::string, std::string>>& UiNetplayEnv();
