@@ -101,7 +101,9 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   here, so it is slack for his 60 FPS PC). Here: 1 press a second 6.1 s, 4 a second 3.6 s. The
   test machine runs ~10 FPS with ~6 game ticks per input read; slowing the VI retrace does not
   make it one tick a read (the race clock is not retrace-driven), so 60 FPS stays untested here. Round 18
-  (Chris: works well, "almost too fast"): top accel lowered 20%, to 8x. Trace with
+  (Chris: works well, "almost too fast"): top accel lowered 20%, to 8x, which on his PC fell
+  all the way back to the old slow swing, so it is back to 10x (round 19). The bar's response to
+  accel at 60 FPS has a threshold between 8x and 10x; slow it some other way if asked again. Trace with
   `WC_EB_TRACE_TURNS`. The hint is crash recovery's A, recorded from the game (it bounces down
   by about half its height and back twice every 0.55 s, pressed at the bottom), played twice as
   fast (`RedHintBounce`, `WC_EB_HINT_DROP` sprite units, default 17). On a yellow
