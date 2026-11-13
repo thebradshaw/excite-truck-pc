@@ -770,7 +770,7 @@ index 0000000..618e902
 +PPC_NATIVE_OVERRIDE_VOID(8E326A80, EB_ControllerTypeOptions_80326a80, (CpuContext* ctx), (ctx));
 diff --git a/runtime/src/hle/excitebots/eb_input.cpp b/runtime/src/hle/excitebots/eb_input.cpp
 new file mode 100644
-index 0000000..26bb627
+index 0000000..3040fae
 --- /dev/null
 +++ b/runtime/src/hle/excitebots/eb_input.cpp
 @@ -0,0 +1,968 @@
@@ -995,7 +995,7 @@ index 0000000..26bb627
 +const float kRedShakeEveryFast = 0.12f;
 +const float kRedShakeLengthFast = 0.08f;
 +const float kRedBarFullRate = 3.0f; // presses a second for full speed
-+const float kRedBarAccelFast = std::getenv("WC_EB_ACCEL_MAX") ? float(std::atof(std::getenv("WC_EB_ACCEL_MAX"))) : 6.8f;
++const float kRedBarAccelFast = std::getenv("WC_EB_ACCEL_MAX") ? float(std::atof(std::getenv("WC_EB_ACCEL_MAX"))) : 6.1f;
 +void EbRestoreRedBarAccel()
 +{
 +    if (g_redBarHelper != 0 && Memory::Read32(g_redBarHelper) == 0x804D27B0u) WriteF32(g_redBarHelper + 12, g_redBarBaseAccel);
@@ -1219,10 +1219,10 @@ index 0000000..26bb627
 +                // HumanRedBarHelper) keeps "red_bar_accel" at +12, 1.0 for
 +                // the player, which sets how hard each shake speeds the spin. Shakes alone are
 +                // capped by it, so frantic mashing barely beat steady pressing (Chris, round 15).
-+                // Scale it with the mash rate: as is at one press a second, 6.8 times at three
++                // Scale it with the mash rate: as is at one press a second, 6.1 times at three
 +                // or more (round 17: 10x works on Chris's PC, "almost too fast"; round 18's 8x
 +                // seemed to fall back to the slow swing, but that was the bot lookup failing on
-+                // some courses (fixed in round 21); round 22 8x, round 23 15% less; 4x took
++                // some courses (fixed in round 21); round 22 8x, 23 15% less, 24 10% less; 4x took
 +                // School_Mexico's bar from 7.6 s to 4.6 s here). Put back when the bar ends
 +                // (EbRestoreRedBarAccel).
 +                if (const uint32_t helper = HumanRedBarHelper()) {

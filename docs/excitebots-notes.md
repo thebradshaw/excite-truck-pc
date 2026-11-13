@@ -113,7 +113,7 @@ differs from Mario Kart's map only their entry point (`align.py` checks the size
   bytes). A red bar is also recognised from the helper's state (+8: 1 free, 2 near a bar, 4
   swinging), in case a race draws other meter art than the contests' 78583d305e906e63. The
   round 18 "regression" at 8x was most likely this, so round 22 tries 8x again; round 23
-  (Chris: "another 15%"): 6.8x.
+  (Chris: "another 15%"): 6.8x; round 24 (Chris: "another 10"): 6.1x.
 - Running legs (round 21, Chris: control them like the Wii Remote, with the stick side to side):
   on a non-crash shake prompt the remote's side-to-side rock follows the stick (past a third of
   the way is a full rock); A held still rocks at full speed (dentures); a still stick no longer
