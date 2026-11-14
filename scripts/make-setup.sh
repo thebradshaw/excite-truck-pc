@@ -40,7 +40,8 @@ patch_tree() {
         "$REPO/scripts/netplay-files.sh" "$ws" truck
     fi
     if [ "$game" = bots ]; then
-        git -C "$ws" apply --whitespace=nowarn "$REPO/patches/excitebots/0004-excitebots-runtime.patch"
+        for p in "$REPO"/patches/excitebots/*.patch; do git -C "$ws" apply --whitespace=nowarn "$p"; done
+        "$REPO/scripts/netplay-files.sh" "$ws" bots
         for p in "$REPO"/patches/excitebots/aurora/*.patch; do
             [ -f "$p" ] && git -C "$ws/aurora-main" apply --whitespace=nowarn "$p"
         done

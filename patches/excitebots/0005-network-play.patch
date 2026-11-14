@@ -1,0 +1,72 @@
+--- a/runtime/cmake/PublicProducts.cmake
++++ b/runtime/cmake/PublicProducts.cmake
+@@ -77,6 +77,17 @@
+     mkw_add_runtime_library(mkw_runtime_common OBJECT ${SOURCES})
+ endif()
+ 
++# Network Play (Excite PC): the room library, copied to runtime/netplay by the build scripts.
++if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/netplay/CMakeLists.txt")
++    if(NOT WIN32)
++        set(NETPLAY_MBEDTLS_TARGET mkw::mbedtls)
++    endif()
++    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/netplay" "${CMAKE_BINARY_DIR}/netplay" EXCLUDE_FROM_ALL)
++    if(TARGET mkw_runtime_common)
++        target_link_libraries(mkw_runtime_common PRIVATE excite_netplay)
++    endif()
++endif()
++
+ add_library(mkw_game_data OBJECT ${MKW_GAME_DATA_SOURCES})
+ mkw_configure_object_target(mkw_game_data)
+ target_compile_features(mkw_game_data PRIVATE cxx_std_20)
+@@ -188,6 +199,9 @@
+     mkw_apply_common_compile_options(${target})
+     target_link_libraries(${target} PRIVATE
+         mkw_platform mkw_base_shared mkw::pugixml mkw::toml11 mkw::cryptopp mkw::mbedtls)
++    if(TARGET excite_netplay)
++        target_link_libraries(${target} PRIVATE excite_netplay)
++    endif()
+ 
+     target_link_libraries(${target} PRIVATE
+         aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
+--- a/runtime/src/hle/vi.cpp
++++ b/runtime/src/hle/vi.cpp
+@@ -18,6 +18,9 @@
+ #include "system_bridge.h"
+ #include "hle/excite_truck/et_achievements.h"
+ void EbFrameTick(); // hle/excitebots/eb_input.cpp
++#include "netplay/netplay_runtime.h"
++
++namespace EbNetplay { void Tick(); }
+ #include <filesystem>
+ #include <sstream>
+ #include <cstdio>
+@@ -608,6 +611,11 @@
+         if (::GuestRegion::IsExcitebots()) {
+             EbFrameTick();
+         }
++        // Network Play (idle unless the launcher started a room): pump the room, then the game's part.
++        NetplayRuntime::Frame();
++        if (::GuestRegion::IsExcitebots()) {
++            EbNetplay::Tick();
++        }
+         // WC_MEMDUMP_REQ=<path>: creating <path> dumps MEM1/MEM2 to <path>_<n>.bin (testing only).
+         if (static const char* s_dumpReq = std::getenv("WC_MEMDUMP_REQ"); s_dumpReq) {
+             static uint32_t s_dumpCheck = 0, s_dumpIndex = 0;
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -53,6 +53,7 @@
+ // Defined in runtime/src/hle/audio/ax_mix.cpp. That header is private to the HLE
+ // directory and is not on this target's include path.
+ #include "hle/excite_truck/et_achievements.h"
++#include "netplay/netplay_runtime.h"
+ 
+ // Excite Truck draw distance (hle/gx/gx_pixel.cpp).
+ extern std::atomic<float> g_etDrawDistance;
+@@ -1743,6 +1744,7 @@
+     if (::GuestRegion::IsExciteTruck() || ::GuestRegion::IsExcitebots()) {
+         EtAchievements::DrawToasts();
+     }
++    NetplayRuntime::DrawOverlay();
+     DrawTopBar();
+     DrawExitPrompt();
+     DrawRestartPrompt();

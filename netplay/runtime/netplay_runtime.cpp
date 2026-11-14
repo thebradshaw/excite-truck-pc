@@ -74,9 +74,9 @@ void Start() {
     c.create = std::string(Env("WC_NET_CREATE")) == "1";
     c.game = Env("WC_NET_GAME");
     c.build = Env("WC_NET_BUILD");
-    // Excite Truck joiners pick the race in the course menu and then a truck before the race
+    // Joiners pick the race in the course menu and then a vehicle before the race
     // starts, so its races stay open a little longer.
-    if (c.game == "excite_truck") c.inviteSeconds = 20.0;
+    if (c.game == "excite_truck" || c.game == "excitebots") c.inviteSeconds = 20.0;
     g.session = std::make_unique<netplay::Session>(c);
     std::fprintf(stderr, "[netplay] %s room \"%s\" on %s as %s\n", c.create ? "opening" : "joining", c.room.c_str(),
                  c.url.c_str(), c.name.c_str());

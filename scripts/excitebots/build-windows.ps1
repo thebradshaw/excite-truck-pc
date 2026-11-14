@@ -285,6 +285,8 @@ if ($SetupMode) {
 $stampInputs = @(Get-ChildItem -LiteralPath (Join-Path $Repo 'patches') -Filter '*.patch' -File) +
     @(Get-ChildItem -LiteralPath (Join-Path $Repo 'patches\excitebots') -Filter '*.patch' -File) +
     @(Get-ChildItem -LiteralPath (Join-Path $Repo 'patches\excitebots\aurora') -Filter '*.patch' -File) +
+    @(Get-ChildItem -LiteralPath (Join-Path $Repo 'netplay') -Recurse -File -Include '*.h', '*.cpp', 'CMakeLists.txt' |
+        Where-Object { $_.FullName -notmatch '[\\/](tools|tests|server)[\\/]' }) +
     @(Get-Item -LiteralPath (Join-Path $Repo 'tools\sdk_map\et_versions.inc')) +
     @(Get-Item -LiteralPath (Join-Path $Repo 'tools\sdk_map\eb_versions.inc')) +
     @(Get-ChildItem -LiteralPath (Join-Path $Repo 'projects\excitebots') -File)
@@ -315,6 +317,19 @@ if ($current -ne $stamp) {
     }
     foreach ($patch in Get-ChildItem -LiteralPath (Join-Path $Repo 'patches\excitebots\aurora') -Filter '*.patch' -File | Sort-Object Name) {
         Run $git.Source @('-C', $aurora, 'apply', '--whitespace=nowarn', $patch.FullName)
+    }
+    # Network Play: the room library and the in-game layer with Excitebots' hooks.
+    $netLib = Join-Path $ws 'runtime\netplay'
+    $netSrc = Join-Path $ws 'runtime\src\netplay'
+    foreach ($d in $netLib, $netSrc) {
+        if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }
+        [IO.Directory]::CreateDirectory($d) | Out-Null
+    }
+    foreach ($item in 'CMakeLists.txt', 'include', 'src') {
+        Copy-Item -LiteralPath (Join-Path $Repo "netplay\$item") -Destination $netLib -Recurse -Force
+    }
+    foreach ($file in 'netplay_runtime.h', 'netplay_runtime.cpp', 'eb_netplay.cpp') {
+        Copy-Item -LiteralPath (Join-Path $Repo "netplay\runtime\$file") -Destination $netSrc -Force
     }
     $versions = Join-Path $ws 'runtime\include\guest_abi\guest_versions.inc'
     [IO.File]::AppendAllText($versions, [IO.File]::ReadAllText((Join-Path $Repo 'tools\sdk_map\et_versions.inc')))
