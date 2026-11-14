@@ -30,7 +30,7 @@ struct ShownToast {
 };
 
 struct Tag {
-    float x = 0, y = 0;
+    float x = 0, y = 0, focal = 1;   // view-space x/-z and y/-z, the projection's vertical focal length
     bool visible = false;
 };
 
@@ -227,10 +227,10 @@ void ShowToast(const std::string& text, uint32_t color) {
     g.toasts.push_back({{text, color}, Clock::now()});
 }
 
-void SetNameTag(uint8_t slot, float x, float y, bool visible) {
+void SetNameTag(uint8_t slot, float x, float y, float focal, bool visible) {
     if (slot >= g.tags.size()) return;
     std::lock_guard lock(g.mutex);
-    g.tags[slot] = Tag{x, y, visible};
+    g.tags[slot] = Tag{x, y, focal, visible};
 }
 
 // --- Overlay ---------------------------------------------------------------------------------------
@@ -285,7 +285,10 @@ void DrawOverlay() {
             if (m.member == s.MyId() || m.slot >= g.tags.size() || !g.tags[m.slot].visible) continue;
             const std::string name = s.NameOf(m.member);
             const float w = width(name);
-            const ImVec2 c(g.tags[m.slot].x * W, g.tags[m.slot].y * H);
+            // The game fills the window height and widens with it, so both axes use the height.
+            const Tag& t = g.tags[m.slot];
+            const ImVec2 c(W * 0.5f + t.x * t.focal * H * 0.5f, H * 0.5f - t.y * t.focal * H * 0.5f);
+            if (c.x < -W * 0.1f || c.x > W * 1.1f || c.y < 0 || c.y > H) continue;
             const ImVec2 min(c.x - w * 0.5f - 8 * scale, c.y - fs - 10 * scale), max(c.x + w * 0.5f + 8 * scale, c.y - 2 * scale);
             draw->AddRectFilled(min, max, IM_COL32(10, 10, 16, 170), 5 * scale);
             draw->AddRectFilled(ImVec2(min.x, max.y - 3 * scale), max, Rgba(s.ColorOf(m.member)), 2 * scale);

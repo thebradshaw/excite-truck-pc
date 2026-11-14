@@ -52,7 +52,9 @@ void LocalRaceEnded();
 // A short message in the top-right toast stack (stars from the others, join hints).
 void ShowToast(const std::string& text, uint32_t color = 0xFFFFFFFF);
 
-// Name tags, set by the game each frame for the slots of other people (screen pixels, 0..1).
-void SetNameTag(uint8_t slot, float x, float y, bool visible);
+// Name tags, set by the game each frame for the slots of other people: the point above the
+// vehicle in view space divided by its distance (x/-z, y/-z) and the projection's vertical focal
+// length (1 / tan(fov / 2)).
+void SetNameTag(uint8_t slot, float x, float y, float focal, bool visible);
 
 } // namespace NetplayRuntime

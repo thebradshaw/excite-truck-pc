@@ -272,6 +272,35 @@ void WritePose(uint32_t body, const Pose& target) {
     for (int i = 0; i < 3; ++i) WF(body + 0x28 + 4 * i, target.p[i]);
 }
 
+// Name tags: the race camera (player 0's) keeps its axes at 0x80583288 (screen x, up, back; three
+// floats each) and its position at 0x805832AC.
+constexpr uint32_t kCamera = 0x80583288u;
+
+float TagFocal() {
+    static const float f = [] {
+        const char* e = std::getenv("WC_NET_TAG_FOCAL");
+        return e && *e ? float(std::atof(e)) : 1.63339f;   // the race projection (near 0.5, far 2250)
+    }();
+    return f;
+}
+
+void UpdateTag(int slot, const float* pos, bool show) {
+    if (!show) {
+        NetplayRuntime::SetNameTag(uint8_t(slot), 0, 0, 1, false);
+        return;
+    }
+    float axes[9], cam[3], d[3];
+    for (int i = 0; i < 9; ++i) axes[i] = RF(kCamera + 4 * i);
+    for (int i = 0; i < 3; ++i) cam[i] = RF(kCamera + 0x24 + 4 * i);
+    for (int i = 0; i < 3; ++i) d[i] = pos[i] - cam[i];
+    d[1] += 2.2f;   // above the bot
+    const float x = axes[0] * d[0] + axes[1] * d[1] + axes[2] * d[2];
+    const float y = axes[3] * d[0] + axes[4] * d[1] + axes[5] * d[2];
+    const float z = axes[6] * d[0] + axes[7] * d[1] + axes[8] * d[2];
+    const bool visible = z < -2.0f && z > -400.0f;
+    NetplayRuntime::SetNameTag(uint8_t(slot), visible ? x / -z : 0, visible ? y / -z : 0, TagFocal(), visible);
+}
+
 // Pose another player's bot (or a CPU run on the starter's PC) where their PC says it is.
 // Called after the simulation step and before drawing.
 void ApplyGhosts() {
@@ -285,14 +314,17 @@ void ApplyGhosts() {
     const double now = NowSeconds();
     for (int slot = 0; slot < netplay::kRaceSlots; ++slot) {
         const Ghost& gh = g_eb.ghosts[slot];
-        if (!gh.has) continue;
-        const uint32_t body = RacerBody(RacerForSlot(slot));
-        if (!body) continue;
+        const uint32_t body = gh.has ? RacerBody(RacerForSlot(slot)) : 0;
+        if (!body) {
+            UpdateTag(slot, nullptr, false);
+            continue;
+        }
         const float ahead = float(std::clamp(now - gh.receivedAt, 0.0, 0.25));
         Pose target;
         QuatToMatrix(gh.state.rot, target.m);
         for (int i = 0; i < 3; ++i) target.p[i] = gh.state.pos[i] + gh.state.vel[i] * ahead;
         WritePose(body, target);
+        UpdateTag(slot, target.p, true);
     }
 }
 
