@@ -61,6 +61,15 @@ uint32_t Call(CpuContext* ctx, uint32_t fn) {
     return ctx->gpr[3];
 }
 
+// Testing: WC_NET_DUMP_RESULT=1 prints a race's result buffer when the race returns.
+void DumpResult(const char* what, uint32_t buf, uint32_t size) {
+    static const bool on = std::getenv("WC_NET_DUMP_RESULT") != nullptr;
+    if (!on || !IsGuestPointer(buf)) return;
+    std::fprintf(stderr, "[netplay] %s result at %08X:", what, buf);
+    for (uint32_t i = 0; i < size; i += 4) std::fprintf(stderr, "%s%08X", i % 32 ? " " : "\n  ", Memory::Read32(buf + i));
+    std::fprintf(stderr, "\n");
+}
+
 std::string ReadString(uint32_t addr, size_t max = 32) {
     std::string s;
     for (size_t i = 0; i < max; ++i) {
@@ -127,6 +136,7 @@ struct EtState {
     std::array<Pose, netplay::kRaceSlots> grid{};
     // Rank targets.
     uint32_t scaledObject = 0;
+    int scaleFactor = 1;         // players in the race when the targets were scaled
     int32_t originalThresholds[5] = {};
     // Finish.
     bool finishSent = false;
@@ -284,11 +294,29 @@ void RestoreThresholds() {
     g_et.scaledObject = 0;
 }
 
+// My race is over: the shared stars go back to one player's share (stars / players, the targets
+// back to normal), so the results and the save see a single-player race.
+void ScaleBackForSave() {
+    const int n = g_et.scaleFactor;
+    if (n > 1) {
+        if (const uint32_t e = ScoreEntry(true)) {
+            const float total = RF(e + 0x14);
+            const float share = std::round(total / float(n));
+            WF(e + 0x14, share);
+            WF(e + 0x18, share);
+            std::fprintf(stderr, "[netplay] race over: %.0f shared stars -> %.0f for this save (%d players)\n", total, share, n);
+        }
+    }
+    RestoreThresholds();
+    g_et.scaleFactor = 1;
+}
+
 void ResetRaceState() {
     RestoreThresholds();
     g_et.holding = false;
     g_et.scoreInit = false;
     g_et.finishSent = false;
+    g_et.scaleFactor = 1;
     g_et.ghosts = {};
     g_et.gridCaptured = false;
     g_et.lastSentAt = {};
@@ -334,11 +362,12 @@ struct EtBridge final : NetplayRuntime::Bridge {
                     if (v > 0) Memory::Write32(obj + 4 * i, uint32_t(netplay::ScaleRequirement(v, race.Players())));
                 }
                 g_et.scaledObject = obj;
+                g_et.scaleFactor = race.Players();
             }
         }
 
-        // My stars go to the others; theirs are added to my count and shown.
-        if (const uint32_t e = ScoreEntry(true)) {
+        // My stars go to the others; theirs are added to my count and shown (until my race is over).
+        if (const uint32_t e = g_et.finishSent ? 0 : ScoreEntry(true)) {
             const float score = RF(e + 0x14);
             if (!g_et.scoreInit || score + 0.5f < g_et.countedScore) {
                 g_et.countedScore = score;   // race (re)started
@@ -368,6 +397,7 @@ struct EtBridge final : NetplayRuntime::Bridge {
                 if (place >= 1 && place <= 6) {
                     s.Finished(uint8_t(place), RF(awards + 0x2B8));
                     g_et.finishSent = true;
+                    ScaleBackForSave();
                 }
             }
         }
@@ -547,6 +577,7 @@ extern "C" void ET_ExciteRaceRun_8027e024(CpuContext* ctx)
     ctx->gpr[6] = extra;
     ctx->gpr[7] = 0;
     Call(ctx, 0x8023B9ECu);
+    DumpResult("excite race", buf, 0xB0);
     RaceEnded();
     ctx->gpr[1] = oldSp;
 }
@@ -572,6 +603,7 @@ extern "C" void ET_RunContest_8023beb8(CpuContext* ctx)
     ctx->gpr[6] = 0;
     ctx->gpr[7] = 0;
     Call(ctx, 0x8023B9ECu);
+    DumpResult("contest", r5, 0xB0);
     RaceEnded();
 }
 PPC_NATIVE_OVERRIDE_VOID(8F23BEB8, ET_RunContest_8023beb8, (CpuContext* ctx), (ctx));

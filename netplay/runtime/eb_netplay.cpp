@@ -64,6 +64,15 @@ uint32_t Call(CpuContext* ctx, uint32_t fn) {
     return ctx->gpr[3];
 }
 
+// Testing: WC_NET_DUMP_RESULT=1 prints a race's parameter block and result buffer when it returns.
+void DumpWords(const char* what, uint32_t buf, uint32_t size) {
+    static const bool on = std::getenv("WC_NET_DUMP_RESULT") != nullptr;
+    if (!on || !IsGuestPointer(buf)) return;
+    std::fprintf(stderr, "[netplay] %s at %08X:", what, buf);
+    for (uint32_t i = 0; i < size; i += 4) std::fprintf(stderr, "%s%08X", i % 32 ? " " : "\n  ", Memory::Read32(buf + i));
+    std::fprintf(stderr, "\n");
+}
+
 std::string ReadString(uint32_t addr, size_t max = 40) {
     std::string s;
     for (size_t i = 0; i < max; ++i) {
@@ -139,6 +148,7 @@ struct EbState {
     bool gridCaptured = false;
     std::array<Pose, netplay::kRaceSlots> grid{};   // racer i's start spot
     uint32_t scaledObject = 0;
+    int scaleFactor = 1;       // players in the race when the targets were scaled
     int32_t originalThresholds[5] = {};
     bool finishSent = false;
     uint8_t lastPlace = 0;     // the player's place, kept each frame for the finish report
@@ -349,11 +359,33 @@ void RestoreThresholds() {
     g_eb.scaledObject = 0;
 }
 
+// Divides the player's stars by the players the targets were scaled for and restores the targets.
+void ScaleBackForSave() {
+    const int n = g_eb.scaleFactor;
+    const uint32_t block = ScoreBlock();
+    if (n > 1 && block) {
+        const int total = ReadScore(block);
+        const int target = (total + n / 2) / n;
+        int sum = 0;
+        for (int k = 0; k < 4; ++k) {
+            const uint32_t a = block + 0x08 + 8 * uint32_t(k);
+            const int v = int(R32(a)) / n;
+            Memory::Write32(a, uint32_t(v));
+            sum += v;
+        }
+        Memory::Write32(block + 0x08, R32(block + 0x08) + uint32_t(target - sum));
+        std::fprintf(stderr, "[netplay] race over: %d shared stars -> %d for this save (%d players)\n", total, target, n);
+    }
+    RestoreThresholds();
+    g_eb.scaleFactor = 1;
+}
+
 void ResetRaceState() {
     RestoreThresholds();
     g_eb.holding = false;
     g_eb.scoreInit = false;
     g_eb.finishSent = false;
+    g_eb.scaleFactor = 1;
     g_eb.lastPlace = 0;
     g_eb.ghosts = {};
     g_eb.gridCaptured = false;
@@ -396,11 +428,28 @@ struct EbBridge final : NetplayRuntime::Bridge {
                     if (v > 0) Memory::Write32(obj + 4 * i, uint32_t(netplay::ScaleRequirement(v, race.Players())));
                 }
                 g_eb.scaledObject = obj;
+                g_eb.scaleFactor = race.Players();
             }
         }
 
-        // My stars go to the others; theirs are added to my count and shown.
-        if (const uint32_t block = ScoreBlock()) {
+        // My race is over (the tracker gets my finish time, also when time runs out): report the
+        // place, then bring the shared stars back to one player's share (stars / players, the
+        // targets back to normal) so the results and the save see a single-player race.
+        if (const int human = HumanRacer(); human >= 0 && !g_eb.finishSent && race.phase == netplay::RaceView::Racing) {
+            float finishTime = RF(RacerEntry(human) + 0x14);
+            // Testing: WC_NET_TEST_FINISH=<seconds> ends my race at that race time.
+            static const float testFinish = [] { const char* e = std::getenv("WC_NET_TEST_FINISH"); return e ? float(std::atof(e)) : 0.0f; }();
+            if (testFinish > 0 && RF(kRaceClock) > testFinish) finishTime = RF(kRaceClock);
+            if (finishTime > 0) {
+                const uint32_t place = R32(RacerEntry(human) + 0x08);
+                s.Finished(uint8_t(place >= 1 && place <= 6 ? place : 6), finishTime);
+                g_eb.finishSent = true;
+                ScaleBackForSave();
+            }
+        }
+
+        // My stars go to the others; theirs are added to my count and shown (until my race is over).
+        if (const uint32_t block = g_eb.finishSent ? 0 : ScoreBlock()) {
             // Testing: WC_NET_TEST_STARS=1 gives the player a star every 10 seconds of racing.
             static const bool testStars = std::getenv("WC_NET_TEST_STARS") != nullptr;
             static double nextTestStar = 0;
@@ -586,6 +635,8 @@ extern "C" void EB_RaceThunk_802da830(CpuContext* ctx)
     RaceStarting(param);
     ctx->gpr[3] = param;
     Call(ctx, 0x802DA160u);
+    DumpWords("race param", param, 0x14);
+    DumpWords("race result", R32(param + 0x0C), 0xC0);
     RaceEnded();
 }
 PPC_NATIVE_OVERRIDE_VOID(8E2DA830, EB_RaceThunk_802da830, (CpuContext* ctx), (ctx));
@@ -628,6 +679,7 @@ extern "C" void EB_GameDoEve_802da940(CpuContext* ctx)
     RaceStarting(param);
     ctx->gpr[3] = param;
     Call(ctx, 0x802DA160u);
+    DumpWords("race param", param, 0x14);
     RaceEnded();
     ctx->gpr[1] = oldSp;
 }
