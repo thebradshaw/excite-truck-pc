@@ -81,7 +81,7 @@ void BringGameToFront(SDL_Process* process) {
 #endif
 
 // Starts the game in the background. Returns an empty string, or what went wrong.
-std::string LaunchGame(bool audioLog) {
+std::string LaunchGame(bool audioLog, bool netplay = false) {
     const GameId id = UiSelectedGame();
     const auto game = GameExecutable(id);
     if (game.empty()) {
@@ -100,6 +100,9 @@ std::string LaunchGame(bool audioLog) {
     SDL_Environment* env = SDL_CreateEnvironment(true);
     if (const char* music = UiMusicFolderForGame(); music && *music) {
         SDL_SetEnvironmentVariable(env, "WC_MUSIC_DIR", music, true);
+    }
+    if (netplay) {
+        for (const auto& [key, value] : UiNetplayEnv()) SDL_SetEnvironmentVariable(env, key.c_str(), value.c_str(), true);
     }
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_ARGS_POINTER, (void*)args);
@@ -261,8 +264,9 @@ int main(int argc, char** argv) {
         const UiAction action = UiTakeAction();
         switch (action) {
             case UiAction::Launch:
-            case UiAction::LaunchAudioLog: {
-                const std::string error = LaunchGame(action == UiAction::LaunchAudioLog);
+            case UiAction::LaunchAudioLog:
+            case UiAction::LaunchNetplay: {
+                const std::string error = LaunchGame(action == UiAction::LaunchAudioLog, action == UiAction::LaunchNetplay);
                 if (error.empty()) {
                     // Close, unless the other game is still being set up: then step aside.
                     if (SetupBusy()) {

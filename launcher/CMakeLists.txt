@@ -79,6 +79,13 @@ target_compile_definitions(ExcitePC PRIVATE
     IMGUI_DISABLE_DEBUG_TOOLS)
 target_link_libraries(ExcitePC PRIVATE SDL3::SDL3-static)
 
+# Network Play (netplay/): the quick menu checks the room with the server before starting a game.
+# ET_NETPLAY_SERVER is the default cloud server (wss://...); empty asks the player for it.
+set(ET_NETPLAY_SERVER "" CACHE STRING "Default Network Play cloud server address (wss://...)")
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../netplay" netplay)
+target_link_libraries(ExcitePC PRIVATE excite_netplay)
+target_compile_definitions(ExcitePC PRIVATE ET_NETPLAY_SERVER="${ET_NETPLAY_SERVER}")
+
 if(WIN32)
     set_target_properties(ExcitePC PROPERTIES WIN32_EXECUTABLE TRUE)
     target_link_libraries(ExcitePC PRIVATE shell32 ole32)

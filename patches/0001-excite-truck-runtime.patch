@@ -5269,6 +5269,23 @@ index 2646e0f..53f892e 100644
      using namespace MkwDynamicAspect;
      const uint32_t width43 =
          g_widescreenConfigured ? EggRecordWidth(kEggRecordWidth43, surfaceWidth, surfaceHeight)
+diff --git a/runtime/src/hle/audio/audio.cpp b/runtime/src/hle/audio/audio.cpp
+index fd19215..ef52360 100644
+--- a/runtime/src/hle/audio/audio.cpp
++++ b/runtime/src/hle/audio/audio.cpp
+@@ -504,8 +504,11 @@ int64_t ConsumeAudioPollDeltaMicros()
+     static thread_local Clock::time_point lastPoll = Clock::now();
+ 
+     const Clock::time_point now = Clock::now();
++    // Advance the cursor by the whole microseconds handed out, not to `now`: a busy race polls
++    // ~100,000 times a second, and dropping each poll's leftover fraction of a microsecond lost
++    // about 5% of the time, so the game made too little sound and the output kept running dry.
+     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - lastPoll).count();
+-    lastPoll = now;
++    lastPoll += std::chrono::microseconds(elapsed);
+ 
+     if (elapsed < 0) {
+         elapsed = 0;
 diff --git a/runtime/src/hle/excite_truck/et_achievement_list.inc b/runtime/src/hle/excite_truck/et_achievement_list.inc
 new file mode 100644
 index 0000000..769111c

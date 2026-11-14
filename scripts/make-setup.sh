@@ -35,8 +35,13 @@ patch_tree() {
     git -C "$ws/aurora-main" apply --whitespace=nowarn "$REPO/patches/0002-aurora-channel-colors.patch"
     git -C "$ws" apply --whitespace=nowarn "$REPO/patches/0003-xbox-button-prompts.patch"
     cat "$REPO/tools/sdk_map/et_versions.inc" >> "$ws/runtime/include/guest_abi/guest_versions.inc"
+    if [ "$game" = truck ]; then
+        git -C "$ws" apply --whitespace=nowarn "$REPO/patches/0004-network-play.patch"
+        "$REPO/scripts/netplay-files.sh" "$ws" truck
+    fi
     if [ "$game" = bots ]; then
-        git -C "$ws" apply --whitespace=nowarn "$REPO/patches/excitebots/0004-excitebots-runtime.patch"
+        for p in "$REPO"/patches/excitebots/*.patch; do git -C "$ws" apply --whitespace=nowarn "$p"; done
+        "$REPO/scripts/netplay-files.sh" "$ws" bots
         for p in "$REPO"/patches/excitebots/aurora/*.patch; do
             [ -f "$p" ] && git -C "$ws/aurora-main" apply --whitespace=nowarn "$p"
         done

@@ -92,7 +92,8 @@ echo "$DOL_SHA256  $DATA/sys/main.dol" | sha256sum -c --quiet ||
 
 # --- WiiCompiled, patched for Excite Truck ------------------------------------------------
 WS="$WORK/wiicompiled"
-PATCH_STAMP="$(cat "$REPO"/patches/*.patch "$REPO/tools/sdk_map/et_versions.inc" "$REPO"/projects/excite-truck/* |
+PATCH_STAMP="$(cat "$REPO"/patches/*.patch "$REPO/tools/sdk_map/et_versions.inc" "$REPO"/projects/excite-truck/* \
+    "$REPO"/netplay/CMakeLists.txt "$REPO"/netplay/include/netplay/* "$REPO"/netplay/src/* "$REPO"/netplay/runtime/* |
     sha256sum | cut -c1-16)"
 if [ "$(cat "$WS/.et-patched" 2>/dev/null)" != "$PATCH_STAMP" ]; then
     step "Fetching WiiCompiled (the recompiler and runtime this port is built on)" 12
@@ -111,6 +112,8 @@ if [ "$(cat "$WS/.et-patched" 2>/dev/null)" != "$PATCH_STAMP" ]; then
     git -C "$WS" apply --whitespace=nowarn "$REPO/patches/0001-excite-truck-runtime.patch"
     git -C "$WS/aurora-main" apply --whitespace=nowarn "$REPO/patches/0002-aurora-channel-colors.patch"
     git -C "$WS" apply --whitespace=nowarn "$REPO/patches/0003-xbox-button-prompts.patch"
+    git -C "$WS" apply --whitespace=nowarn "$REPO/patches/0004-network-play.patch"
+    "$REPO/scripts/netplay-files.sh" "$WS" truck
     cat "$REPO/tools/sdk_map/et_versions.inc" >> "$WS/runtime/include/guest_abi/guest_versions.inc"
     mkdir -p "$WS/projects/excite-truck"
     cp "$REPO"/projects/excite-truck/* "$WS/projects/excite-truck/"

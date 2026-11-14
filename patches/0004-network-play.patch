@@ -1,0 +1,129 @@
+--- a/runtime/cmake/PublicProducts.cmake
++++ b/runtime/cmake/PublicProducts.cmake
+@@ -77,6 +77,17 @@
+     mkw_add_runtime_library(mkw_runtime_common OBJECT ${SOURCES})
+ endif()
+ 
++# Network Play (Excite PC): the room library, copied to runtime/netplay by the build scripts.
++if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/netplay/CMakeLists.txt")
++    if(NOT WIN32)
++        set(NETPLAY_MBEDTLS_TARGET mkw::mbedtls)
++    endif()
++    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/netplay" "${CMAKE_BINARY_DIR}/netplay" EXCLUDE_FROM_ALL)
++    if(TARGET mkw_runtime_common)
++        target_link_libraries(mkw_runtime_common PRIVATE excite_netplay)
++    endif()
++endif()
++
+ add_library(mkw_game_data OBJECT ${MKW_GAME_DATA_SOURCES})
+ mkw_configure_object_target(mkw_game_data)
+ target_compile_features(mkw_game_data PRIVATE cxx_std_20)
+@@ -188,6 +199,9 @@
+     mkw_apply_common_compile_options(${target})
+     target_link_libraries(${target} PRIVATE
+         mkw_platform mkw_base_shared mkw::pugixml mkw::toml11 mkw::cryptopp mkw::mbedtls)
++    if(TARGET excite_netplay)
++        target_link_libraries(${target} PRIVATE excite_netplay)
++    endif()
+ 
+     target_link_libraries(${target} PRIVATE
+         aurora::gx aurora::pad aurora::si aurora::vi aurora::mtx)
+--- a/runtime/src/hle/vi.cpp
++++ b/runtime/src/hle/vi.cpp
+@@ -17,6 +17,9 @@
+ #include <aurora/gfx.h>
+ #include "system_bridge.h"
+ #include "hle/excite_truck/et_achievements.h"
++#include "netplay/netplay_runtime.h"
++
++namespace EtNetplay { void Tick(); }
+ #include <filesystem>
+ #include <sstream>
+ #include <cstdio>
+@@ -604,6 +607,11 @@
+         if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
+             EtAchievements::Tick();
+         }
++        // Network Play (idle unless the launcher started a room): pump the room, then the game's part.
++        NetplayRuntime::Frame();
++        if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
++            EtNetplay::Tick();
++        }
+         // WC_MEMDUMP_REQ=<path>: creating <path> dumps MEM1/MEM2 to <path>_<n>.bin (testing only).
+         if (static const char* s_dumpReq = std::getenv("WC_MEMDUMP_REQ"); s_dumpReq) {
+             static uint32_t s_dumpCheck = 0, s_dumpIndex = 0;
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -53,6 +53,7 @@
+ // Defined in runtime/src/hle/audio/ax_mix.cpp. That header is private to the HLE
+ // directory and is not on this target's include path.
+ #include "hle/excite_truck/et_achievements.h"
++#include "netplay/netplay_runtime.h"
+ 
+ // Excite Truck draw distance (hle/gx/gx_pixel.cpp).
+ extern std::atomic<float> g_etDrawDistance;
+@@ -1714,6 +1715,7 @@
+     if (::GuestRegion::Current() == ::GuestRegion::Id::ExciteTruck) {
+         EtAchievements::DrawToasts();
+     }
++    NetplayRuntime::DrawOverlay();
+     DrawTopBar();
+     DrawExitPrompt();
+     DrawRestartPrompt();
+--- a/runtime/src/hle/excite_truck/et_input.cpp
++++ b/runtime/src/hle/excite_truck/et_input.cpp
+@@ -24,6 +24,7 @@
+ //
+ // Addresses use the 0x8F000000 alias (see et_hooks.cpp).
+ 
++#include "netplay/netplay_runtime.h"
+ #include <cstdio>
+ #include <SDL3/SDL_gamepad.h>
+ #include <SDL3/SDL_keyboard.h>
+@@ -47,6 +48,7 @@
+ #include <cstdint>
+ #include <cstdlib>
+ #include <cstring>
++#include <string>
+ 
+ #include "abi_bridge.h"
+ #include "hle_stubs.h"
+@@ -302,7 +304,10 @@
+         if (button(SDL_GAMEPAD_BUTTON_START)) in.hold |= kWpadPlus;
+         // Select/View: in a race it is the Wii A button ("Press A to reset" when reversing),
+         // like Y. In the menus it stays the Wii minus button.
+-        if (button(SDL_GAMEPAD_BUTTON_BACK)) in.hold |= racing ? kWpadA : kWpadMinus;
++        // During Network Play the menus give View to the room (join an invite, show the room).
++        if (button(SDL_GAMEPAD_BUTTON_BACK) && (racing || !NetplayRuntime::OwnsViewButton())) {
++            in.hold |= racing ? kWpadA : kWpadMinus;
++        }
+         if (racing) {
+             const bool aDown = button(SDL_GAMEPAD_BUTTON_SOUTH);
+             if (aDown) {
+@@ -398,6 +403,26 @@
+             lastHad2 = (in.hold & kWpad2) != 0;
+         }
+     }
++    // Testing: WC_INPUT_FILE=<path> presses the button named in that file ("2", "1", "A", "B",
++    // "PLUS", "MINUS", "UP", "DOWN", "LEFT", "RIGHT") for 4 frames, then deletes the file.
++    if (static const char* s_inputFile = std::getenv("WC_INPUT_FILE"); s_inputFile) {
++        static int pressUntil = -1, pressBits = 0, lastCheck = -1;
++        if (g_gxFrameCount != lastCheck && pressUntil < g_gxFrameCount && (g_gxFrameCount % 4) == 0) {
++            lastCheck = g_gxFrameCount;
++            if (FILE* f = std::fopen(s_inputFile, "r")) {
++                char name[16] = {};
++                const bool ok = std::fscanf(f, "%15s", name) == 1;
++                std::fclose(f);
++                std::remove(s_inputFile);
++                const std::string n = ok ? name : "";
++                pressBits = n == "2" ? kWpad2 : n == "1" ? kWpad1 : n == "A" ? kWpadA : n == "B" ? kWpadB
++                          : n == "PLUS" ? kWpadPlus : n == "MINUS" ? kWpadMinus : n == "UP" ? kSidewaysUp
++                          : n == "DOWN" ? kSidewaysDown : n == "LEFT" ? kSidewaysLeft : n == "RIGHT" ? kSidewaysRight : 0;
++                pressUntil = g_gxFrameCount + 4;
++            }
++        }
++        if (g_gxFrameCount < pressUntil) in.hold |= pressBits;
++    }
+     return in;
+ }
+ 

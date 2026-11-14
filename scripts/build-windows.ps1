@@ -282,6 +282,8 @@ if ($SetupMode) {
     }
 } else {
 $stampInputs = @(Get-ChildItem -LiteralPath (Join-Path $Repo 'patches') -Filter '*.patch' -File) +
+    @(Get-ChildItem -LiteralPath (Join-Path $Repo 'netplay') -Recurse -File -Include '*.h', '*.cpp', 'CMakeLists.txt' |
+        Where-Object { $_.FullName -notmatch '[\\/](tools|tests|server)[\\/]' }) +
     @(Get-Item -LiteralPath (Join-Path $Repo 'tools\sdk_map\et_versions.inc')) +
     @(Get-ChildItem -LiteralPath (Join-Path $Repo 'projects\excite-truck') -File)
 $stamp = ($stampInputs | Sort-Object FullName | ForEach-Object { Sha256 $_.FullName }) -join ','
@@ -306,6 +308,20 @@ if ($current -ne $stamp) {
     Run $git.Source @('-C', $ws, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0001-excite-truck-runtime.patch'))
     Run $git.Source @('-C', $aurora, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0002-aurora-channel-colors.patch'))
     Run $git.Source @('-C', $ws, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0003-xbox-button-prompts.patch'))
+    Run $git.Source @('-C', $ws, 'apply', '--whitespace=nowarn', (Join-Path $Repo 'patches\0004-network-play.patch'))
+    # Network Play: the room library and the in-game layer with Excite Truck's hooks.
+    $netLib = Join-Path $ws 'runtime\netplay'
+    $netSrc = Join-Path $ws 'runtime\src\netplay'
+    foreach ($d in $netLib, $netSrc) {
+        if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }
+        [IO.Directory]::CreateDirectory($d) | Out-Null
+    }
+    foreach ($item in 'CMakeLists.txt', 'include', 'src') {
+        Copy-Item -LiteralPath (Join-Path $Repo "netplay\$item") -Destination $netLib -Recurse -Force
+    }
+    foreach ($file in 'netplay_runtime.h', 'netplay_runtime.cpp', 'et_netplay.cpp') {
+        Copy-Item -LiteralPath (Join-Path $Repo "netplay\runtime\$file") -Destination $netSrc -Force
+    }
     $versions = Join-Path $ws 'runtime\include\guest_abi\guest_versions.inc'
     [IO.File]::AppendAllText($versions, [IO.File]::ReadAllText((Join-Path $Repo 'tools\sdk_map\et_versions.inc')))
     $project = Join-Path $ws 'projects\excite-truck'

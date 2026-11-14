@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <system_error>
@@ -19,6 +20,9 @@
 #include "banner.h"
 #include "games.h"
 #include "launcher_config.h"
+#include "netplay/protocol.h"
+#include "netplay/relay_server.h"
+#include "netplay/session.h"
 #include "scene.h"
 #include "setup_job.h"
 #include "vehicles.h"
@@ -86,7 +90,8 @@ ImGuiID g_helpItem = 0;
 // Controller and keyboard focus. Every focusable thing registers itself while it is drawn, with
 // its region (menu or page), row and column; moves are worked out from last frame's list.
 // Home: one region per game card, and one for the row under them.
-enum Region { kMenuRegion = 0, kPageRegion = 1, kCardRegion = 2, kHomeBottomRegion = 2 + kGameCount };
+enum Region { kMenuRegion = 0, kPageRegion = 1, kCardRegion = 2, kHomeBottomRegion = 2 + kGameCount,
+              kNetButtonRegion = 3 + kGameCount };
 enum class NavCmd { Up, Down, Left, Right, Accept, Back };
 struct NavItem {
     ImGuiID id;
@@ -105,6 +110,8 @@ bool g_enterPage = false;        // after opening a page with A, put the cursor 
 bool g_resetPageScroll = false;
 ImGuiID g_menuIds[8] = {};
 void GoHome();
+bool NetplayIsOpen();
+void NetplayBack();
 bool IsPageMenuItem(size_t index);
 Page MenuPage(size_t index);
 
@@ -233,6 +240,8 @@ void Nav(NavCmd cmd) {
     }
     const bool onCard = cur->region >= kCardRegion && cur->region < kCardRegion + kGameCount;
     if (onCard) g_lastCard = cur->region;
+    const bool haveNetButton = std::any_of(g_navLast.begin(), g_navLast.end(),
+                                           [](const NavItem& i) { return i.region == kNetButtonRegion; });
     int rank = 0;
     {
         const std::vector<int> rows = RegionRows(cur->region);
@@ -255,8 +264,12 @@ void Nav(NavCmd cmd) {
             if (exists(cur->region, row)) {
                 g_focus = RowEntry(cur->region, row, cur->col);
                 g_scrollToFocus = true;
-            } else if (onCard && cmd == NavCmd::Down) {
+            } else if ((onCard || cur->region == kNetButtonRegion) && cmd == NavCmd::Down) {
                 FocusRegion(kHomeBottomRegion, 0);
+            } else if (NetplayIsOpen() && cur->region == kPageRegion && cmd == NavCmd::Down) {
+                FocusRegion(kHomeBottomRegion, 0);
+            } else if (NetplayIsOpen() && cur->region == kHomeBottomRegion && cmd == NavCmd::Up) {
+                FocusRegion(kPageRegion, 99);
             } else if (cur->region == kHomeBottomRegion && cmd == NavCmd::Up) {
                 FocusRegion(g_lastCard, 99);
             }
@@ -269,6 +282,10 @@ void Nav(NavCmd cmd) {
                 g_focus = id;
             } else if (cur->region == kPageRegion) {
                 FocusMenu();
+            } else if (onCard && cur->region == kCardRegion + 1 && haveNetButton) {
+                FocusRegion(kNetButtonRegion, 0);
+            } else if (cur->region == kNetButtonRegion) {
+                FocusRegion(kCardRegion, 0);
             } else if (onCard && cur->region > kCardRegion) {
                 FocusRegion(cur->region - 1, rank);
             }
@@ -280,6 +297,10 @@ void Nav(NavCmd cmd) {
                 g_focus = id;
             } else if (cur->region == kMenuRegion) {
                 FocusPage();
+            } else if (onCard && cur->region == kCardRegion && haveNetButton) {
+                FocusRegion(kNetButtonRegion, 0);
+            } else if (cur->region == kNetButtonRegion) {
+                FocusRegion(kCardRegion + 1, 0);
             } else if (onCard && cur->region + 1 < kCardRegion + kGameCount) {
                 FocusRegion(cur->region + 1, rank);
             }
@@ -288,7 +309,9 @@ void Nav(NavCmd cmd) {
             g_activate = g_focus;
             break;
         case NavCmd::Back:
-            if (cur->region == kPageRegion) {
+            if (NetplayIsOpen()) {
+                NetplayBack();
+            } else if (cur->region == kPageRegion) {
                 FocusMenu();
             } else if (cur->region == kMenuRegion) {
                 GoHome();
@@ -299,6 +322,7 @@ void Nav(NavCmd cmd) {
 
 // Keyboard (arrows, Enter, Esc) and every connected controller (D-pad or left stick, A, B).
 void ReadNavInput() {
+    if (ImGui::GetIO().WantTextInput) return;   // typing in a text box (Enter or a click ends it)
     const auto key = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
     if (key(ImGuiKey_UpArrow)) Nav(NavCmd::Up);
     if (key(ImGuiKey_DownArrow)) Nav(NavCmd::Down);
@@ -1205,6 +1229,8 @@ void ControllerHints(ImDrawList* draw, ImVec2 rightBottom) {
         if (clicked) {
             if (i == 0) {
                 Nav(NavCmd::Accept);
+            } else if (NetplayIsOpen()) {
+                NetplayBack();
             } else if (g_screen == Screen::Game) {
                 GoHome();
             }
@@ -1443,6 +1469,9 @@ std::string Elapsed(double seconds) {
 }
 
 // --- Vehicles behind the home screen's logos ----------------------------------------------------
+
+#include "netplay_menu.inc"
+bool NetplayIsOpen() { return g_net.open; }
 
 SDL_Texture* g_drawnVehicles[kGameCount] = {};   // until the game is set up (vehicles.cpp)
 
@@ -1701,19 +1730,24 @@ void DrawHome(float W, float H, float margin, float footer, double now) {
     // Logos centred a little above the middle of the window, with room for the lines under them.
     const float groupH = logoH + S(140);
     const float logoTop = std::max(areaTop, std::min(H * 0.42f - logoH * 0.5f, areaBottom - groupH));
+    // Network Play sits on the line between the games once both are set up.
+    const bool netplay = std::all_of(std::begin(g_installed), std::end(g_installed), [](bool b) { return b; });
     {
-        // A thin line between the two games that fades out at both ends.
+        // A thin line between the two games that fades out at both ends (broken around Network Play).
         const float x = std::round(W * 0.5f), top = logoTop - S(10), bottom = logoTop + groupH - S(10);
         const float mid = (top + bottom) * 0.5f, w = S(1.5f);
+        const float gapTop = netplay ? logoTop + logoH * 0.5f - S(54) : mid;
+        const float gapBottom = netplay ? logoTop + logoH * 0.5f + S(54) : mid;
         const ImU32 clear = IM_COL32(255, 240, 220, 0), solid = IM_COL32(255, 240, 220, 230);
         const ImU32 shadowClear = IM_COL32(10, 6, 4, 0), shadow = IM_COL32(10, 6, 4, 120);
-        draw->AddRectFilledMultiColor(ImVec2(x - w + S(1.5f), top + S(2)), ImVec2(x + w + S(1.5f), mid + S(2)), shadowClear,
+        draw->AddRectFilledMultiColor(ImVec2(x - w + S(1.5f), top + S(2)), ImVec2(x + w + S(1.5f), gapTop + S(2)), shadowClear,
                                       shadowClear, shadow, shadow);
-        draw->AddRectFilledMultiColor(ImVec2(x - w + S(1.5f), mid + S(2)), ImVec2(x + w + S(1.5f), bottom + S(2)), shadow, shadow,
+        draw->AddRectFilledMultiColor(ImVec2(x - w + S(1.5f), gapBottom + S(2)), ImVec2(x + w + S(1.5f), bottom + S(2)), shadow, shadow,
                                       shadowClear, shadowClear);
-        draw->AddRectFilledMultiColor(ImVec2(x - w, top), ImVec2(x + w, mid), clear, clear, solid, solid);
-        draw->AddRectFilledMultiColor(ImVec2(x - w, mid), ImVec2(x + w, bottom), solid, solid, clear, clear);
+        draw->AddRectFilledMultiColor(ImVec2(x - w, top), ImVec2(x + w, gapTop), clear, clear, solid, solid);
+        draw->AddRectFilledMultiColor(ImVec2(x - w, gapBottom), ImVec2(x + w, bottom), solid, solid, clear, clear);
     }
+    if (netplay) DrawNetplayButton(ImVec2(std::round(W * 0.5f), logoTop + logoH * 0.5f));
     for (int i = 0; i < kGameCount; ++i) {
         DrawGameColumn(i, margin + colW * (i + 0.5f), colW, logoTop, logoH, now);
     }
@@ -1736,6 +1770,10 @@ void UiInit(SDL_Window* window, SDL_Renderer* renderer) {
     if (const char* screen = SDL_getenv("ET_LAUNCHER_SCREEN")) {
         const std::string name = screen;
         if (name == "truck" || name == "bots") EnterGame(name == "truck" ? GameId::Truck : GameId::Bots);
+        if (name == "netplay") {   // ET_LAUNCHER_NETSTEP=0..4 picks the step
+            NetplayOpen();
+            if (const char* step = SDL_getenv("ET_LAUNCHER_NETSTEP")) g_net.step = std::clamp(std::atoi(step), 0, int(kNetGoStep));
+        }
     }
     if (const char* page = SDL_getenv("ET_LAUNCHER_PAGE")) {
         const std::string name = page;
@@ -1862,7 +1900,9 @@ void UiFrame(float seconds) {
 
     const float margin = S(22);
     const float footer = S(26);
-    if (g_screen == Screen::Home) {
+    if (g_screen == Screen::Home && g_net.open) {
+        DrawNetplay(W, H, margin, footer);
+    } else if (g_screen == Screen::Home) {
         DrawHome(W, H, margin, footer, seconds);
     } else {
         DrawGameScreen(W, H, margin, footer);
@@ -1936,6 +1976,8 @@ void DrawGameScreen(float W, float H, float margin, float footer) {
 }
 
 } // namespace
+
+const std::vector<std::pair<std::string, std::string>>& UiNetplayEnv() { return g_net.env; }
 
 UiAction UiTakeAction() {
     const UiAction action = g_action;
